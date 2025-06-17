@@ -11,6 +11,8 @@ using AbstractFBCModels
 using Random
 using Logging
 
+import COBREXA: StandardModel
+
 export split_into_elementary_steps
 
 # Custom types for enzyme and intermediate metabolites

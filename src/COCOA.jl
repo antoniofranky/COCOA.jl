@@ -28,6 +28,9 @@ using Printf
 import COBREXA: C, A, J, D
 import Base: @kwdef
 
+# Get function from other modules 
+include("preprocessing/ModelPreparation.jl")
+
 export find_concordant_complexes, ConcordanceResults, activity_variability_analysis
 
 # Type aliases for clarity

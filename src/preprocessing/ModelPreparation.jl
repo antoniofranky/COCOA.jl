@@ -12,6 +12,11 @@ using SparseArrays
 using LinearAlgebra
 using Logging
 
+import COBREXA: StandardModel
+
+include("elementary_steps.jl")
+using .elementary_steps
+
 export prepare_model_for_concordance,
     split_into_elementary_steps,
     standardize_bounds!,
@@ -77,10 +82,6 @@ function prepare_model_for_concordance(
     # Step 5: Split into elementary steps (if requested)
     if split_elementary
         @info "Step 5: Splitting reactions into elementary steps"
-
-        # Import the function
-        include("elementary_steps.jl")
-        using .ElementarySteps
 
         working_model = ElementarySteps.split_into_elementary_steps(
             working_model,
