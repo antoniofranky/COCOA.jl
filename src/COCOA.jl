@@ -1,611 +1,786 @@
-
 """
     module COCOA
 
-Concordance analysis for metabolic networks integrated with COBREXA.
+COnstraint-based COncordance Analysis for metabolic networks - optimized for large-scale models.
 
-This module implements methods for identifying concordant complexes in metabolic
-networks as described in Küken et al. (2022). Two complexes are concordant if their
-activities maintain a constant ratio across all steady-state flux distributions.
+This module implements memory-efficient methods for identifying concordant complexes in metabolic
+networks. Optimized for models with >30,000 complexes and reactions on HPC clusters with
+SharedArrays support for single-node parallelism.
 """
 module COCOA
 
 using COBREXA
 using AbstractFBCModels
-using SBMLFBCModels
 using ConstraintTrees
-using JuMP
-using GLPK, HiGHS, Gurobi
 using SparseArrays
 using LinearAlgebra
 using Distributed
+using SharedArrays
 using DataFrames
 using Statistics
 using Random
-using ProgressMeter
-using Printf
+using JuMP
+using DocStringExtensions
 
-import COBREXA: C, A, J, D
-import Base: @kwdef
-
-# Get function from other modules 
+include("preprocessing/ElementarySteps.jl")
 include("preprocessing/ModelPreparation.jl")
+using .ElementarySteps
+using .ModelPreparation
 
-export find_concordant_complexes, ConcordanceResults, activity_variability_analysis
+# Configuration constants
+const DEFAULT_BATCH_SIZE = 1000
+const DEFAULT_STAGE_SIZE = 50000
+const DEFAULT_SAMPLE_BATCH_SIZE = 100
+const DEFAULT_CORRELATION_THRESHOLD = 0.85
+const DEFAULT_TOLERANCE = 1e-9
+const MAX_MEMORY_PER_WORKER = 2e9  # 2GB per worker default
 
-# Type aliases for clarity
-const Maybe{T} = Union{Nothing,T}
+# Re-export main functions
+export concordance_constraints, concordance_analysis
+export split_into_elementary_steps
+export prepare_model_for_concordance
+export ConcordanceConfig, ConcordanceTracker
 
 """
-    ComplexInfo
-
-Lightweight structure for complex representation optimized for HPC.
+Configuration for concordance analysis with memory and performance optimizations.
 """
-struct ComplexInfo
-    id::String
-    metabolite_idxs::Vector{Int32}
+Base.@kwdef struct ConcordanceConfig
+    tolerance::Float64 = DEFAULT_TOLERANCE
+    correlation_threshold::Float64 = DEFAULT_CORRELATION_THRESHOLD
+    sample_size::Int = 1000
+    sample_batch_size::Int = DEFAULT_SAMPLE_BATCH_SIZE
+    concordance_batch_size::Int = DEFAULT_BATCH_SIZE
+    stage_size::Int = DEFAULT_STAGE_SIZE
+    max_memory_per_worker::Float64 = MAX_MEMORY_PER_WORKER
+    reduce_model::Bool = false
+    use_shared_arrays::Bool = true  # Enable SharedArrays by default
+    min_size_for_sharing::Int = 1_000_000  # Share arrays > 1MB
+    min_valid_samples::Int = 10  # Minimum samples for correlation
+    seed::Union{Int,Nothing} = 42
+end
+
+"""
+Internal representation of a complex with memory-efficient storage.
+"""
+struct Complex
+    id::Symbol
+    metabolite_indices::Vector{Int32}
     stoichiometry::Vector{Float32}
     hash::UInt64
 
-    function ComplexInfo(met_idxs::Vector{<:Integer}, stoich::Vector{<:Real}, met_ids::Vector{String})
+    function Complex(id::Symbol, met_idxs::Vector{<:Integer}, stoich::Vector{<:Real})
+        # Ensure canonical ordering
         perm = sortperm(met_idxs)
         sorted_idxs = Int32.(met_idxs[perm])
         sorted_stoich = Float32.(stoich[perm])
-
-        # Generate unique ID
-        id = join(["$(isinteger(c) ? Int(c) : c)_$(met_ids[idx])"
-                   for (idx, c) in zip(sorted_idxs, sorted_stoich)], "+")
-
         h = hash((sorted_idxs, sorted_stoich))
         new(id, sorted_idxs, sorted_stoich, h)
     end
 end
 
-Base.hash(c::ComplexInfo, h::UInt) = hash(c.hash, h)
-Base.:(==)(c1::ComplexInfo, c2::ComplexInfo) = c1.hash == c2.hash &&
-                                               c1.metabolite_idxs == c2.metabolite_idxs && c1.stoichiometry == c2.stoichiometry
-
 """
-    ConcordanceResults
-
-Container for concordance analysis results.
+Shared sparse matrix structure optimized for single-node parallelism.
+All processes share the same memory - no duplication!
 """
-@kwdef struct ConcordanceResults
-    complexes::DataFrame
-    pairs::DataFrame
-    modules::DataFrame
-    metadata::Dict{String,Any}
-end
+struct SharedSparseMatrix
+    m::Int
+    n::Int
+    colptr::SharedArray{Int32,1}
+    rowval::SharedArray{Int32,1}
+    nzval::SharedArray{Float32,1}
 
-"""
-    ConcordanceTracker
+    function SharedSparseMatrix(A::SparseMatrixCSC)
+        m, n = size(A)
 
-Efficient disjoint-set data structure with path compression and union by rank,
-including non-concordance tracking for transitivity-based filtering.
-"""
-mutable struct ConcordanceTracker
-    parent::Dict{String,String}
-    rank::Dict{String,Int}
-    non_concordant::Set{Set{String}}
+        # Create shared arrays
+        colptr = SharedArray{Int32}(length(A.colptr))
+        rowval = SharedArray{Int32}(length(A.rowval))
+        nzval = SharedArray{Float32}(length(A.nzval))
 
-    ConcordanceTracker() = new(Dict{String,String}(), Dict{String,Int}(), Set{Set{String}}())
-end
+        # Fill shared arrays (only on process 1)
+        if myid() == 1
+            colptr[:] = Int32.(A.colptr)
+            rowval[:] = Int32.(A.rowval)
+            nzval[:] = Float32.(A.nzval)
+        end
 
-function make_set!(tracker::ConcordanceTracker, x::String)
-    if !haskey(tracker.parent, x)
-        tracker.parent[x] = x
-        tracker.rank[x] = 0
+        # Wait for all processes to see the data
+        @sync @distributed for p in workers()
+            nothing
+        end
+
+        new(m, n, colptr, rowval, nzval)
     end
 end
 
-function find_set!(tracker::ConcordanceTracker, x::String)
+# Convert back to SparseMatrixCSC when needed
+function SparseArrays.sparse(S::SharedSparseMatrix)
+    SparseMatrixCSC(S.m, S.n,
+        convert(Vector{Int}, S.colptr),
+        convert(Vector{Int}, S.rowval),
+        convert(Vector{Float64}, S.nzval))
+end
+
+"""
+Memory-efficient storage for sparse complex-reaction incidence matrix.
+"""
+struct SparseIncidenceMatrix
+    n_complexes::Int
+    n_reactions::Int
+    colptr::Vector{Int32}
+    rowval::Vector{Int32}
+    nzval::Vector{Float32}
+
+    function SparseIncidenceMatrix(I::Vector{Int}, J::Vector{Int}, V::Vector{<:Real}, m::Int, n::Int)
+        A = sparse(I, J, Float32.(V), m, n)
+        new(m, n, Int32.(A.colptr), Int32.(A.rowval), Float32.(A.nzval))
+    end
+end
+
+# Convert back to SparseMatrixCSC when needed
+function SparseArrays.sparse(A::SparseIncidenceMatrix)
+    SparseMatrixCSC(A.n_complexes, A.n_reactions,
+        Int.(A.colptr), Int.(A.rowval), Float64.(A.nzval))
+end
+
+"""
+Tracks both concordant and non-concordant relationships between complexes with transitivity.
+
+This structure efficiently tracks:
+1. Concordant relationships using Union-Find
+2. Non-concordant relationships with transitivity inference
+3. Module membership caching for fast lookups
+"""
+mutable struct ConcordanceTracker
+    # Union-Find for concordant relationships
+    parent::Vector{Int}
+    rank::Vector{Int}
+
+    # Maps complex ID to index
+    id_to_idx::Dict{Symbol,Int}
+    idx_to_id::Vector{Symbol}
+
+    # Non-concordance tracking
+    non_concordant_pairs::Set{Tuple{Int,Int}}  # Direct non-concordant pairs
+    non_concordant_modules::Dict{Tuple{Int,Int},Bool}  # Module relationship cache
+    module_members_cache::Dict{Int,Vector{Int}}  # Module membership cache
+
+    function ConcordanceTracker(complex_ids::Vector{Symbol})
+        n = length(complex_ids)
+        parent = collect(1:n)
+        rank = zeros(Int, n)
+        id_to_idx = Dict(id => i for (i, id) in enumerate(complex_ids))
+        idx_to_id = copy(complex_ids)
+
+        new(parent, rank, id_to_idx, idx_to_id,
+            Set{Tuple{Int,Int}}(),
+            Dict{Tuple{Int,Int},Bool}(),
+            Dict{Int,Vector{Int}}())
+    end
+end
+
+"""
+Shared concordance tracker that maintains consistency across processes.
+"""
+mutable struct SharedConcordanceTracker
+    # Shared arrays for Union-Find
+    parent::SharedArray{Int32,1}
+    rank::SharedArray{Int32,1}
+
+    # Complex mappings (read-only after initialization)
+    id_to_idx::Dict{Symbol,Int}
+    idx_to_id::Vector{Symbol}
+
+    # Non-concordance tracking (requires synchronization)
+    non_concordant_matrix::SharedArray{Bool,2}
+
+    # Lock for thread-safe updates (on process 1)
+    update_lock::ReentrantLock
+
+    function SharedConcordanceTracker(complex_ids::Vector{Symbol})
+        n = length(complex_ids)
+
+        # Initialize shared arrays
+        parent = SharedArray{Int32}(n)
+        rank = SharedArray{Int32}(n)
+        non_concordant_matrix = SharedArray{Bool}(n, n)
+
+        # Initialize on process 1
+        if myid() == 1
+            parent[:] = 1:n
+            rank[:] .= 0
+            non_concordant_matrix[:] .= false
+        end
+
+        # Synchronize
+        @sync @distributed for p in workers()
+            nothing
+        end
+
+        # Create mappings (same on all processes)
+        id_to_idx = Dict(id => i for (i, id) in enumerate(complex_ids))
+        idx_to_id = copy(complex_ids)
+
+        new(parent, rank, id_to_idx, idx_to_id,
+            non_concordant_matrix, ReentrantLock())
+    end
+end
+
+# Union-Find operations for regular tracker
+function find_set!(tracker::ConcordanceTracker, x::Union{Int,Int32})
     if tracker.parent[x] != x
-        tracker.parent[x] = find_set!(tracker, tracker.parent[x])  # Path compression
+        tracker.parent[x] = find_set!(tracker, tracker.parent[x])
     end
     return tracker.parent[x]
 end
 
-function union_sets!(tracker::ConcordanceTracker, x::String, y::String)
+function union_sets!(tracker::ConcordanceTracker, x::Union{Int,Int32}, y::Union{Int,Int32})
     root_x = find_set!(tracker, x)
     root_y = find_set!(tracker, y)
 
     if root_x == root_y
-        return
+        return root_x
     end
 
     # Union by rank
     if tracker.rank[root_x] < tracker.rank[root_y]
         tracker.parent[root_x] = root_y
+        new_root = root_y
     elseif tracker.rank[root_x] > tracker.rank[root_y]
         tracker.parent[root_y] = root_x
+        new_root = root_x
     else
         tracker.parent[root_y] = root_x
         tracker.rank[root_x] += 1
-    end
-end
-
-function add_non_concordant!(tracker::ConcordanceTracker, x::String, y::String)
-    push!(tracker.non_concordant, Set([x, y]))
-end
-
-function is_non_concordant(tracker::ConcordanceTracker, x::String, y::String)
-    Set([x, y]) in tracker.non_concordant
-end
-
-"""
-    extract_complexes(model::A.AbstractFBCModel; kwargs...)
-
-Extract complexes from model reactions using efficient sparse operations.
-"""
-function extract_complexes(model::A.AbstractFBCModel; tolerance=1e-10)
-    rxn_ids = A.reactions(model)
-    met_ids = A.metabolites(model)
-    n_rxns = length(rxn_ids)
-
-    complexes = ComplexInfo[]
-    complex_dict = Dict{UInt64,Int}()
-
-    # Build incidence matrix entries
-    I_rows = Int32[]
-    I_cols = Int32[]
-    I_vals = Int8[]
-
-    # Process reactions in parallel chunks if possible
-    for (ridx, rxn_id) in enumerate(rxn_ids)
-        rxn_stoich = A.reaction_stoichiometry(model, rxn_id)
-        isempty(rxn_stoich) && continue
-
-        # Separate substrates and products
-        substrate_mets = Int32[]
-        substrate_stoich = Float32[]
-        product_mets = Int32[]
-        product_stoich = Float32[]
-
-        for (met_id, coef) in rxn_stoich
-            met_idx = findfirst(==(met_id), met_ids)
-            isnothing(met_idx) && continue
-
-            if coef < -tolerance
-                push!(substrate_mets, met_idx)
-                push!(substrate_stoich, -coef)
-            elseif coef > tolerance
-                push!(product_mets, met_idx)
-                push!(product_stoich, coef)
-            end
-        end
-
-        # Process substrate complex
-        if !isempty(substrate_mets)
-            sub_complex = ComplexInfo(substrate_mets, substrate_stoich, met_ids)
-            complex_idx = get!(complex_dict, sub_complex.hash) do
-                push!(complexes, sub_complex)
-                length(complexes)
-            end
-            push!(I_rows, complex_idx)
-            push!(I_cols, ridx)
-            push!(I_vals, -1)
-        end
-
-        # Process product complex
-        if !isempty(product_mets)
-            prod_complex = ComplexInfo(product_mets, product_stoich, met_ids)
-            complex_idx = get!(complex_dict, prod_complex.hash) do
-                push!(complexes, prod_complex)
-                length(complexes)
-            end
-            push!(I_rows, complex_idx)
-            push!(I_cols, ridx)
-            push!(I_vals, 1)
-        end
+        new_root = root_x
     end
 
-    # Build sparse incidence matrix
-    A_matrix = sparse(I_rows, I_cols, I_vals, length(complexes), n_rxns)
+    # Update caches when merging
+    on_module_merged!(tracker, root_x, root_y, new_root)
 
-    return complexes, A_matrix
+    return new_root
 end
 
-"""
-    find_trivially_balanced_complexes(complexes, A_matrix, model)
-
-Find complexes that are trivially balanced due to unique metabolites.
-"""
-function find_trivially_balanced_complexes(complexes::Vector{ComplexInfo}, A_matrix, model::A.AbstractFBCModel)
-    n_metabolites = length(A.metabolites(model))
-
-    # Count metabolite appearances in complexes
-    met_complex_counts = zeros(Int, n_metabolites)
-    met_to_complex = Dict{Int,Int}()
-
-    for (cidx, complex) in enumerate(complexes)
-        for met_idx in complex.metabolite_idxs
-            met_complex_counts[met_idx] += 1
-            if met_complex_counts[met_idx] == 1
-                met_to_complex[met_idx] = cidx
-            end
-        end
+# Shared tracker operations
+function find_set!(tracker::SharedConcordanceTracker, x::Union{Int,Int32})
+    # Use atomic operations for thread safety
+    parent_x = tracker.parent[x]
+    if parent_x != x
+        # Path compression with atomic update
+        root = find_set!(tracker, parent_x)
+        tracker.parent[x] = root
+        return root
     end
-
-    # Find trivially balanced (metabolites in only one complex)
-    trivially_balanced = Set{String}()
-    for (met_idx, count) in enumerate(met_complex_counts)
-        if count == 1 && haskey(met_to_complex, met_idx)
-            push!(trivially_balanced, complexes[met_to_complex[met_idx]].id)
-        end
-    end
-
-    return trivially_balanced
+    return x
 end
 
-"""
-    find_trivially_concordant_complexes(complexes, model)
-
-Find trivially concordant complex pairs.
-"""
-function find_trivially_concordant_complexes(complexes::Vector{ComplexInfo}, model::A.AbstractFBCModel)
-    n_metabolites = length(A.metabolites(model))
-
-    # Map metabolites to complexes
-    met_to_complexes = [Int[] for _ in 1:n_metabolites]
-    for (cidx, complex) in enumerate(complexes)
-        for met_idx in complex.metabolite_idxs
-            push!(met_to_complexes[met_idx], cidx)
-        end
+function union_sets!(tracker::SharedConcordanceTracker, x::Union{Int,Int32}, y::Union{Int,Int32})
+    # Only process 1 should modify
+    if myid() != 1
+        return
     end
 
-    # Find trivially concordant pairs
-    trivially_concordant = Set{Set{String}}()
-    for complex_idxs in met_to_complexes
-        if length(complex_idxs) == 2
-            c1_id = complexes[complex_idxs[1]].id
-            c2_id = complexes[complex_idxs[2]].id
-            push!(trivially_concordant, Set([c1_id, c2_id]))
-        end
+    root_x = find_set!(tracker, x)
+    root_y = find_set!(tracker, y)
+
+    if root_x == root_y
+        return root_x
     end
 
-    return trivially_concordant
-end
-
-"""
-    activity_variability_analysis_cobrexa(model, complexes, A_matrix; kwargs...)
-
-Perform activity variability analysis using COBREXA's optimized implementation.
-"""
-function activity_variability_analysis(
-    model::A.AbstractFBCModel,
-    complexes::Vector{ComplexInfo},
-    A_matrix;
-    optimizer=HiGHS.Optimizer,
-    workers=D.workers(),
-    batch_size=100
-)
-    n_complexes = length(complexes)
-
-    # Build constraint system
-    constraints = COBREXA.flux_balance_constraints(model)
-
-    # Prepare complex activities
-    complex_activities = [
-        let row = A_matrix[i, :]
-            C.sum(
-                coef * constraints.fluxes[Symbol(rxn)].value
-                for (rxn, coef) in zip(A.reactions(model), row) if coef != 0;
-                init=zero(C.LinearValue)
-            )
-        end for i in 1:n_complexes
-    ]
-
-    # Run variability analysis
-    results = COBREXA.constraints_variability(
-        constraints,
-        complex_activities;
-        optimizer=optimizer,
-        workers=workers
-    )
-
-    # Categorize complexes
-    categories = Dict{String,Set{String}}(
-        "balanced" => Set{String}(),
-        "positive" => Set{String}(),
-        "negative" => Set{String}(),
-        "unrestricted" => Set{String}()
-    )
-
-    activity_ranges = Dict{String,Tuple{Float64,Float64}}()
-
-    for (i, (min_val, max_val)) in enumerate(eachrow(results))
-        complex_id = complexes[i].id
-
-        if isnothing(min_val) || isnothing(max_val)
-            activity_ranges[complex_id] = (0.0, 0.0)
-            push!(categories["balanced"], complex_id)
-        else
-            activity_ranges[complex_id] = (min_val, max_val)
-
-            if abs(min_val) < 1e-9 && abs(max_val) < 1e-9
-                push!(categories["balanced"], complex_id)
-            elseif min_val >= -1e-9 && max_val > 1e-9
-                push!(categories["positive"], complex_id)
-            elseif min_val < -1e-9 && max_val <= 1e-9
-                push!(categories["negative"], complex_id)
-            else
-                push!(categories["unrestricted"], complex_id)
-            end
-        end
-    end
-
-    return categories, activity_ranges
-end
-
-"""
-    check_concordance_charnes_cooper(model, ci, cj, ci_idx, cj_idx, A_matrix; kwargs...)
-
-Check concordance using Charnes-Cooper transformation.
-"""
-function check_concordance_charnes_cooper(
-    model::A.AbstractFBCModel,
-    ci::ComplexInfo,
-    cj::ComplexInfo,
-    ci_idx::Int,
-    cj_idx::Int,
-    A_matrix;
-    direction=:positive,
-    optimizer=HiGHS.Optimizer,
-    tolerance=1e-9
-)
-    # Get model information
-    rxn_ids = A.reactions(model)
-    met_ids = A.metabolites(model)
-    n_reactions = length(rxn_ids)
-    n_metabolites = length(met_ids)
-
-    # Create a fresh optimization model
-    om = J.Model(optimizer)
-    J.set_silent(om)
-
-    # Create w variables (representing v * t where v are the original fluxes)
-    J.@variable(om, w[1:n_reactions])
-
-    # Create transformation variable t
-    J.@variable(om, t)
-
-    # Constrain t based on direction
-    if direction == :positive
-        J.set_lower_bound(t, tolerance)  # t > 0
+    # Union by rank with atomic operations
+    if tracker.rank[root_x] < tracker.rank[root_y]
+        tracker.parent[root_x] = root_y
+        return root_y
+    elseif tracker.rank[root_x] > tracker.rank[root_y]
+        tracker.parent[root_y] = root_x
+        return root_x
     else
-        J.set_upper_bound(t, -tolerance)  # t < 0
+        tracker.parent[root_y] = root_x
+        tracker.rank[root_x] += 1
+        return root_x
     end
-
-    # Get stoichiometry matrix and bounds
-    S = A.stoichiometry(model)
-    lbs, ubs = A.bounds(model)
-
-    # Add steady-state constraint: S * w = 0
-    # Since w = v * t and S * v = 0, we have S * w = S * (v * t) = (S * v) * t = 0 * t = 0
-    for i in 1:n_metabolites
-        J.@constraint(om, sum(S[i, j] * w[j] for j in 1:n_reactions if S[i, j] != 0) == 0)
-    end
-
-    # Complex j activity constraint: sum(A[j,k] * w[k]) = ±1
-    # Since w = v * t, this gives us: sum(A[j,k] * v[k] * t) = ±1
-    # Which means: activity_j * t = ±1
-    target = direction == :positive ? 1.0 : -1.0
-    cj_activity = sum(A_matrix[cj_idx, k] * w[k] for k in 1:n_reactions if A_matrix[cj_idx, k] != 0)
-    J.@constraint(om, cj_activity == target)
-
-    # Add Charnes-Cooper bounds
-    # Original bounds: lb ≤ v ≤ ub
-    # With w = v * t:
-    #   If t > 0: lb * t ≤ w ≤ ub * t
-    #   If t < 0: ub * t ≤ w ≤ lb * t (inequalities flip)
-    for i in 1:n_reactions
-        lb = lbs[i]
-        ub = ubs[i]
-
-        if direction == :positive
-            # t > 0 case
-            if isfinite(lb)
-                J.@constraint(om, w[i] >= lb * t)
-            end
-            if isfinite(ub)
-                J.@constraint(om, w[i] <= ub * t)
-            end
-        else
-            # t < 0 case: bounds flip
-            if isfinite(ub)
-                J.@constraint(om, w[i] >= ub * t)
-            end
-            if isfinite(lb)
-                J.@constraint(om, w[i] <= lb * t)
-            end
-        end
-    end
-
-    # Objective: optimize complex i activity = sum(A[i,k] * w[k])
-    ci_activity = sum(A_matrix[ci_idx, k] * w[k] for k in 1:n_reactions if A_matrix[ci_idx, k] != 0)
-
-    # Find minimum
-    J.@objective(om, Min, ci_activity)
-    J.optimize!(om)
-
-    if J.termination_status(om) != J.OPTIMAL && J.termination_status(om) != J.LOCALLY_SOLVED
-        @debug "Minimization failed" status = J.termination_status(om)
-        return false, nothing
-    end
-
-    min_val = J.objective_value(om)
-
-    # Find maximum
-    J.@objective(om, Max, ci_activity)
-    J.optimize!(om)
-
-    if J.termination_status(om) != J.OPTIMAL && J.termination_status(om) != J.LOCALLY_SOLVED
-        @debug "Maximization failed" status = J.termination_status(om)
-        return false, nothing
-    end
-
-    max_val = J.objective_value(om)
-
-    # Check if the activity is constant (within tolerance)
-    is_concordant = isapprox(min_val, max_val, atol=tolerance)
-
-    # Lambda is the constant ratio
-    # Since complex_j_activity = ±1 and complex_i_activity = lambda * complex_j_activity
-    # We have lambda = complex_i_activity / complex_j_activity = complex_i_activity / (±1)
-    lambda_value = is_concordant ? min_val : nothing
-
-    return is_concordant, lambda_value
 end
 
-"""
-    sampling_prefilter(model, complexes, A_matrix, active_complexes; kwargs...)
+# Generic operations that work for both trackers
+function are_concordant(tracker::Union{ConcordanceTracker,SharedConcordanceTracker}, x::Int, y::Int)
+    return find_set!(tracker, x) == find_set!(tracker, y)
+end
 
-Use flux sampling for correlation-based prefiltering with efficient memory usage.
-"""
-function sampling_prefilter(
-    model::A.AbstractFBCModel,
-    complexes::Vector{ComplexInfo},
-    A_matrix,
-    active_complexes::Set{String},
-    categories::Dict{String,Set{String}};
-    n_samples=10,
-    correlation_threshold=0.85,
-    optimizer=HiGHS.Optimizer,
-    workers=D.workers(),
-    seed=UInt64(42)
-)
-    active_mask = [c.id in active_complexes for c in complexes]
-    active_indices = findall(active_mask)
-    n_active = length(active_indices)
+# Non-concordance operations for regular tracker
+function add_non_concordant!(tracker::ConcordanceTracker, x::Union{Int,Int32}, y::Union{Int,Int32})
+    # Store in canonical order
+    pair = x < y ? (x, y) : (y, x)
+    if pair ∉ tracker.non_concordant_pairs
+        push!(tracker.non_concordant_pairs, pair)
 
-    if n_active < 2
-        return Tuple{String,String,Symbol}[]
+        # Update module relationship cache
+        rep_x = find_set!(tracker, x)
+        rep_y = find_set!(tracker, y)
+        if rep_x != rep_y
+            tracker.non_concordant_modules[(rep_x, rep_y)] = true
+            tracker.non_concordant_modules[(rep_y, rep_x)] = true
+        end
+    end
+end
+
+function is_non_concordant(tracker::ConcordanceTracker, x::Union{Int,Int32}, y::Union{Int,Int32})
+    # Direct check
+    pair = x < y ? (x, y) : (y, x)
+    if pair in tracker.non_concordant_pairs
+        return true
     end
 
-    # Sample fluxes using COBREXA with improved parameters
-    samples = COBREXA.flux_sample(
-        model;
-        n_chains=n_samples,  # Fewer chains for efficiency
-        collect_iterations=[max(1, n_samples ÷ 10)],
-        optimizer=optimizer,
-        workers=workers,
-        seed=seed
-    )
+    # Get representatives
+    rep_x = find_set!(tracker, x)
+    rep_y = find_set!(tracker, y)
 
-    if isnothing(samples)
-        @warn "Flux sampling failed, falling back to direct candidate generation"
-        return Tuple{String,String,Symbol}[]
+    # Same module check
+    if rep_x == rep_y
+        return false
     end
 
-    # Get reaction symbols in consistent order
-    rxn_symbols = Symbol.(A.reactions(model))
-    n_reactions = length(rxn_symbols)
-
-    # Convert samples to matrix efficiently
-    sample_matrix = Matrix{Float64}(undef, n_reactions, length(samples[rxn_symbols[1]]))
-    for (i, rxn) in enumerate(rxn_symbols)
-        sample_matrix[i, :] = samples[rxn]
+    # Cached module relationship
+    if get(tracker.non_concordant_modules, (rep_x, rep_y), false)
+        return true
     end
 
-    # Process in batches to avoid memory issues with large matrices
-    batch_size = min(50, n_active)  # Process complexes in batches
-    candidates = Tuple{String,String,Symbol}[]
-    tolerance = 1e-9
+    # Transitivity check
+    ensure_module_cached!(tracker, rep_x)
+    ensure_module_cached!(tracker, rep_y)
 
-    # Track statistics for correlation calculation
-    complex_stats = Dict{String,Dict{String,Any}}()
-
-    for batch_start in 1:batch_size:n_active
-        batch_end = min(batch_start + batch_size - 1, n_active)
-        batch_indices = active_indices[batch_start:batch_end]
-
-        # Calculate activities for this batch
-        A_batch = A_matrix[batch_indices, :]
-        activities = A_batch * sample_matrix
-
-        # Process each complex in the batch
-        for (local_i, global_i) in enumerate(batch_indices)
-            ci = complexes[global_i]
-            ci_activities = activities[local_i, :]
-
-            # Skip if no variation
-            if all(abs(x - ci_activities[1]) < tolerance for x in ci_activities)
-                continue
+    for m1 in tracker.module_members_cache[rep_x]
+        for m2 in tracker.module_members_cache[rep_y]
+            pair_check = m1 < m2 ? (m1, m2) : (m2, m1)
+            if pair_check in tracker.non_concordant_pairs
+                tracker.non_concordant_modules[(rep_x, rep_y)] = true
+                tracker.non_concordant_modules[(rep_y, rep_x)] = true
+                return true
             end
-
-            # Store statistics for this complex
-            valid_mask = abs.(ci_activities) .> tolerance
-            if sum(valid_mask) < 5  # Need minimum samples
-                continue
-            end
-
-            valid_activities = ci_activities[valid_mask]
-            complex_stats[ci.id] = Dict(
-                "mean" => mean(valid_activities),
-                "std" => std(valid_activities),
-                "n_valid" => sum(valid_mask),
-                "activities" => valid_activities
-            )
         end
     end
 
-    # Now calculate correlations between all valid complexes
-    valid_complex_ids = collect(keys(complex_stats))
-    n_valid = length(valid_complex_ids)
+    return false
+end
 
-    @info "Calculating correlations for $(n_valid) complexes with sufficient variation"
+# Non-concordance operations for shared tracker
+function add_non_concordant!(tracker::SharedConcordanceTracker, x::Int, y::Int)
+    if myid() == 1
+        tracker.non_concordant_matrix[x, y] = true
+        tracker.non_concordant_matrix[y, x] = true
+    end
+end
 
-    for i in 1:n_valid
-        ci_id = valid_complex_ids[i]
-        ci_stats = complex_stats[ci_id]
+function is_non_concordant(tracker::SharedConcordanceTracker, x::Int, y::Int)
+    # Direct check
+    if tracker.non_concordant_matrix[x, y]
+        return true
+    end
 
-        for j in (i+1):n_valid
-            cj_id = valid_complex_ids[j]
-            cj_stats = complex_stats[cj_id]
+    # Check module transitivity
+    rep_x = find_set!(tracker, x)
+    rep_y = find_set!(tracker, y)
 
-            # Calculate correlation between valid samples only
-            ci_act = ci_stats["activities"]
-            cj_act = cj_stats["activities"]
+    if rep_x == rep_y
+        return false
+    end
 
-            # Find overlapping valid samples
-            min_len = min(length(ci_act), length(cj_act))
-            if min_len < 5
-                continue
-            end
-
-            # Use same indices for both (assuming sampling is synchronized)
-            correlation = cor(ci_act[1:min_len], cj_act[1:min_len])
-
-            if abs(correlation) >= correlation_threshold
-                # Determine directions based on activity ranges of cj
-                directions = _determine_directions_from_ranges(cj_id, categories)
-
-                for direction in directions
-                    push!(candidates, (ci_id, cj_id, direction))
+    # Check if any pair between modules is non-concordant
+    n = length(tracker.parent)
+    for i in 1:n
+        if find_set!(tracker, i) == rep_x
+            for j in 1:n
+                if find_set!(tracker, j) == rep_y && tracker.non_concordant_matrix[i, j]
+                    return true
                 end
             end
         end
     end
 
-    return candidates
+    return false
+end
+
+function ensure_module_cached!(tracker::ConcordanceTracker, rep::Int)
+    if !haskey(tracker.module_members_cache, rep)
+        members = Int[]
+        for i in 1:length(tracker.parent)
+            if find_set!(tracker, i) == rep
+                push!(members, i)
+            end
+        end
+        tracker.module_members_cache[rep] = members
+    end
+end
+
+function on_module_merged!(tracker::ConcordanceTracker, old_rep1::Int, old_rep2::Int, new_rep::Int)
+    # Clear old caches
+    delete!(tracker.module_members_cache, old_rep1)
+    delete!(tracker.module_members_cache, old_rep2)
+
+    # Update module relationships
+    keys_to_remove = Tuple{Int,Int}[]
+    new_relationships = Set{Tuple{Int,Int}}()
+
+    for (key, _) in tracker.non_concordant_modules
+        rep1, rep2 = key
+
+        if rep1 == old_rep1 || rep1 == old_rep2
+            push!(keys_to_remove, key)
+            if rep2 != old_rep1 && rep2 != old_rep2
+                push!(new_relationships, (new_rep, rep2))
+            end
+        elseif rep2 == old_rep1 || rep2 == old_rep2
+            push!(keys_to_remove, key)
+            push!(new_relationships, (rep1, new_rep))
+        end
+    end
+
+    for key in keys_to_remove
+        delete!(tracker.non_concordant_modules, key)
+    end
+
+    for (rep1, rep2) in new_relationships
+        tracker.non_concordant_modules[(rep1, rep2)] = true
+        tracker.non_concordant_modules[(rep2, rep1)] = true
+    end
+end
+
+function clear_module_cache!(tracker::ConcordanceTracker)
+    empty!(tracker.module_members_cache)
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Find trivially balanced complexes (containing metabolites that appear in only one complex).
+"""
+function find_trivially_balanced_complexes(
+    complexes::Vector{Complex}
+)::Set{Symbol}
+    # Build metabolite participation mapping
+    metabolite_participation = Dict{Int32,Vector{Int}}()
+
+    for (cidx, complex) in enumerate(complexes)
+        for met_idx in complex.metabolite_indices
+            if !haskey(metabolite_participation, met_idx)
+                metabolite_participation[met_idx] = Int[]
+            end
+            push!(metabolite_participation[met_idx], cidx)
+        end
+    end
+
+    balanced_complexes = Set{Symbol}()
+
+    # Find metabolites that appear in only one complex
+    for (met_idx, complex_indices) in metabolite_participation
+        if length(complex_indices) == 1
+            complex_idx = complex_indices[1]
+            push!(balanced_complexes, complexes[complex_idx].id)
+        end
+    end
+
+    return balanced_complexes
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Find trivially concordant complexes based on shared metabolites.
+Two complexes are trivially concordant if they share a metabolite that 
+appears in exactly those two complexes.
+"""
+function find_trivially_concordant_pairs(complexes::Vector{Complex})::Set{Tuple{Int,Int}}
+    # Build metabolite participation mapping
+    metabolite_participation = Dict{Int32,Vector{Int}}()
+
+    for (cidx, complex) in enumerate(complexes)
+        for met_idx in complex.metabolite_indices
+            if !haskey(metabolite_participation, met_idx)
+                metabolite_participation[met_idx] = Int[]
+            end
+            push!(metabolite_participation[met_idx], cidx)
+        end
+    end
+
+    trivial_pairs = Set{Tuple{Int,Int}}()
+
+    # Find metabolites that appear in exactly two complexes
+    for (met_idx, complex_indices) in metabolite_participation
+        if length(complex_indices) == 2
+            c1_idx, c2_idx = complex_indices[1], complex_indices[2]
+            # Store in canonical order
+            pair = c1_idx < c2_idx ? (c1_idx, c2_idx) : (c2_idx, c1_idx)
+            push!(trivial_pairs, pair)
+        end
+    end
+
+    return trivial_pairs
 end
 """
-    _determine_directions_from_ranges(complex_id, activity_ranges, categories)
+$(TYPEDSIGNATURES)
 
-Determine which directions to test based on complex activity constraints.
+Extract complexes and build incidence matrix with optional shared memory.
 """
-function _determine_directions_from_ranges(complex_id::String, categories::Dict)
-    directions = Symbol[]
+function extract_complexes_and_incidence(model::AbstractFBCModels.AbstractFBCModel;
+    config::ConcordanceConfig=ConcordanceConfig())
+    rxns = AbstractFBCModels.reactions(model)
+    mets = AbstractFBCModels.metabolites(model)
+    n_rxns = length(rxns)
+    n_mets = length(mets)
 
-    # Check which category the complex belongs to
-    if complex_id in categories["positive"]
-        # Complex can only have positive activity
-        push!(directions, :positive)
-    elseif complex_id in categories["negative"]
-        # Complex can only have negative activity  
-        push!(directions, :negative)
+    # Use Int32 for indices to save memory
+    met_idx_map = Dict{String,Int32}(m => Int32(i) for (i, m) in enumerate(mets))
+
+    complexes = Complex[]
+    complex_dict = Dict{UInt64,Int32}()
+
+    # Pre-allocate for incidence matrix construction
+    I_rows = Int32[]
+    J_cols = Int32[]
+    V_vals = Float32[]
+
+    sizehint!(I_rows, 2 * n_rxns)
+    sizehint!(J_cols, 2 * n_rxns)
+    sizehint!(V_vals, 2 * n_rxns)
+
+    # Process reactions in batches
+    batch_size = min(1000, n_rxns)
+    for batch_start in 1:batch_size:n_rxns
+        batch_end = min(batch_start + batch_size - 1, n_rxns)
+
+        for ridx in batch_start:batch_end
+            rxn = rxns[ridx]
+            rxn_stoich = AbstractFBCModels.reaction_stoichiometry(model, rxn)
+
+            # Separate substrates and products
+            substrate_mets = Int32[]
+            substrate_stoich = Float32[]
+            product_mets = Int32[]
+            product_stoich = Float32[]
+
+            for (met, coeff) in rxn_stoich
+                met_idx = met_idx_map[met]
+                if coeff < 0
+                    push!(substrate_mets, met_idx)
+                    push!(substrate_stoich, -Float32(coeff))
+                elseif coeff > 0
+                    push!(product_mets, met_idx)
+                    push!(product_stoich, Float32(coeff))
+                end
+            end
+
+            # Process substrate complex
+            if !isempty(substrate_mets)
+                sub_complex = create_complex(substrate_mets, substrate_stoich, mets)
+                complex_idx = get!(complex_dict, sub_complex.hash) do
+                    push!(complexes, sub_complex)
+                    Int32(length(complexes))
+                end
+                push!(I_rows, complex_idx)
+                push!(J_cols, Int32(ridx))
+                push!(V_vals, -1.0f0)
+            end
+
+            # Process product complex
+            if !isempty(product_mets)
+                prod_complex = create_complex(product_mets, product_stoich, mets)
+                complex_idx = get!(complex_dict, prod_complex.hash) do
+                    push!(complexes, prod_complex)
+                    Int32(length(complexes))
+                end
+                push!(I_rows, complex_idx)
+                push!(J_cols, Int32(ridx))
+                push!(V_vals, 1.0f0)
+            end
+        end
+
+        if batch_end < n_rxns
+            GC.safepoint()
+        end
+    end
+
+    # Build sparse incidence matrix
+    A_sparse = sparse(Int.(I_rows), Int.(J_cols), V_vals, length(complexes), n_rxns)
+
+    # Use shared memory if enabled and beneficial
+    if config.use_shared_arrays && nworkers() > 0 &&
+       (nnz(A_sparse) * (sizeof(Int32) + sizeof(Float32)) > config.min_size_for_sharing)
+        A_matrix = SharedSparseMatrix(A_sparse)
     else
-        # Complex can have both positive and negative activity
+        A_matrix = SparseIncidenceMatrix(Int.(I_rows), Int.(J_cols), V_vals,
+            length(complexes), n_rxns)
+    end
+
+    return complexes, A_matrix, complex_dict
+end
+
+"""
+Create a complex from metabolite indices with memory-efficient ID generation.
+"""
+function create_complex(met_idxs::Vector{Int32}, stoich::Vector{Float32}, met_names::Vector{String})
+    id_parts = IOBuffer()
+    sorted_pairs = sort(collect(zip(met_idxs, stoich)))
+
+    for (i, (idx, coeff)) in enumerate(sorted_pairs)
+        i > 1 && write(id_parts, '+')
+        if isinteger(coeff)
+            write(id_parts, string(Int(coeff)), '_', met_names[idx])
+        else
+            write(id_parts, string(coeff), '_', met_names[idx])
+        end
+    end
+
+    id = Symbol(String(take!(id_parts)))
+    return Complex(id, Int32[p[1] for p in sorted_pairs], Float32[p[2] for p in sorted_pairs])
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Memory-efficient concordance constraints that work with large models.
+"""
+function concordance_constraints(
+    model::AbstractFBCModels.AbstractFBCModel;
+    modifications=Function[],
+    interface=nothing,
+    config::ConcordanceConfig=ConcordanceConfig()
+)
+    # Start with standard flux balance constraints
+    constraints = COBREXA.flux_balance_constraints(model; interface)
+
+    # Apply modifications
+    for mod in modifications
+        constraints = mod(constraints)
+    end
+
+    # Extract complexes with memory optimization
+    complexes, A_matrix, complex_dict = extract_complexes_and_incidence(model; config)
+
+    # Create complex activity variables
+    rxn_ids = Symbol.(AbstractFBCModels.reactions(model))
+    complex_activities = ConstraintTree()
+
+    # Build activities in batches
+    n_complexes = length(complexes)
+    batch_size = min(1000, n_complexes)
+
+    # Convert to appropriate sparse format
+    A_sparse = if isa(A_matrix, SharedSparseMatrix)
+        sparse(A_matrix)
+    else
+        sparse(A_matrix)
+    end
+
+    for batch_start in 1:batch_size:n_complexes
+        batch_end = min(batch_start + batch_size - 1, n_complexes)
+
+        for cidx in batch_start:batch_end
+            complex = complexes[cidx]
+
+            # Build activity as linear combination of fluxes
+            activity_value = ConstraintTrees.LinearValue(idxs=Int[], weights=Float64[])
+
+            # Get the row efficiently from the sparse matrix
+            row = A_sparse[cidx, :]
+            nz_indices = findnz(row)
+
+            for (idx, val) in zip(nz_indices[1], nz_indices[2])
+                if val != 0
+                    activity_value += val * constraints.fluxes[rxn_ids[idx]].value
+                end
+            end
+
+            complex_activities[complex.id] = ConstraintTrees.Constraint(
+                value=activity_value,
+                bound=ConstraintTrees.Between(-Inf, Inf)
+            )
+        end
+
+        GC.safepoint()
+    end
+
+    # Add to constraint tree
+    constraints[:complexes] = complex_activities
+    constraints[:_cocoa_metadata] = ConstraintTree(
+        :n_complexes => ConstraintTrees.Constraint(
+            value=ConstraintTrees.LinearValue(idxs=Int[], weights=Float64[])
+        )
+    )
+
+    return constraints
+end
+
+"""
+Streaming statistics accumulator for memory-efficient correlation calculation.
+"""
+mutable struct StreamingStats
+    n::Int64
+    mean::Float64
+    M2::Float64
+
+    StreamingStats() = new(0, 0.0, 0.0)
+end
+
+function update!(s::StreamingStats, x::Float64)
+    s.n += 1
+    delta = x - s.mean
+    s.mean += delta / s.n
+    s.M2 += delta * (x - s.mean)
+end
+
+variance(s::StreamingStats) = s.n > 1 ? s.M2 / (s.n - 1) : 0.0
+
+"""
+Streaming correlation accumulator.
+"""
+mutable struct StreamingCorrelation
+    n::Int64
+    mean_x::Float64
+    mean_y::Float64
+    cov_sum::Float64
+    var_x_sum::Float64
+    var_y_sum::Float64
+
+    StreamingCorrelation() = new(0, 0.0, 0.0, 0.0, 0.0, 0.0)
+end
+
+function update!(c::StreamingCorrelation, x::Float64, y::Float64)
+    c.n += 1
+
+    delta_x = x - c.mean_x
+    delta_y = y - c.mean_y
+
+    c.mean_x += delta_x / c.n
+    c.mean_y += delta_y / c.n
+
+    c.cov_sum += delta_x * (y - c.mean_y)
+    c.var_x_sum += delta_x * (x - c.mean_x)
+    c.var_y_sum += delta_y * (y - c.mean_y)
+end
+
+function correlation(c::StreamingCorrelation)
+    if c.n < 2 || c.var_x_sum ≈ 0 || c.var_y_sum ≈ 0
+        return 0.0
+    end
+    return c.cov_sum / sqrt(c.var_x_sum * c.var_y_sum)
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Determine which directions need to be tested based on complex activity patterns.
+"""
+function determine_directions(
+    c1_idx::Int, c2_idx::Int,
+    positive_complexes::Set{Int}, negative_complexes::Set{Int},
+    unrestricted_complexes::Set{Int}
+)::Set{Symbol}
+    directions = Set{Symbol}()
+
+    if c2_idx in positive_complexes
+        push!(directions, :positive)
+    elseif c2_idx in negative_complexes
+        push!(directions, :negative)
+    else  # unrestricted
         push!(directions, :positive)
         push!(directions, :negative)
     end
@@ -614,266 +789,801 @@ function _determine_directions_from_ranges(complex_id::String, categories::Dict)
 end
 
 """
-    process_concordance_stage(candidates, tracker, complexes, model, A_matrix; kwargs...)
+$(TYPEDSIGNATURES)
 
-Process a stage of concordance candidates with transitivity filtering.
+Test concordance using CORRECTED Charnes-Cooper transformation.
 """
-function process_concordance_stage(
-    candidates::Vector{Tuple{String,String,Symbol}},
-    tracker::ConcordanceTracker,
-    complexes::Vector{ComplexInfo},
-    model::A.AbstractFBCModel,
-    A_matrix;
-    batch_size=500,
-    optimizer=HiGHS.Optimizer,
-    workers=D.workers()
+function test_concordance_optimized(
+    model::JuMP.Model,
+    c1_idx::Int,
+    c2_idx::Int,
+    A_row1::SparseVector{Float64,Int},
+    A_row2::SparseVector{Float64,Int},
+    direction::Symbol;
+    tolerance::Float64=1e-9
 )
-    # Filter using transitivity
-    filtered = Tuple{String,String,Symbol}[]
-    complex_to_idx = Dict(c.id => i for (i, c) in enumerate(complexes))
+    n_reactions = length(A_row1)
 
-    for (ci_id, cj_id, direction) in candidates
-        # Skip if already connected
-        find_set!(tracker, ci_id) == find_set!(tracker, cj_id) && continue
+    # Pre-compute non-zero indices
+    nz1 = findnz(A_row1)
+    nz2 = findnz(A_row2)
 
-        # Skip if known non-concordant
-        is_non_concordant(tracker, ci_id, cj_id) && continue
-
-        push!(filtered, (ci_id, cj_id, direction))
-    end
-
-    @info "Filtered $(length(candidates)) to $(length(filtered)) using transitivity"
-
-    # Process in batches using COBREXA's screen
-    results = []
-
-    # Create batches
-    batches = [filtered[i:min(i + batch_size - 1, end)] for i in 1:batch_size:length(filtered)]
-
-    # Process batches using COBREXA's distributed infrastructure
-    batch_results = COBREXA.screen(batches; workers=workers) do batch
-        local_results = []
-        for (ci_id, cj_id, direction) in batch
-            ci_idx = complex_to_idx[ci_id]
-            cj_idx = complex_to_idx[cj_id]
-            ci = complexes[ci_idx]
-            cj = complexes[cj_idx]
-
-            is_concordant, lambda_val = check_concordance_charnes_cooper(
-                model, ci, cj, ci_idx, cj_idx, A_matrix;
-                direction=direction,
-                optimizer=optimizer
-            )
-
-            push!(local_results, (ci_id, cj_id, is_concordant, lambda_val))
+    # Clear any existing concordance constraints
+    for cname in [:w, :t, :c2_act, :bounds_l, :bounds_u]
+        if haskey(model, cname)
+            delete(model, model[cname])
+            unregister(model, cname)
         end
-        local_results
     end
 
-    # Flatten batch results
-    for batch_result in batch_results
-        append!(results, batch_result)
+    # Create transformed variables
+    @variable(model, w[1:n_reactions])
+    @variable(model, t)
+
+    # Direction constraint on t
+    if direction == :positive
+        @constraint(model, t >= tolerance)
+    else
+        @constraint(model, t <= -tolerance)
     end
 
-    # Update tracker
-    concordant_count = 0
-    for (ci_id, cj_id, is_concordant, lambda_val) in results
-        if is_concordant
-            union_sets!(tracker, ci_id, cj_id)
-            concordant_count += 1
+    # Extract bounds
+    x = model[:x]
+    lbs = [has_lower_bound(x[j]) ? lower_bound(x[j]) : -1e6 for j in 1:n_reactions]
+    ubs = [has_upper_bound(x[j]) ? upper_bound(x[j]) : 1e6 for j in 1:n_reactions]
+
+    # Complex c2 activity constraint
+    c2_expr = AffExpr(0.0)
+    for (idx, val) in zip(nz2[1], nz2[2])
+        add_to_expression!(c2_expr, val, w[idx])
+    end
+
+    target = direction == :positive ? 1.0 : -1.0
+    @constraint(model, c2_act, c2_expr == target)
+
+    # Charnes-Cooper bounds constraints
+    if direction == :positive
+        # For t > 0: w - vmin*t ≥ 0 and vmax*t - w ≥ 0
+        @constraint(model, bounds_l[j=1:n_reactions], w[j] - lbs[j] * t >= 0)
+        @constraint(model, bounds_u[j=1:n_reactions], ubs[j] * t - w[j] >= 0)
+    else
+        # For t < 0: w - vmax*t ≥ 0 and vmin*t - w ≥ 0
+        @constraint(model, bounds_l[j=1:n_reactions], w[j] - ubs[j] * t >= 0)
+        @constraint(model, bounds_u[j=1:n_reactions], lbs[j] * t - w[j] >= 0)
+    end
+
+    # Objective: optimize complex c1 activity
+    c1_expr = AffExpr(0.0)
+    for (idx, val) in zip(nz1[1], nz1[2])
+        add_to_expression!(c1_expr, val, w[idx])
+    end
+
+    # Test min and max
+    results = Dict{Symbol,Float64}()
+
+    for (sense, key) in [(JuMP.MIN_SENSE, :min), (JuMP.MAX_SENSE, :max)]
+        @objective(model, sense, c1_expr)
+        optimize!(model)
+
+        if termination_status(model) == OPTIMAL
+            results[key] = objective_value(model)
         else
-            add_non_concordant!(tracker, ci_id, cj_id)
+            # Clean up before returning
+            for cname in [:w, :t, :c2_act, :bounds_l, :bounds_u]
+                if haskey(model, cname)
+                    delete(model, model[cname])
+                    unregister(model, cname)
+                end
+            end
+            return (false, nothing)
         end
     end
 
-    @info "Stage complete: found $concordant_count concordant pairs"
-    return results
+    # Check concordance
+    is_concordant = isapprox(results[:min], results[:max]; atol=tolerance)
+    lambda_value = is_concordant ? results[:min] : nothing
+
+    # Clean up
+    for cname in [:w, :t, :c2_act, :bounds_l, :bounds_u]
+        if haskey(model, cname)
+            delete(model, model[cname])
+            unregister(model, cname)
+        end
+    end
+
+    return (is_concordant, lambda_value)
 end
 
 """
-    find_concordant_complexes(model::A.AbstractFBCModel; kwargs...)
-
-Main entry point for concordance analysis using COBREXA-style implementation.
+Pair priority information for sorting and filtering.
 """
-function find_concordant_complexes(
-    model::A.AbstractFBCModel;
-    optimizer=HiGHS.Optimizer,
-    workers=D.workers(),
-    sample_size::Maybe{Int}=1000,
-    correlation_threshold=0.85,
-    max_iterations=10,
-    stage_size=10000,
-    batch_size=500,
-    seed=42
+struct PairPriority
+    c1_idx::Int
+    c2_idx::Int
+    directions::Set{Symbol}
+    correlation::Float64
+    n_samples::Int
+    is_high_confidence::Bool
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Perform streaming correlation analysis with proper filtering:
+- Include pairs with high correlation (above threshold)
+- Include pairs with insufficient samples or failed correlation
+- Filter out pairs with sufficient samples but low correlation
+- Filter out trivially concordant pairs already identified
+"""
+function streaming_correlation_filter(
+    model::AbstractFBCModels.AbstractFBCModel,
+    complexes::Vector{Complex},
+    A_matrix::Union{SparseIncidenceMatrix,SharedSparseMatrix},
+    balanced_complexes::Set{Symbol},
+    positive_complexes::Set{Int},
+    negative_complexes::Set{Int},
+    unrestricted_complexes::Set{Int},
+    trivial_pairs::Set{Tuple{Int,Int}};  # Added trivial_pairs parameter
+    optimizer,
+    settings=[],
+    config::ConcordanceConfig=ConcordanceConfig()
 )
-    start_time = time()
-    seed = UInt64(seed)
-    @info "Starting concordance analysis" optimizer = optimizer workers = length(workers)
-
-    # Step 1: Extract complexes
-    complexes, A_matrix = extract_complexes(model)
     n_complexes = length(complexes)
-    n_metabolites = length(A.metabolites(model))
+    n_reactions = isa(A_matrix, SharedSparseMatrix) ? A_matrix.n : A_matrix.n_reactions
 
-    @info "Extracted $n_complexes complexes from $(length(A.reactions(model))) reactions"
-
-    # Step 2: Find trivial relationships
-    trivially_balanced = find_trivially_balanced_complexes(complexes, A_matrix, model)
-    trivially_concordant = find_trivially_concordant_complexes(complexes, model)
-
-    @info "Found $(length(trivially_balanced)) trivially balanced complexes"
-    @info "Found $(length(trivially_concordant)) trivially concordant pairs"
-
-    # Step 3: Activity variability analysis
-    categories, activity_ranges = activity_variability_analysis(
-        model, complexes, A_matrix;
-        optimizer=optimizer,
-        workers=workers
-    )
-    @info "Activity variability analysis complete"
-    @info "Balanced complexes: $(length(categories["balanced"]))"
-    @info "Positive complexes: $(length(categories["positive"]))"
-    @info "Negative complexes: $(length(categories["negative"]))"
-    @info "Unrestricted complexes: $(length(categories["unrestricted"]))"
-    # Step 4: Initialize concordance tracker
-    tracker = ConcordanceTracker()
-    for complex in complexes
-        make_set!(tracker, complex.id)
-    end
-
-    # Add trivial concordances
-    for pair in trivially_concordant
-        c1, c2 = collect(pair)
-        union_sets!(tracker, c1, c2)
-    end
-
-    # Add balanced concordances
-    balanced_list = collect(categories["balanced"])
-    if length(balanced_list) > 1
-        for i in 2:length(balanced_list)
-            union_sets!(tracker, balanced_list[1], balanced_list[i])
+    # Filter out balanced complexes
+    active_indices = Int32[]
+    for (i, c) in enumerate(complexes)
+        if !(c.id in balanced_complexes)
+            push!(active_indices, Int32(i))
         end
     end
 
-    # Step 5: Generate candidates
-    active_complexes = setdiff(
-        Set(c.id for c in complexes),
-        categories["balanced"]
-    )
+    n_active = length(active_indices)
+    if n_active == 0
+        return PairPriority[]
+    end
 
-    candidates = if !isnothing(sample_size) && sample_size > 0
-        sampling_prefilter(
-            model, complexes, A_matrix, active_complexes, categories;
-            n_samples=sample_size,
-            correlation_threshold=correlation_threshold,
-            optimizer=optimizer,
-            workers=workers,
-            seed=seed
-        )
-    else
-        # Generate all non-trivial candidates
-        all_candidates = Tuple{String,String,Symbol}[]
-        for (i, ci) in enumerate(complexes)
-            ci.id in categories["balanced"] && continue
-            for (j, cj) in enumerate(complexes)
-                i >= j && continue
-                cj.id in categories["balanced"] && continue
-                Set([ci.id, cj.id]) in trivially_concordant && continue
+    # Initialize streaming statistics
+    stats = Dict{Int32,StreamingStats}()
+    for i in active_indices
+        stats[i] = StreamingStats()
+    end
 
-                # Determine direction based on categories
-                if cj.id in categories["positive"]
-                    push!(all_candidates, (ci.id, cj.id, :positive))
-                elseif cj.id in categories["negative"]
-                    push!(all_candidates, (ci.id, cj.id, :negative))
-                else
-                    push!(all_candidates, (ci.id, cj.id, :positive))
-                    push!(all_candidates, (ci.id, cj.id, :negative))
+    # Correlation accumulator for all pairs
+    pair_corr = Dict{Tuple{Int32,Int32},StreamingCorrelation}()
+
+    # Track sampling success
+    sampling_failed = false
+    total_valid_samples = 0
+
+    # Process samples in batches
+    n_batches = ceil(Int, config.sample_size / config.sample_batch_size)
+
+    @info "Starting streaming correlation analysis" n_active n_batches
+
+    for batch_idx in 1:n_batches
+        batch_size = min(config.sample_batch_size,
+            config.sample_size - (batch_idx - 1) * config.sample_batch_size)
+
+        # Generate flux samples
+        samples = try
+            COBREXA.flux_sample(
+                model;
+                seed=hash((config.seed, batch_idx)),
+                objective_bound=0.99,
+                n_chains=4,
+                collect_iterations=100,  # 100 samples per chain, after burn-in
+                optimizer=optimizer,
+                settings=settings
+            )
+        catch err
+            @warn "Sampling failed, marking batch as failed" batch_idx err exception = (err, catch_backtrace())
+            sampling_failed = true
+            nothing
+        end
+
+        if isnothing(samples)
+            continue
+        end
+
+        # Convert to appropriate sparse format
+        A_sparse = isa(A_matrix, SharedSparseMatrix) ? sparse(A_matrix) : sparse(A_matrix)
+
+        # Compute activities for this batch
+        activities = Dict{Int32,Vector{Float64}}()
+
+        for (idx, cidx) in enumerate(active_indices)
+            acts = Float64[]
+
+            # Compute activity for each sample
+            for sample_idx in 1:batch_size
+                activity = 0.0
+
+                # Get sparse row
+                row = A_sparse[cidx, :]
+                nz_indices = findnz(row)
+
+                for (col, val) in zip(nz_indices[1], nz_indices[2])
+                    activity += val * samples[sample_idx, col]
+                end
+
+                push!(acts, activity)
+            end
+
+            activities[cidx] = acts
+
+            # Update streaming statistics
+            for act in acts
+                update!(stats[cidx], act)
+            end
+        end
+
+        # Update pair correlations for ALL pairs
+        for i in 1:n_active
+            ci_idx = active_indices[i]
+            ci_acts = activities[ci_idx]
+
+            for j in (i+1):n_active
+                cj_idx = active_indices[j]
+                cj_acts = activities[cj_idx]
+
+                # Check if this is a trivially concordant pair
+                pair = Int(ci_idx) < Int(cj_idx) ?
+                       (Int(ci_idx), Int(cj_idx)) :
+                       (Int(cj_idx), Int(ci_idx))
+
+                # Skip trivially concordant pairs
+                if pair in trivial_pairs
+                    continue
+                end
+
+                # Initialize correlation accumulator if needed
+                pair_key = (ci_idx, cj_idx)
+                if !haskey(pair_corr, pair_key)
+                    pair_corr[pair_key] = StreamingCorrelation()
+                end
+
+                # Update with valid samples
+                for k in 1:batch_size
+                    if abs(ci_acts[k]) > config.tolerance || abs(cj_acts[k]) > config.tolerance
+                        update!(pair_corr[pair_key], ci_acts[k], cj_acts[k])
+                        total_valid_samples += 1
+                    end
                 end
             end
         end
-        all_candidates
+
+        activities = nothing
+        GC.gc(false)
     end
 
-    @info "Generated $(length(candidates)) candidate pairs"
+    # Generate candidate pairs with priority information
+    candidate_pairs = PairPriority[]
 
-    # Step 6: Iterative concordance testing
-    all_results = []
-    iteration = 1
+    # Process pairs with filtering:
+    # - Skip trivially concordant pairs
+    # - Keep high correlation pairs (above threshold)
+    # - Keep pairs with insufficient samples
+    # - Filter out low correlation pairs
+    for i in 1:n_active
+        ci_idx = active_indices[i]
 
-    while !isempty(candidates) && iteration <= max_iterations
-        @info "Iteration $iteration with $(length(candidates)) candidates"
+        for j in (i+1):n_active
+            cj_idx = active_indices[j]
 
-        # Take a stage
-        stage_candidates = candidates[1:min(stage_size, length(candidates))]
-        remaining = candidates[min(stage_size + 1, length(candidates)):end]
+            # Check if this is a trivially concordant pair
+            pair = Int(ci_idx) < Int(cj_idx) ?
+                   (Int(ci_idx), Int(cj_idx)) :
+                   (Int(cj_idx), Int(ci_idx))
 
-        # Process stage
-        stage_results = process_concordance_stage(
-            stage_candidates, tracker, complexes, model, A_matrix;
-            batch_size=batch_size,
-            optimizer=optimizer,
-            workers=workers
-        )
-
-        append!(all_results, stage_results)
-        candidates = remaining
-        iteration += 1
-    end
-
-    # Step 7: Extract modules and create results
-    modules = extract_modules_from_tracker(tracker, complexes, categories["balanced"])
-
-    # Create result DataFrames
-    results = create_result_dataframes(
-        complexes, modules, all_results,
-        categories, activity_ranges,
-        trivially_concordant, tracker
-    )
-
-    elapsed = time() - start_time
-    @info "Concordance analysis complete" time = elapsed modules = length(modules)
-
-    return results
-end
-
-"""
-    extract_modules_from_tracker(tracker, complexes, balanced_set)
-
-Extract concordance modules from the disjoint set tracker.
-"""
-function extract_modules_from_tracker(
-    tracker::ConcordanceTracker,
-    complexes::Vector{ComplexInfo},
-    balanced_set::Set{String}
-)
-    modules = Dict{String,Set{String}}()
-
-    # Group by representative
-    groups = Dict{String,Vector{String}}()
-    for complex in complexes
-        root = find_set!(tracker, complex.id)
-        if !haskey(groups, root)
-            groups[root] = String[]
-        end
-        push!(groups[root], complex.id)
-    end
-
-    # Create modules
-    if !isempty(balanced_set)
-        modules["balanced"] = balanced_set
-    end
-
-    module_idx = 1
-    for (root, members) in groups
-        if length(members) > 1
-            member_set = Set(members)
-
-            # Skip if it's the balanced module
-            if !isempty(balanced_set) && member_set ⊆ balanced_set
+            # Skip trivially concordant pairs
+            if pair in trivial_pairs
                 continue
             end
 
-            modules["module$module_idx"] = member_set
+            # Determine directions based on complex types
+            directions = determine_directions(
+                Int(ci_idx), Int(cj_idx),
+                positive_complexes, negative_complexes, unrestricted_complexes
+            )
+
+            # Get correlation info if available
+            pair_key = (ci_idx, cj_idx)
+            corr_stats = get(pair_corr, pair_key, nothing)
+
+            # Decide whether to include this pair
+            include_pair = false
+            is_high_confidence = false
+            corr = 0.0
+            n_samples = 0
+
+            if !isnothing(corr_stats)
+                n_samples = corr_stats.n
+
+                if n_samples >= config.min_valid_samples
+                    # Sufficient samples - check correlation
+                    corr = correlation(corr_stats)
+                    is_high_confidence = abs(corr) >= config.correlation_threshold
+                    include_pair = is_high_confidence  # Only include if correlation is high
+                else
+                    # Insufficient samples - include anyway
+                    include_pair = true
+                end
+            else
+                # No correlation data - include
+                include_pair = true
+            end
+
+            # Only add pairs that should be included
+            if include_pair
+                push!(candidate_pairs, PairPriority(
+                    Int(ci_idx), Int(cj_idx), directions,
+                    corr, n_samples, is_high_confidence
+                ))
+            end
+        end
+    end
+
+    # Log statistics
+    high_corr_count = count(p -> p.is_high_confidence, candidate_pairs)
+    low_sample_count = count(p -> p.n_samples < config.min_valid_samples, candidate_pairs)
+    filtered_count = n_active * (n_active - 1) / 2 - length(candidate_pairs) - length(trivial_pairs)
+    skipped_trivial = length(trivial_pairs)
+
+    @info "Correlation filtering complete" total_pairs = length(candidate_pairs) high_correlation = high_corr_count low_samples = low_sample_count filtered_pairs = filtered_count skipped_trivial = skipped_trivial sampling_failed = sampling_failed
+
+    return candidate_pairs
+end
+"""
+$(TYPEDSIGNATURES)
+
+Process concordance analysis in stages with transitivity filtering.
+Processes high-confidence pairs first, then uncertain pairs.
+"""
+function process_in_stages(
+    model::AbstractFBCModels.AbstractFBCModel,
+    constraints::ConstraintTree,
+    complexes::Vector{Complex},
+    candidate_priorities::Vector{PairPriority},
+    A_matrix::Union{SparseIncidenceMatrix,SharedSparseMatrix},
+    concordance_tracker::Union{ConcordanceTracker,SharedConcordanceTracker},
+    A_rows::Union{Vector{SparseVector{Float64,Int}},Nothing}=nothing;
+    optimizer,
+    settings=[],
+    workers=Distributed.workers(),
+    config::ConcordanceConfig=ConcordanceConfig()
+)
+    stage_results = Dict{String,Any}(
+        "stages_completed" => 0,
+        "pairs_processed" => 0,
+        "concordant_pairs" => Set{Tuple{Int,Int}}(),
+        "non_concordant_pairs" => 0,
+        "skipped_by_transitivity" => 0,
+        "optimization_results" => Dict{Tuple{Int,Int,Symbol},Float64}()
+    )
+
+    # Sort pairs by priority: high-confidence first, then by correlation
+    sorted_pairs = sort(candidate_priorities,
+        by=p -> (-p.is_high_confidence, -abs(p.correlation), p.c1_idx, p.c2_idx))
+
+    # Convert to simple format for processing
+    remaining_pairs = [(p.c1_idx, p.c2_idx, p.directions) for p in sorted_pairs]
+
+    stage_count = 0
+
+    while !isempty(remaining_pairs)
+        stage_count += 1
+
+        # Clear cache if using regular tracker
+        if isa(concordance_tracker, ConcordanceTracker)
+            clear_module_cache!(concordance_tracker)
+        end
+
+        @info "Starting stage $stage_count" remaining = length(remaining_pairs)
+
+        # Filter out pairs that can be inferred
+        filtered_pairs = Tuple{Int,Int,Set{Symbol}}[]
+
+        for (c1_idx, c2_idx, directions) in remaining_pairs
+            # Get tracker indices
+            if isa(concordance_tracker, SharedConcordanceTracker)
+                tracker_idx1 = concordance_tracker.id_to_idx[complexes[c1_idx].id]
+                tracker_idx2 = concordance_tracker.id_to_idx[complexes[c2_idx].id]
+            else
+                tracker_idx1 = concordance_tracker.id_to_idx[complexes[c1_idx].id]
+                tracker_idx2 = concordance_tracker.id_to_idx[complexes[c2_idx].id]
+            end
+
+            # Skip if already concordant
+            if are_concordant(concordance_tracker, tracker_idx1, tracker_idx2)
+                continue
+            end
+
+            # Skip if known non-concordant
+            if is_non_concordant(concordance_tracker, tracker_idx1, tracker_idx2)
+                stage_results["skipped_by_transitivity"] += 1
+                continue
+            end
+
+            push!(filtered_pairs, (c1_idx, c2_idx, directions))
+        end
+
+        if isempty(filtered_pairs)
+            break
+        end
+
+        # Take stage batch
+        stage_size = min(config.stage_size, length(filtered_pairs))
+        stage_pairs = filtered_pairs[1:stage_size]
+
+        @info "Processing stage $stage_count" pairs = length(stage_pairs)
+
+        # Process pairs
+        batch_results = process_concordance_batch(
+            constraints, complexes, stage_pairs, A_matrix, A_rows;
+            optimizer=optimizer, settings=settings,
+            workers=workers, config=config
+        )
+
+        # Update tracker with results
+        new_concordant = 0
+        for result in batch_results
+            c1_idx, c2_idx, direction, is_concordant, lambda = result
+
+            # Get tracker indices
+            if isa(concordance_tracker, SharedConcordanceTracker)
+                tracker_idx1 = concordance_tracker.id_to_idx[complexes[c1_idx].id]
+                tracker_idx2 = concordance_tracker.id_to_idx[complexes[c2_idx].id]
+            else
+                tracker_idx1 = concordance_tracker.id_to_idx[complexes[c1_idx].id]
+                tracker_idx2 = concordance_tracker.id_to_idx[complexes[c2_idx].id]
+            end
+
+            if is_concordant
+                union_sets!(concordance_tracker, tracker_idx1, tracker_idx2)
+                push!(stage_results["concordant_pairs"], (c1_idx, c2_idx))
+                new_concordant += 1
+
+                if !isnothing(lambda)
+                    stage_results["optimization_results"][(c1_idx, c2_idx, direction)] = lambda
+                end
+            else
+                add_non_concordant!(concordance_tracker, tracker_idx1, tracker_idx2)
+                stage_results["non_concordant_pairs"] += 1
+            end
+        end
+
+        stage_results["pairs_processed"] += length(stage_pairs)
+        stage_results["stages_completed"] = stage_count
+
+        @info "Stage $stage_count complete" new_concordant = new_concordant
+
+        # Update remaining pairs
+        remaining_pairs = filtered_pairs[(stage_size+1):end]
+    end
+
+    return stage_results
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Process a batch of concordance tests.
+"""
+function process_concordance_batch(
+    constraints::ConstraintTree,
+    complexes::Vector{Complex},
+    batch_pairs::Vector{Tuple{Int,Int,Set{Symbol}}},
+    A_matrix::Union{SparseIncidenceMatrix,SharedSparseMatrix},
+    A_rows::Union{Vector{SparseVector{Float64,Int}},Nothing}=nothing;
+    optimizer,
+    settings=[],
+    workers=Distributed.workers(),
+    config::ConcordanceConfig=ConcordanceConfig()
+)
+    # Get sparse matrix representation
+    A_sparse = isa(A_matrix, SharedSparseMatrix) ? sparse(A_matrix) : sparse(A_matrix)
+    n_complexes = size(A_sparse, 1)
+
+    # Create A_rows if not provided
+    if isnothing(A_rows)
+        A_rows = Vector{SparseVector{Float64,Int}}(undef, n_complexes)
+        for i in 1:n_complexes
+            A_rows[i] = A_sparse[i, :]
+        end
+    end
+
+    # Expand pairs by direction
+    expanded_pairs = []
+    for (c1_idx, c2_idx, directions) in batch_pairs
+        for direction in directions
+            push!(expanded_pairs, (c1_idx, c2_idx, direction))
+        end
+    end
+
+    # Test concordance using COBREXA's parallel infrastructure
+    results = COBREXA.screen_optimization_model(
+        constraints,
+        expanded_pairs;
+        optimizer,
+        settings,
+        workers
+    ) do om, (c1_idx, c2_idx, direction)
+        is_conc, lambda = test_concordance_optimized(
+            om, c1_idx, c2_idx,
+            A_rows[c1_idx], A_rows[c2_idx],
+            direction;
+            tolerance=config.tolerance
+        )
+        return (c1_idx, c2_idx, direction, is_conc, lambda)
+    end
+
+    # Aggregate results by pair
+    pair_results = Dict{Tuple{Int,Int},Dict{Symbol,Tuple{Bool,Any}}}()
+
+    for (c1_idx, c2_idx, direction, is_conc, lambda) in results
+        pair_key = (c1_idx, c2_idx)
+        if !haskey(pair_results, pair_key)
+            pair_results[pair_key] = Dict{Symbol,Tuple{Bool,Any}}()
+        end
+        pair_results[pair_key][direction] = (is_conc, lambda)
+    end
+
+    # Check if all required directions are concordant
+    final_results = []
+    for ((c1_idx, c2_idx), dir_results) in pair_results
+        all_concordant = all(r[1] for r in values(dir_results))
+        # Get lambda from any concordant direction
+        lambda = nothing
+        for (is_conc, lam) in values(dir_results)
+            if is_conc && !isnothing(lam)
+                lambda = lam
+                break
+            end
+        end
+
+        push!(final_results, (c1_idx, c2_idx, :both, all_concordant, lambda))
+    end
+
+    return final_results
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Main concordance analysis function optimized for large models and HPC execution.
+"""
+function concordance_analysis(
+    model::AbstractFBCModels.CanonicalModel.Model;
+    modifications=Function[],
+    optimizer,
+    settings=[],
+    workers=Distributed.workers(),
+    config::ConcordanceConfig=ConcordanceConfig()
+)
+    start_time = time()
+
+    @info "Starting concordance analysis" n_workers = length(workers) config
+
+    # Build constraints
+    constraints = concordance_constraints(model; modifications, config)
+
+    # Extract complexes with potential shared memory 
+    complexes, A_matrix, _ = extract_complexes_and_incidence(model; config)
+    n_complexes = length(complexes)
+    complex_ids = [c.id for c in complexes]
+
+    @info "Model statistics" n_complexes n_reactions = (isa(A_matrix, SharedSparseMatrix) ? A_matrix.n : A_matrix.n_reactions)
+
+    # Step 1: Find trivially balanced complexes
+    @info "Finding trivially balanced complexes"
+    trivially_balanced = find_trivially_balanced_complexes(complexes)
+    @info "Found trivially balanced complexes" n_balanced = length(trivially_balanced)
+
+    # Step 2: Find trivially concordant pairs
+    @info "Finding trivially concordant pairs"
+    trivial_pairs = find_trivially_concordant_pairs(complexes)
+    @info "Found trivially concordant pairs" n_pairs = length(trivial_pairs)
+
+    # Step 3: Identify balanced complexes via FVA (in addition to trivially balanced)
+    @info "Identifying balanced complexes via FVA"
+
+    # Create complex activity expressions for FVA
+    complex_expr = Dict{Symbol,ConstraintTrees.Constraint}()
+
+    batch_size = min(1000, n_complexes)
+    for batch_start in 1:batch_size:n_complexes
+        batch_end = min(batch_start + batch_size - 1, n_complexes)
+
+        for cidx in batch_start:batch_end
+            c = complexes[cidx]
+            complex_expr[c.id] = constraints.complexes[c.id]
+        end
+    end
+
+    # Run FVA on complexes
+    complex_ranges = COBREXA.constraints_variability(
+        constraints,
+        ConstraintTree(complex_expr);
+        optimizer,
+        settings,
+        workers
+    )
+
+    # Classify complexes by activity patterns
+    balanced_complexes = Set{Symbol}()
+    positive_complexes = Set{Int}()
+    negative_complexes = Set{Int}()
+    unrestricted_complexes = Set{Int}()
+
+    # Start with trivially balanced complexes
+    union!(balanced_complexes, trivially_balanced)
+
+    for (i, c) in enumerate(complexes)
+        cid = c.id
+
+        # Skip if already identified as trivially balanced
+        if cid in trivially_balanced
+            continue
+        end
+
+        if haskey(complex_ranges, cid)
+            min_val, max_val = complex_ranges[cid]
+            if abs(min_val) < config.tolerance && abs(max_val) < config.tolerance
+                push!(balanced_complexes, cid)
+            elseif min_val >= -config.tolerance  # Can only be positive
+                push!(positive_complexes, i)
+            elseif max_val <= config.tolerance  # Can only be negative
+                push!(negative_complexes, i)
+            else
+                push!(unrestricted_complexes, i)
+            end
+        else
+            push!(unrestricted_complexes, i)
+        end
+    end
+
+    @info "Complex classification" balanced = length(balanced_complexes) trivially_balanced = length(trivially_balanced) positive = length(positive_complexes) negative = length(negative_complexes) unrestricted = length(unrestricted_complexes)
+
+    # Step 3: Initialize concordance tracker (with shared memory if enabled)
+    concordance_tracker = if config.use_shared_arrays && nworkers() > 0
+        SharedConcordanceTracker(complex_ids)
+    else
+        ConcordanceTracker(complex_ids)
+    end
+
+    # Add trivially concordant pairs
+    for (c1_idx, c2_idx) in trivial_pairs
+        tracker_idx1 = concordance_tracker.id_to_idx[complexes[c1_idx].id]
+        tracker_idx2 = concordance_tracker.id_to_idx[complexes[c2_idx].id]
+        union_sets!(concordance_tracker, tracker_idx1, tracker_idx2)
+    end
+
+    # Step 4: Generate candidate pairs using streaming correlation
+    @info "Generating candidate pairs via streaming correlation"
+
+    candidate_priorities = streaming_correlation_filter(
+        model, complexes, A_matrix, balanced_complexes,
+        positive_complexes, negative_complexes, unrestricted_complexes, trivial_pairs;
+        optimizer=optimizer,
+        settings=settings,
+        config=config
+    )
+
+    @info "Candidate pairs identified" n_pairs = length(candidate_priorities)
+
+    # Step 5: Process in stages with transitivity
+    @info "Processing concordance tests in stages"
+
+    stage_results = process_in_stages(
+        model, constraints, complexes, candidate_priorities, A_matrix,
+        concordance_tracker;
+        optimizer=optimizer, settings=settings,
+        workers=workers, config=config
+    )
+
+    # Step 6: Build concordance modules
+    @info "Building concordance modules"
+
+    modules = extract_modules(concordance_tracker, balanced_complexes)
+
+    # Step 7: Prepare results
+    complexes_df = DataFrame(
+        :complex_id => [c.id for c in complexes],
+        :n_metabolites => [length(c.metabolite_indices) for c in complexes],
+        :is_balanced => [c.id in balanced_complexes for c in complexes],
+        :is_trivially_balanced => [c.id in trivially_balanced for c in complexes],
+        :module => [get_module_id(c.id, modules) for c in complexes]
+    )
+
+    # Add activity ranges
+    if !isempty(complex_ranges)
+        complexes_df.min_activity = [get(complex_ranges, c.id, (NaN, NaN))[1] for c in complexes]
+        complexes_df.max_activity = [get(complex_ranges, c.id, (NaN, NaN))[2] for c in complexes]
+    end
+
+    modules_df = DataFrame(
+        module_id=collect(String.(keys(modules))),
+        size=[length(m) for m in values(modules)],
+        complexes=[join(String.(m), ", ") for m in values(modules)]
+    )
+
+    lambda_df = DataFrame(
+        c1_idx=Int[],
+        c2_idx=Int[],
+        direction=Symbol[],
+        lambda=Float64[]
+    )
+
+    for ((c1_idx, c2_idx, direction), lambda) in stage_results["optimization_results"]
+        push!(lambda_df, (c1_idx, c2_idx, direction, lambda))
+    end
+
+    elapsed = time() - start_time
+
+    stats = Dict(
+        "n_complexes" => n_complexes,
+        "n_balanced" => length(balanced_complexes),
+        "n_trivially_balanced" => length(trivially_balanced),
+        "n_trivial_pairs" => length(trivial_pairs),
+        "n_candidate_pairs" => length(candidate_priorities),
+        "n_concordant_pairs" => length(stage_results["concordant_pairs"]),
+        "n_non_concordant_pairs" => stage_results["non_concordant_pairs"],
+        "n_skipped_transitivity" => stage_results["skipped_by_transitivity"],
+        "n_modules" => length(modules),
+        "stages_completed" => stage_results["stages_completed"],
+        "elapsed_time" => elapsed
+    )
+
+    @info "Concordance analysis complete" stats
+
+    return (
+        complexes=complexes_df,
+        modules=modules_df,
+        lambdas=lambda_df,
+        complex_ranges=complex_ranges,
+        stats=stats
+    )
+end
+
+"""
+Extract modules from concordance tracker.
+"""
+function extract_modules(tracker::Union{ConcordanceTracker,SharedConcordanceTracker}, balanced_complexes::Set{Symbol})
+    # Get all disjoint sets
+    groups = Dict{Int,Vector{Int}}()
+    n = length(tracker.parent)
+
+    for i in 1:n
+        root = find_set!(tracker, i)
+        if !haskey(groups, root)
+            groups[root] = Int[]
+        end
+        push!(groups[root], i)
+    end
+
+    # Create modules
+    modules = Dict{Symbol,Set{Symbol}}()
+
+    # Add balanced module if exists
+    if !isempty(balanced_complexes)
+        modules[:balanced] = balanced_complexes
+    end
+
+    # Add other modules
+    module_idx = 1
+    for (root, members) in groups
+        if length(members) > 1
+            complex_ids = Set(tracker.idx_to_id[i] for i in members)
+
+            # Skip if subset of balanced
+            if !isempty(balanced_complexes) && issubset(complex_ids, balanced_complexes)
+                continue
+            end
+
+            module_id = Symbol("module_$module_idx")
+            modules[module_id] = complex_ids
             module_idx += 1
         end
     end
@@ -882,83 +1592,42 @@ function extract_modules_from_tracker(
 end
 
 """
-    create_result_dataframes(...)
-
-Create result DataFrames from analysis results.
+Get module ID for a complex.
 """
-function create_result_dataframes(
-    complexes::Vector{ComplexInfo},
-    modules::Dict{String,Set{String}},
-    concordance_results::Vector,
-    categories::Dict{String,Set{String}},
-    activity_ranges::Dict{String,Tuple{Float64,Float64}},
-    trivial_pairs::Set{Set{String}},
-    tracker::ConcordanceTracker
-)
-    # Complexes DataFrame
-    complex_data = []
-    for complex in complexes
-        module_id = findfirst(m -> complex.id in m[2], collect(modules))
-        module_name = isnothing(module_id) ? nothing : collect(keys(modules))[module_id]
-
-        min_act, max_act = get(activity_ranges, complex.id, (NaN, NaN))
-
-        push!(complex_data, (
-            complex_id=complex.id,
-            module_id=module_name,
-            min_activity=min_act,
-            max_activity=max_act,
-            is_balanced=complex.id in categories["balanced"]
-        ))
-    end
-    complexes_df = DataFrame(complex_data)
-
-    # Pairs DataFrame
-    pairs_data = []
-    seen_pairs = Set{Set{String}}()
-
-    for (ci_id, cj_id, is_concordant, lambda_val) in concordance_results
-        if is_concordant
-            pair = Set([ci_id, cj_id])
-            pair in seen_pairs && continue
-            push!(seen_pairs, pair)
-
-            push!(pairs_data, (
-                complex1=ci_id < cj_id ? ci_id : cj_id,
-                complex2=ci_id < cj_id ? cj_id : ci_id,
-                is_trivial=pair in trivial_pairs,
-                lambda_value=something(lambda_val, NaN)
-            ))
+function get_module_id(complex_id::Symbol, modules::Dict{Symbol,Set{Symbol}})
+    for (mid, members) in modules
+        if complex_id in members
+            return String(mid)
         end
     end
-    pairs_df = DataFrame(pairs_data)
+    return "none"
+end
 
-    # Modules DataFrame
-    modules_data = []
-    for (module_id, members) in modules
-        push!(modules_data, (
-            module_id=module_id,
-            size=length(members),
-            complexes=join(sort(collect(members)), ", ")
-        ))
-    end
-    modules_df = DataFrame(modules_data)
+"""
+Estimate memory usage for concordance analysis.
+"""
+function estimate_memory_usage(n_complexes::Int, n_reactions::Int,
+    sparsity::Float64=0.01; use_shared::Bool=true)
+    sparse_matrix_size = n_complexes * n_reactions * sparsity *
+                         (sizeof(Int32) + sizeof(Float32)) +
+                         n_reactions * sizeof(Int32)
 
-    # Metadata
-    metadata = Dict{String,Any}(
-        "total_complexes" => length(complexes),
-        "balanced_complexes" => length(categories["balanced"]),
-        "concordant_pairs" => nrow(pairs_df),
-        "trivial_pairs" => length(trivial_pairs),
-        "modules" => length(modules)
-    )
+    correlation_overhead = n_complexes^2 * sizeof(Float32) / 2  # Upper triangular
+    concordance_tracker = n_complexes * 2 * sizeof(Int32) +
+                          n_complexes^2 * sizeof(Bool)
 
-    return ConcordanceResults(
-        complexes=complexes_df,
-        pairs=pairs_df,
-        modules=modules_df,
-        metadata=metadata
+    total = sparse_matrix_size + correlation_overhead + concordance_tracker
+
+    savings_factor = use_shared && nworkers() > 0 ? nworkers() : 1
+
+    return Dict(
+        "sparse_matrix_GB" => sparse_matrix_size / 1e9,
+        "correlation_overhead_GB" => correlation_overhead / 1e9,
+        "tracker_GB" => concordance_tracker / 1e9,
+        "total_GB" => total / 1e9,
+        "total_with_sharing_GB" => total / 1e9 / savings_factor,
+        "savings_factor" => savings_factor
     )
 end
 
-end # module
+end # module COCOA
