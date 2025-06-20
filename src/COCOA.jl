@@ -1193,7 +1193,7 @@ function streaming_correlation_filter(
     # Log statistics
     high_corr_count = count(p -> p.is_high_confidence, candidate_pairs)
     low_sample_count = count(p -> p.n_samples < config.min_valid_samples, candidate_pairs)
-    filtered_count = n_active * (n_active - 1) / 2 - length(candidate_pairs) - length(trivial_pairs)
+    filtered_count = Int(n_active * (n_active - 1) / 2 - length(candidate_pairs) - length(trivial_pairs))
     skipped_trivial = length(trivial_pairs)
 
     @info "Correlation filtering complete" total_pairs = length(candidate_pairs) high_correlation = high_corr_count low_samples = low_sample_count filtered_pairs = filtered_count skipped_trivial = skipped_trivial sampling_failed = sampling_failed
