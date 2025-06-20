@@ -21,6 +21,7 @@ using Statistics
 using Random
 using JuMP
 using DocStringExtensions
+using ProgressMeter
 
 include("preprocessing/ElementarySteps.jl")
 include("preprocessing/ModelPreparation.jl")
@@ -28,10 +29,10 @@ using .ElementarySteps
 using .ModelPreparation
 
 # Configuration constants
-const DEFAULT_BATCH_SIZE = 1000
-const DEFAULT_STAGE_SIZE = 50000
+const DEFAULT_BATCH_SIZE = 10
+const DEFAULT_STAGE_SIZE = 100
 const DEFAULT_SAMPLE_BATCH_SIZE = 100
-const DEFAULT_CORRELATION_THRESHOLD = 0.85
+const DEFAULT_CORRELATION_THRESHOLD = 0.95
 const DEFAULT_TOLERANCE = 1e-9
 const MAX_MEMORY_PER_WORKER = 2e9  # 2GB per worker default
 
@@ -47,7 +48,7 @@ Configuration for concordance analysis with memory and performance optimizations
 Base.@kwdef struct ConcordanceConfig
     tolerance::Float64 = DEFAULT_TOLERANCE
     correlation_threshold::Float64 = DEFAULT_CORRELATION_THRESHOLD
-    sample_size::Int = 1000
+    sample_size::Int = 10
     sample_batch_size::Int = DEFAULT_SAMPLE_BATCH_SIZE
     concordance_batch_size::Int = DEFAULT_BATCH_SIZE
     stage_size::Int = DEFAULT_STAGE_SIZE
@@ -804,9 +805,12 @@ function test_concordance_optimized(
 )
     n_reactions = length(A_row1)
 
-    # Pre-compute non-zero indices
+    # Pre-compute non-zero indices from both rows
     nz1 = findnz(A_row1)
     nz2 = findnz(A_row2)
+
+    # Combine all non-zero indices from both rows
+    all_nz_indices = union(Set(nz1[1]), Set(nz2[1]))
 
     # Clear any existing concordance constraints
     for cname in [:w, :t, :c2_act, :bounds_l, :bounds_u]
@@ -816,8 +820,8 @@ function test_concordance_optimized(
         end
     end
 
-    # Create transformed variables
-    @variable(model, w[1:n_reactions])
+    # Create transformed variables (only for non-zero indices)
+    @variable(model, w[j=collect(all_nz_indices)])
     @variable(model, t)
 
     # Direction constraint on t
@@ -829,8 +833,6 @@ function test_concordance_optimized(
 
     # Extract bounds
     x = model[:x]
-    lbs = [has_lower_bound(x[j]) ? lower_bound(x[j]) : -1e6 for j in 1:n_reactions]
-    ubs = [has_upper_bound(x[j]) ? upper_bound(x[j]) : 1e6 for j in 1:n_reactions]
 
     # Complex c2 activity constraint
     c2_expr = AffExpr(0.0)
@@ -841,15 +843,21 @@ function test_concordance_optimized(
     target = direction == :positive ? 1.0 : -1.0
     @constraint(model, c2_act, c2_expr == target)
 
-    # Charnes-Cooper bounds constraints
+    # Charnes-Cooper bounds constraints (ONLY for non-zero indices)
     if direction == :positive
-        # For t > 0: w - vmin*t ≥ 0 and vmax*t - w ≥ 0
-        @constraint(model, bounds_l[j=1:n_reactions], w[j] - lbs[j] * t >= 0)
-        @constraint(model, bounds_u[j=1:n_reactions], ubs[j] * t - w[j] >= 0)
+        for j in all_nz_indices
+            lb = has_lower_bound(x[j]) ? lower_bound(x[j]) : -1e6
+            ub = has_upper_bound(x[j]) ? upper_bound(x[j]) : 1e6
+            @constraint(model, w[j] - lb * t >= 0)
+            @constraint(model, ub * t - w[j] >= 0)
+        end
     else
-        # For t < 0: w - vmax*t ≥ 0 and vmin*t - w ≥ 0
-        @constraint(model, bounds_l[j=1:n_reactions], w[j] - ubs[j] * t >= 0)
-        @constraint(model, bounds_u[j=1:n_reactions], lbs[j] * t - w[j] >= 0)
+        for j in all_nz_indices
+            lb = has_lower_bound(x[j]) ? lower_bound(x[j]) : -1e6
+            ub = has_upper_bound(x[j]) ? upper_bound(x[j]) : 1e6
+            @constraint(model, w[j] - ub * t >= 0)
+            @constraint(model, lb * t - w[j] >= 0)
+        end
     end
 
     # Objective: optimize complex c1 activity
@@ -868,10 +876,20 @@ function test_concordance_optimized(
         if termination_status(model) == OPTIMAL
             results[key] = objective_value(model)
         else
-            # Clean up before returning
-            for cname in [:w, :t, :c2_act, :bounds_l, :bounds_u]
+            # Clean up properly based on variable/constraint type
+            if haskey(model, :t)
+                delete(model, model[:t])
+                unregister(model, :t)
+            end
+
+            if haskey(model, :c2_act)
+                delete(model, model[:c2_act])
+                unregister(model, :c2_act)
+            end
+
+            # For array variables, just unregister the name
+            for cname in [:w, :bounds_l, :bounds_u]
                 if haskey(model, cname)
-                    delete(model, model[cname])
                     unregister(model, cname)
                 end
             end
@@ -883,10 +901,20 @@ function test_concordance_optimized(
     is_concordant = isapprox(results[:min], results[:max]; atol=tolerance)
     lambda_value = is_concordant ? results[:min] : nothing
 
-    # Clean up
-    for cname in [:w, :t, :c2_act, :bounds_l, :bounds_u]
+    # Clean up - handle arrays and scalars differently
+    if haskey(model, :t)
+        delete(model, model[:t])
+        unregister(model, :t)
+    end
+
+    if haskey(model, :c2_act)
+        delete(model, model[:c2_act])
+        unregister(model, :c2_act)
+    end
+
+    # For array variables, just unregister the name
+    for cname in [:w, :bounds_l, :bounds_u]
         if haskey(model, cname)
-            delete(model, model[cname])
             unregister(model, cname)
         end
     end
@@ -923,13 +951,15 @@ function streaming_correlation_filter(
     positive_complexes::Set{Int},
     negative_complexes::Set{Int},
     unrestricted_complexes::Set{Int},
-    trivial_pairs::Set{Tuple{Int,Int}};  # Added trivial_pairs parameter
+    trivial_pairs::Set{Tuple{Int,Int}};
     optimizer,
     settings=[],
     config::ConcordanceConfig=ConcordanceConfig()
 )
     n_complexes = length(complexes)
     n_reactions = isa(A_matrix, SharedSparseMatrix) ? A_matrix.n : A_matrix.n_reactions
+
+    master_rng = Random.MersenneTwister(config.seed === nothing ? rand(UInt) : config.seed)
 
     # Filter out balanced complexes
     active_indices = Int32[]
@@ -950,35 +980,46 @@ function streaming_correlation_filter(
         stats[i] = StreamingStats()
     end
 
-    # Correlation accumulator for all pairs
+    # Correlation accumulator for promising pairs only (to save memory)
     pair_corr = Dict{Tuple{Int32,Int32},StreamingCorrelation}()
 
-    # Track sampling success
+    # Track sampling success and progress
     sampling_failed = false
     total_valid_samples = 0
+    samples_processed = 0
 
-    # Process samples in batches
-    n_batches = ceil(Int, config.sample_size / config.sample_batch_size)
+    # Use very small batches to minimize memory usage
+    effective_batch_size = min(10, config.sample_batch_size)
 
-    @info "Starting streaming correlation analysis" n_active n_batches
+    # Track high-variance complexes for second phase filtering
+    high_variance_complexes = Set{Int32}()
+    variance_threshold = config.tolerance * 100  # Threshold for considering a complex as high-variance
 
-    for batch_idx in 1:n_batches
-        batch_size = min(config.sample_batch_size,
-            config.sample_size - (batch_idx - 1) * config.sample_batch_size)
+    @info "Starting streaming correlation analysis" n_active = length(active_indices) total_samples_needed = config.sample_size
 
-        # Generate flux samples
+    # Get sparse matrix once
+    A_sparse = isa(A_matrix, SharedSparseMatrix) ? sparse(A_matrix) : sparse(A_matrix)
+    rxn_ids = Symbol.(AbstractFBCModels.reactions(model))
+
+    # Process samples in mini-batches
+    while samples_processed < config.sample_size
+        # Calculate how many more samples to generate in this iteration
+        samples_to_generate = min(effective_batch_size, config.sample_size - samples_processed)
+
+        # Generate a small batch of flux samples
         samples = try
             COBREXA.flux_sample(
                 model;
-                seed=hash((config.seed, batch_idx)),
-                objective_bound=0.99,
-                n_chains=4,
-                collect_iterations=100,  # 100 samples per chain, after burn-in
+                method=COBREXA.sample_chain_achr,
+                n_chains=2,
+                collect_iterations=[50],
                 optimizer=optimizer,
-                settings=settings
+                settings=settings,
+                seed=UInt(rand(master_rng, UInt32)),
+                objective_bound=COBREXA.relative_tolerance_bound(0.99)
             )
         catch err
-            @warn "Sampling failed, marking batch as failed" batch_idx err exception = (err, catch_backtrace())
+            @warn "Sampling failed in batch" samples_processed exception = (err, catch_backtrace())
             sampling_failed = true
             nothing
         end
@@ -987,46 +1028,59 @@ function streaming_correlation_filter(
             continue
         end
 
-        # Convert to appropriate sparse format
-        A_sparse = isa(A_matrix, SharedSparseMatrix) ? sparse(A_matrix) : sparse(A_matrix)
+        n_samples_in_batch = length(first(values(samples)))
 
-        # Compute activities for this batch
+        # PHASE 1: Calculate variance for each complex using this batch
+        # Store activities temporarily for this batch
         activities = Dict{Int32,Vector{Float64}}()
 
-        for (idx, cidx) in enumerate(active_indices)
+        # Calculate activities for all complexes for this batch
+        for cidx in active_indices
+            row = A_sparse[cidx, :]
+            nz_indices = findnz(row)
             acts = Float64[]
 
-            # Compute activity for each sample
-            for sample_idx in 1:batch_size
+            # Process each sample
+            for sample_idx in 1:n_samples_in_batch
                 activity = 0.0
 
-                # Get sparse row
-                row = A_sparse[cidx, :]
-                nz_indices = findnz(row)
-
                 for (col, val) in zip(nz_indices[1], nz_indices[2])
-                    activity += val * samples[sample_idx, col]
+                    reaction_id = rxn_ids[col]
+                    activity += val * samples[reaction_id][sample_idx]
                 end
 
+                # Update variance statistics and store activity
+                update!(stats[cidx], activity)
                 push!(acts, activity)
             end
 
             activities[cidx] = acts
 
-            # Update streaming statistics
-            for act in acts
-                update!(stats[cidx], act)
+            # Check if high variance after sufficient samples
+            if stats[cidx].n > 10 && variance(stats[cidx]) > variance_threshold
+                push!(high_variance_complexes, cidx)
             end
         end
 
-        # Update pair correlations for ALL pairs
+        # PHASE 2: Only calculate correlations for high-variance pairs
+        # This dramatically reduces memory usage
         for i in 1:n_active
             ci_idx = active_indices[i]
+
+            # Skip low-variance complexes
+            if ci_idx ∉ high_variance_complexes
+                continue
+            end
+
             ci_acts = activities[ci_idx]
 
             for j in (i+1):n_active
                 cj_idx = active_indices[j]
-                cj_acts = activities[cj_idx]
+
+                # Skip low-variance complexes
+                if cj_idx ∉ high_variance_complexes
+                    continue
+                end
 
                 # Check if this is a trivially concordant pair
                 pair = Int(ci_idx) < Int(cj_idx) ?
@@ -1038,14 +1092,15 @@ function streaming_correlation_filter(
                     continue
                 end
 
-                # Initialize correlation accumulator if needed
+                # Initialize correlation if needed
                 pair_key = (ci_idx, cj_idx)
                 if !haskey(pair_corr, pair_key)
                     pair_corr[pair_key] = StreamingCorrelation()
                 end
 
-                # Update with valid samples
-                for k in 1:batch_size
+                # Update correlation with this batch's activities
+                cj_acts = activities[cj_idx]
+                for k in 1:n_samples_in_batch
                     if abs(ci_acts[k]) > config.tolerance || abs(cj_acts[k]) > config.tolerance
                         update!(pair_corr[pair_key], ci_acts[k], cj_acts[k])
                         total_valid_samples += 1
@@ -1054,35 +1109,45 @@ function streaming_correlation_filter(
             end
         end
 
+        # Increment counter and free memory
+        samples_processed += n_samples_in_batch
+        samples = nothing
         activities = nothing
-        GC.gc(false)
+        GC.gc(true)
+
+        @info "Processed batch" samples_processed high_variance_complexes = length(high_variance_complexes)
     end
 
     # Generate candidate pairs with priority information
     candidate_pairs = PairPriority[]
 
-    # Process pairs with filtering:
-    # - Skip trivially concordant pairs
-    # - Keep high correlation pairs (above threshold)
-    # - Keep pairs with insufficient samples
-    # - Filter out low correlation pairs
+    # Only consider pairs where at least one complex has high variance
     for i in 1:n_active
         ci_idx = active_indices[i]
+
+        # Skip complexes with no variance unless they're the only ones
+        if length(high_variance_complexes) > 0 && ci_idx ∉ high_variance_complexes
+            continue
+        end
 
         for j in (i+1):n_active
             cj_idx = active_indices[j]
 
-            # Check if this is a trivially concordant pair
+            # Skip complexes with no variance unless they're the only ones
+            if length(high_variance_complexes) > 0 && cj_idx ∉ high_variance_complexes
+                continue
+            end
+
+            # Skip trivially concordant pairs
             pair = Int(ci_idx) < Int(cj_idx) ?
                    (Int(ci_idx), Int(cj_idx)) :
                    (Int(cj_idx), Int(ci_idx))
 
-            # Skip trivially concordant pairs
             if pair in trivial_pairs
                 continue
             end
 
-            # Determine directions based on complex types
+            # Determine directions
             directions = determine_directions(
                 Int(ci_idx), Int(cj_idx),
                 positive_complexes, negative_complexes, unrestricted_complexes
@@ -1171,6 +1236,17 @@ function process_in_stages(
     remaining_pairs = [(p.c1_idx, p.c2_idx, p.directions) for p in sorted_pairs]
 
     stage_count = 0
+    total_pairs = length(remaining_pairs)
+    processed_pairs = 0
+
+    prog = Progress(
+        total_pairs,
+        desc="Concordance analysis: ",
+        dt=1.0,
+        barlen=50,                     # Longer bar
+        output=stdout,                 # Ensure it goes to standard output
+        showspeed=true                 # Show processing speed
+    )
 
     while !isempty(remaining_pairs)
         stage_count += 1
@@ -1226,6 +1302,10 @@ function process_in_stages(
             workers=workers, config=config
         )
 
+        processed_pairs += length(stage_pairs)
+        # Update progress meter after processing a batch
+        ProgressMeter.update!(prog, processed_pairs)
+
         # Update tracker with results
         new_concordant = 0
         for result in batch_results
@@ -1262,7 +1342,7 @@ function process_in_stages(
         # Update remaining pairs
         remaining_pairs = filtered_pairs[(stage_size+1):end]
     end
-
+    ProgressMeter.finish!(prog)
     return stage_results
 end
 
@@ -1387,7 +1467,7 @@ function concordance_analysis(
     @info "Found trivially concordant pairs" n_pairs = length(trivial_pairs)
 
     # Step 3: Identify balanced complexes via FVA (in addition to trivially balanced)
-    @info "Identifying balanced complexes via FVA"
+    @info "Identifying balanced complexes via activity varibability analysis (AVA)"
 
     # Create complex activity expressions for FVA
     complex_expr = Dict{Symbol,ConstraintTrees.Constraint}()
