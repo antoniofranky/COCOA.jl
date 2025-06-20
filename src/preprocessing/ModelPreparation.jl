@@ -3,10 +3,10 @@ module ModelPreparation
 using COBREXA
 using AbstractFBCModels
 using HiGHS
+using JuMP
 import AbstractFBCModels.AbstractFBCModel
 import AbstractFBCModels.CanonicalModel as CM
 using Logging
-using ProgressMeter
 using Distributed
 import JuMP as J
 export prepare_model_for_concordance
@@ -35,21 +35,26 @@ function prepare_model_for_concordance(model::AbstractFBCModel;
     split_reversible::Bool=true,
     remove_zero_rows::Bool=true,
     remove_zero_cols::Bool=true,
-    workers=Distributed.workers())
+    workers=Distributed.workers(),
+    fast=false)
 
     work_model = convert(CM.Model, model)
     n_original_rxns = length(work_model.reactions)
 
     # 1. Find blocked reactions using parallel FVA
     if remove_blocked
-        @info "Finding blocked reactions using parallel FVA..."
-        blocked = find_blocked_reactions_parallel(work_model, optimizer, flux_tolerance, workers)
+        if fast
+            @info "Finding blocked reactions using fast method..."
+            blocked = find_blocked_reactions_fast(work_model, optimizer, flux_tolerance)
+        else
+            @info "Finding blocked reactions using parallel FVA..."
+            blocked = find_blocked_reactions_parallel(work_model, optimizer, flux_tolerance, workers)
+        end
         if !isempty(blocked)
             remove_reactions!(work_model, blocked)
             @info "Removed $(length(blocked)) blocked reactions"
         end
     end
-
     # 2. Split reversible reactions
     if split_reversible
         @info "Splitting reversible reactions..."
@@ -65,18 +70,24 @@ function prepare_model_for_concordance(model::AbstractFBCModel;
         remove_zero_stoichiometry!(work_model, remove_zero_rows, remove_zero_cols)
     end
 
+    # 4. Look for blocked reactions again
+    if remove_blocked
+        if fast
+            @info "Looking for blocked reactions using fast LP preprocessing..."
+            blocked_fast = find_blocked_reactions_fast(work_model, optimizer, flux_tolerance)
+        else
+            @info "Looking for blocked reactions using parallel FVA preprocessing..."
+            blocked_fast = find_blocked_reactions_parallel(work_model, optimizer, flux_tolerance, workers)
+        end
+        if !isempty(blocked_fast)
+            remove_reactions!(work_model, blocked_fast)
+            @info "Removed $(length(blocked_fast)) blocked reactions)"
+        end
+    end
+
     @info "Model preparation complete: $(n_original_rxns) → $(length(work_model.reactions)) reactions"
     return work_model
 
-    # 4. Look for blocked reactions again
-    if remove_blocked
-        @info "Looking for blocked reactions using parallel FVA preprocessing again..."
-        blocked_fast = find_blocked_reactions_fast(work_model, optimizer, flux_tolerance)
-        if !isempty(blocked_fast)
-            remove_reactions!(work_model, blocked_fast)
-            @info "Removed $(length(blocked_fast)) blocked reactions (fast method)"
-        end
-    end
 end
 
 """
@@ -135,9 +146,6 @@ function split_reversible_reactions_optimized!(model::CM.Model)
         end
     end
 
-    # Progress bar for large models
-    p = Progress(length(reversible_rxns), desc="Splitting reactions: ")
-
     # Process all reversible reactions
     for (rid, rxn) in reversible_rxns
         # Create forward reaction (reuse existing reaction object)
@@ -175,9 +183,7 @@ function split_reversible_reactions_optimized!(model::CM.Model)
         model.reactions["$(rid)_f"] = fwd_rxn
         model.reactions["$(rid)_b"] = bwd_rxn
 
-        next!(p)
     end
-    finish!(p)
 end
 
 """
@@ -244,28 +250,26 @@ end
 # Alternative fast blocked reaction detection using LP preprocessing
 # This is typically much faster than full FVA for large models
 function find_blocked_reactions_fast(model::CM.Model, optimizer, flux_tolerance::Float64)
-    # This uses a single LP to find definitely blocked reactions
-    # based on flux consistency checking
-
     n_rxns = length(model.reactions)
-    rxn_ids = collect(keys(model.reactions))
 
-    # Build stoichiometric matrix efficiently
-    S = stoichiometry(model)
+    # Get reaction info using stable API
+    rxn_ids = collect(keys(model.reactions))
+    lbs = [model.reactions[rid].lower_bound for rid in rxn_ids]
+    ubs = [model.reactions[rid].upper_bound for rid in rxn_ids]
+
+    # Build stoichiometric matrix
+    S = AbstractFBCModels.stoichiometry(model)  # This is part of AbstractFBCModels stable API
 
     # Create LP model
     lp = Model(optimizer)
     set_silent(lp)
 
-    # Variables: fluxes + slack variables for each reaction
+    # Variables: fluxes + slack variables
     J.@variable(lp, v[1:n_rxns])
     J.@variable(lp, z[1:n_rxns] >= 0)
 
     # Constraints
     J.@constraint(lp, S * v .== 0)  # Steady state
-
-    # Get bounds
-    lbs, ubs = bounds(model)
 
     # Flux bounds with slack
     J.@constraint(lp, [i = 1:n_rxns], v[i] >= lbs[i] - z[i])
