@@ -1629,7 +1629,6 @@ function concordance_analysis(
         complexes=complexes_df,
         modules=modules_df,
         lambdas=lambda_df,
-        complex_ranges=complex_ranges,
         stats=stats
     )
 end
