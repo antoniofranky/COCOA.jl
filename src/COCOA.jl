@@ -1435,7 +1435,7 @@ $(TYPEDSIGNATURES)
 Main concordance analysis function optimized for large models and HPC execution.
 """
 function concordance_analysis(
-    model::AbstractFBCModels.CanonicalModel.Model;
+    model;
     modifications=Function[],
     optimizer,
     settings=[],
@@ -1443,6 +1443,13 @@ function concordance_analysis(
     config::ConcordanceConfig=ConcordanceConfig()
 )
     start_time = time()
+
+    model = if !isa(model, AbstractFBCModels.CanonicalModel.Model)
+        @info "Converting model to CanonicalModel"
+        convert(AbstractFBCModels.CanonicalModel.Model, model)
+    else
+        model
+    end
 
     @info "Starting concordance analysis" n_workers = length(workers) config
 

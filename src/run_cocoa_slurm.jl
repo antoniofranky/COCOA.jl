@@ -1,10 +1,13 @@
 #!/usr/bin/env julia
-# filepath: run_cocoa_slurm.jl
 
 # Activate project environment
 import Pkg
-project_path = abspath(joinpath(@__DIR__, "..", "toolbox/julia/COCOA"))
+# Simply go up one directory level from src/ to reach the project root
+project_path = abspath(joinpath(@__DIR__, ".."))
 Pkg.activate(project_path)
+
+using Logging
+global_logger(ConsoleLogger(stderr, Logging.Info))
 
 # Load necessary packages
 using Distributed
@@ -22,10 +25,13 @@ println("✓ Added $(nworkers()) workers across $(length(Set(workers()))) nodes"
 
 # Load packages on all workers
 @everywhere begin
-    # Using project-relative paths ensures consistent loading across nodes
-    project_path = abspath(joinpath(@__DIR__, "..", "toolbox/julia/COCOA"))
+    # Simply use the parent directory of the script location
+    project_path = abspath(joinpath(@__DIR__, ".."))
     import Pkg
     Pkg.activate(project_path)
+
+    using Logging
+    global_logger(ConsoleLogger(stderr, Logging.Info))
 
     using COCOA
     using COBREXA
