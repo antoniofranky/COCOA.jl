@@ -13,9 +13,7 @@ global_logger(ConsoleLogger(stderr, Logging.Info))
 using Distributed
 using SlurmClusterManager
 using JLD2
-using CSV
 using DataFrames
-using JSON
 
 # Add SLURM workers
 println("=== Setting up SLURM workers ===")
@@ -187,23 +185,6 @@ function save_results(results, output_dir)
     jld2_path = joinpath(output_dir, "concordance_results.jld2")
     JLD2.save(jld2_path, "results", results)
     println("  ✓ Complete results: $(basename(jld2_path))")
-
-    # Save CSV files for easy viewing
-    if !isempty(results.complexes)
-        CSV.write(joinpath(output_dir, "complexes.csv"), results.complexes)
-        println("  ✓ Complexes: complexes.csv")
-    end
-
-    if !isempty(results.modules)
-        CSV.write(joinpath(output_dir, "modules.csv"), results.modules)
-        println("  ✓ Modules: modules.csv")
-    end
-
-    # Save metadata as JSON
-    open(joinpath(output_dir, "metadata.json"), "w") do io
-        JSON.print(io, Dict("stats" => results.stats), 4)
-    end
-    println("  ✓ Metadata: metadata.json")
 end
 
 # Print model summary
