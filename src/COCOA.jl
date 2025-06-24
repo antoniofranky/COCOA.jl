@@ -959,6 +959,7 @@ function streaming_correlation_filter(
     n_complexes = length(complexes)
     n_reactions = isa(A_matrix, SharedSparseMatrix) ? A_matrix.n : A_matrix.n_reactions
 
+    # Setup random number generator with seed for reproducibility
     master_rng = Random.MersenneTwister(config.seed === nothing ? rand(UInt) : config.seed)
 
     # Filter out balanced complexes
@@ -974,229 +975,375 @@ function streaming_correlation_filter(
         return PairPriority[]
     end
 
-    # Initialize streaming statistics
+    # Get sparse matrix for faster operations
+    A_sparse = isa(A_matrix, SharedSparseMatrix) ? sparse(A_matrix) : sparse(A_matrix)
+
+    # Prepare streaming statistics for complex activities
     stats = Dict{Int32,StreamingStats}()
     for i in active_indices
         stats[i] = StreamingStats()
     end
 
-    # Correlation accumulator for promising pairs only (to save memory)
-    pair_corr = Dict{Tuple{Int32,Int32},StreamingCorrelation}()
+    # Calculate optimal batch size based on available memory
+    # We want to avoid materializing the entire activity matrix in memory
+    memory_per_active_complex = 8  # bytes per sample (Float64)
+    available_memory_for_samples = config.max_memory_per_worker * 0.5  # Use half of available memory
+    max_samples_in_memory = floor(Int, available_memory_for_samples / (n_active * memory_per_active_complex))
 
-    # Track sampling success and progress
-    sampling_failed = false
-    total_valid_samples = 0
-    samples_processed = 0
+    effective_batch_size = min(
+        max_samples_in_memory,
+        config.sample_batch_size === nothing ? 100 : config.sample_batch_size,
+        config.sample_size  # Never use a batch larger than total requested samples
+    )
 
-    # Use very small batches to minimize memory usage
-    effective_batch_size = min(10, config.sample_batch_size)
-
-    # Track high-variance complexes for second phase filtering
+    # Track high-variance complexes for filtering
     high_variance_complexes = Set{Int32}()
     variance_threshold = config.tolerance * 100  # Threshold for considering a complex as high-variance
 
-    @info "Starting streaming correlation analysis" n_active = length(active_indices) total_samples_needed = config.sample_size
+    @info "Starting streaming correlation analysis" n_active effective_batch_size total_samples_needed = config.sample_size
 
-    # Get sparse matrix once
-    A_sparse = isa(A_matrix, SharedSparseMatrix) ? sparse(A_matrix) : sparse(A_matrix)
-    rxn_ids = Symbol.(AbstractFBCModels.reactions(model))
+    # Use raw JuMP model for sample generation for better memory efficiency
+    constraints = flux_balance_constraints(model)    # Create optimization model once for both feasible point and sampling
+    opt_model = optimization_model(constraints, optimizer=optimizer)
 
-    # Process samples in mini-batches
-    while samples_processed < config.sample_size
-        # Calculate how many more samples to generate in this iteration
-        samples_to_generate = min(effective_batch_size, config.sample_size - samples_processed)
+    # Apply optimizer settings if provided
+    for (name, value) in settings
+        set_optimizer_attribute(opt_model, name, value)
+    end
 
-        # Generate a small batch of flux samples
-        samples = try
-            COBREXA.flux_sample(
-                model;
-                method=COBREXA.sample_chain_achr,
-                n_chains=2,
-                collect_iterations=[50],
-                optimizer=optimizer,
-                settings=settings,
-                seed=UInt(rand(master_rng, UInt32)),
-                objective_bound=COBREXA.relative_tolerance_bound(0.99)
-            )
-        catch err
-            @warn "Sampling failed in batch" samples_processed exception = (err, catch_backtrace())
-            sampling_failed = true
-            nothing
+    # Generate a feasible starting point for sampling
+    @info "Finding initial feasible point for sampling"
+    optimize!(opt_model)
+    if termination_status(opt_model) != MOI.OPTIMAL
+        @warn "Failed to find initial feasible point for sampling"
+        return PairPriority[]
+    end
+
+    # Extract initial point for sampling
+    n_vars = num_variables(opt_model)
+    start_point = zeros(Float64, 1, n_vars)
+    if JuMP.has_values(opt_model)  # Check if model has solution values
+        for i in 1:n_vars
+            # Don't use has_value for individual variables - just check if model has values
+            start_point[1, i] = JuMP.value(opt_model[:x][i])
+        end
+    end
+
+    # Sample in batches and update statistics
+    n_batches = ceil(Int, config.sample_size / effective_batch_size)
+    correlation_pairs = Dict{Tuple{Int32,Int32},StreamingCorrelation}()
+
+    # Pre-allocate matrix for batch activities
+    activities = zeros(Float64, n_active, effective_batch_size)
+
+    # Track progress
+    prog = Progress(config.sample_size, desc="Generating samples: ", barlen=40)
+
+    # Determine optimal number of chains based on available threads and workers
+    optimal_chains = min(
+        Threads.nthreads(),  # Limited by available threads
+        4,                   # Reasonable upper limit for most systems
+        n_active ÷ 1000 + 1  # Scale with problem size
+    )
+
+    @info "Sampling configuration" batch_size = effective_batch_size chains = optimal_chains
+    # Generate samples in batches
+    for batch in 1:n_batches
+        # Adjust batch size for the last batch
+        current_batch_size = min(effective_batch_size, config.sample_size - (batch - 1) * effective_batch_size)
+
+        # Generate random samples using efficient ACHR or uniform sampling
+        # Use the master_rng to generate reproducible batch seeds
+        batch_seed = rand(master_rng, UInt)
+
+        # For first batch or large problems: use multiple starting points
+        # For subsequent batches: use previous samples as starting points for faster convergence
+        current_start_variables = if batch == 1 || n_active > 10000
+            # For first batch or large problems, create multiple starting points
+            if batch == 1 && optimal_chains > 1
+                # Generate multiple diverse starting points for first batch
+                multi_start = zeros(Float64, optimal_chains, n_vars)
+                multi_start[1, :] = start_point[1, :]  # Use our original feasible point
+
+                # Generate additional starting points with small perturbations
+                for i in 2:optimal_chains
+                    # Copy with small random perturbations (within feasible space)
+                    multi_start[i, :] = start_point[1, :]
+                    # Add small random noise to non-zero elements
+                    for j in 1:n_vars
+                        if abs(start_point[1, j]) > config.tolerance
+                            # Add up to ±10% noise
+                            multi_start[i, j] *= (1.0 + 0.1 * randn(master_rng))
+                        end
+                    end
+                end
+                multi_start
+            else
+                # Single chain for subsequent batches or small problems
+                start_point
+            end
+        else
+            # For subsequent batches, use last samples as starting points
+            # This significantly improves convergence speed
+            samples[end-min(optimal_chains, size(samples, 1))+1:end, :]
         end
 
-        if isnothing(samples)
-            continue
-        end
+        # For complex problems, use multiple chains for better coverage
+        use_chains = batch == 1 ? optimal_chains : min(optimal_chains, size(current_start_variables, 1))
 
-        n_samples_in_batch = length(first(values(samples)))
-
-        # PHASE 1: Calculate variance for each complex using this batch
-        # Store activities temporarily for this batch
-        activities = Dict{Int32,Vector{Float64}}()
-
-        # Calculate activities for all complexes for this batch
-        for cidx in active_indices
-            row = A_sparse[cidx, :]
-            nz_indices = findnz(row)
-            acts = Float64[]
-
-            # Process each sample
-            for sample_idx in 1:n_samples_in_batch
-                activity = 0.0
-
-                for (col, val) in zip(nz_indices[1], nz_indices[2])
-                    reaction_id = rxn_ids[col]
-                    activity += val * samples[reaction_id][sample_idx]
-                end
-
-                # Update variance statistics and store activity
-                update!(stats[cidx], activity)
-                push!(acts, activity)
-            end
-
-            activities[cidx] = acts
-
-            # Check if high variance after sufficient samples
-            if stats[cidx].n > 10 && variance(stats[cidx]) > variance_threshold
-                push!(high_variance_complexes, cidx)
+        # Create a JuMP model for the optimization with settings applied
+        jump_model = nothing
+        if !isempty(settings)
+            jump_model = Model(optimizer)
+            for (name, value) in settings
+                set_optimizer_attribute(jump_model, name, value)
             end
         end
 
-        # PHASE 2: Only calculate correlations for high-variance pairs
-        # This dramatically reduces memory usage
-        for i in 1:n_active
-            ci_idx = active_indices[i]
+        # Run the sampler with optimized parameters
+        sample_tree = sample_constraints(
+            COBREXA.sample_chain_achr,  # First parameter should be the sampler function
+            constraints;        # Second parameter is the constraints
+            start_variables=current_start_variables,
+            seed=batch_seed,
+            n_chains=use_chains,
+            collect_iterations=[current_batch_size ÷ use_chains + (batch == n_batches ? current_batch_size % use_chains : 0)],
+            workers=workers()
+        )
 
-            # Skip low-variance complexes
-            if ci_idx ∉ high_variance_complexes
-                continue
+        # Extract the sample matrix from the constraint tree result
+        sample_matrix = Matrix{Float64}(undef, n_vars, current_batch_size)
+        sample_idx = 1
+
+        # Extract reaction values from the constraint tree
+        for rxn_id in Symbol.(AbstractFBCModels.reactions(model))
+            if haskey(sample_tree.fluxes, rxn_id) && sample_idx <= n_vars
+                # Extract flux values for this reaction - directly access the value without .value
+                flux_values = sample_tree.fluxes[rxn_id]  # Remove .value here
+                # Store in sample matrix (up to current_batch_size)
+                for j in 1:min(current_batch_size, length(flux_values))
+                    sample_matrix[sample_idx, j] = flux_values[j]
+                end
+            end
+            sample_idx += 1
+        end
+
+        # Compute complex activities in parallel using threads
+        Threads.@threads for j in 1:n_active
+            complex_idx = active_indices[j]
+            row = A_sparse[complex_idx, :]
+
+            for s in 1:current_batch_size
+                # Compute activity using sparse dot product
+                activities[j, s] = dot(row, sample_matrix[:, s])
+            end
+        end
+
+        # Update streaming statistics and correlations
+        GC.@preserve activities begin
+            # First pass: Update statistics and identify high-variance complexes
+            for j in 1:n_active
+                complex_idx = active_indices[j]
+
+                for s in 1:current_batch_size
+                    update!(stats[complex_idx], activities[j, s])
+                end
+
+                # Check for high variance
+                if variance(stats[complex_idx]) > variance_threshold
+                    push!(high_variance_complexes, complex_idx)
+                end
             end
 
-            ci_acts = activities[ci_idx]
+            # Second pass: Update correlations only for promising pairs
+            if !isempty(high_variance_complexes)
+                Threads.@threads for i in 1:n_active
+                    ci_idx = active_indices[i]
 
-            for j in (i+1):n_active
-                cj_idx = active_indices[j]
+                    # Skip if low variance (major optimization)
+                    if ci_idx ∉ high_variance_complexes
+                        continue
+                    end
 
-                # Skip low-variance complexes
-                if cj_idx ∉ high_variance_complexes
-                    continue
-                end
+                    for j in (i+1):n_active
+                        cj_idx = active_indices[j]
 
-                # Check if this is a trivially concordant pair
-                pair = Int(ci_idx) < Int(cj_idx) ?
-                       (Int(ci_idx), Int(cj_idx)) :
-                       (Int(cj_idx), Int(ci_idx))
+                        # Skip if low variance
+                        if cj_idx ∉ high_variance_complexes
+                            continue
+                        end
 
-                # Skip trivially concordant pairs
-                if pair in trivial_pairs
-                    continue
-                end
+                        # Skip trivially concordant pairs
+                        pair = (Int(ci_idx) < Int(cj_idx)) ? (Int(ci_idx), Int(cj_idx)) : (Int(cj_idx), Int(ci_idx))
+                        if pair in trivial_pairs
+                            continue
+                        end
 
-                # Initialize correlation if needed
-                pair_key = (ci_idx, cj_idx)
-                if !haskey(pair_corr, pair_key)
-                    pair_corr[pair_key] = StreamingCorrelation()
-                end
+                        # Initialize correlation if needed
+                        pair_key = (ci_idx, cj_idx)
+                        if !haskey(correlation_pairs, pair_key)
+                            correlation_pairs[pair_key] = StreamingCorrelation()
+                        end
 
-                # Update correlation with this batch's activities
-                cj_acts = activities[cj_idx]
-                for k in 1:n_samples_in_batch
-                    if abs(ci_acts[k]) > config.tolerance || abs(cj_acts[k]) > config.tolerance
-                        update!(pair_corr[pair_key], ci_acts[k], cj_acts[k])
-                        total_valid_samples += 1
+                        # Update correlation with current batch
+                        for s in 1:current_batch_size
+                            # Only consider samples where at least one complex has activity
+                            if abs(activities[i, s]) > config.tolerance || abs(activities[j, s]) > config.tolerance
+                                update!(correlation_pairs[pair_key], activities[i, s], activities[j, s])
+                            end
+                        end
                     end
                 end
             end
         end
 
-        # Increment counter and free memory
-        samples_processed += n_samples_in_batch
+        # Explicit memory cleanup to ensure we don't keep unnecessary data
         samples = nothing
-        activities = nothing
-        GC.gc(true)
+        GC.gc()
 
-        @info "Processed batch" samples_processed high_variance_complexes = length(high_variance_complexes)
+        # Update progress bar
+        ProgressMeter.update!(prog, min((batch * effective_batch_size), config.sample_size))
     end
+
+    ProgressMeter.finish!(prog)
 
     # Generate candidate pairs with priority information
+    @info "Generating candidate pairs" high_variance_complexes = length(high_variance_complexes) correlation_pairs = length(correlation_pairs)
+
+    # Process correlations in parallel with threads
+    candidate_pairs_lock = ReentrantLock()
     candidate_pairs = PairPriority[]
 
-    # Only consider pairs where at least one complex has high variance
-    for i in 1:n_active
-        ci_idx = active_indices[i]
+    # Use parallel processing if there are many pairs
+    if length(correlation_pairs) > 10000 && Threads.nthreads() > 1
+        @info "Using parallel processing for correlation pairs" n_threads = Threads.nthreads()
 
-        # Skip complexes with no variance unless they're the only ones
-        if length(high_variance_complexes) > 0 && ci_idx ∉ high_variance_complexes
-            continue
+        # Thread-local storage for results
+        thread_candidates = [PairPriority[] for _ in 1:Threads.nthreads()]
+
+        # Process in parallel chunks
+        pair_keys = collect(keys(correlation_pairs))
+        chunk_size = max(1, length(pair_keys) ÷ Threads.nthreads())
+
+        # Add a counter for processed pairs to track progress
+        progress_counter = Threads.Atomic{Int}(0)
+
+        Threads.@threads for chunk_start in 1:chunk_size:length(pair_keys)
+            tid = Threads.threadid()
+            chunk_end = min(chunk_start + chunk_size - 1, length(pair_keys))
+            chunk_pairs_processed = 0
+
+            for pair_idx in chunk_start:chunk_end
+                (ci_idx, cj_idx) = pair_keys[pair_idx]
+                corr_acc = correlation_pairs[pair_keys[pair_idx]]
+
+                if corr_acc.n >= config.min_valid_samples
+                    # Calculate correlation
+                    corr_value = correlation(corr_acc)
+
+                    # Include pairs with high correlation or borderline cases
+                    if abs(corr_value) >= (config.correlation_threshold)
+                        directions = determine_directions(
+                            Int(ci_idx), Int(cj_idx),
+                            positive_complexes, negative_complexes, unrestricted_complexes
+                        )
+
+                        priority = PairPriority(
+                            Int(ci_idx), Int(cj_idx), directions,
+                            corr_value, corr_acc.n,
+                            abs(corr_value) >= config.correlation_threshold
+                        )
+
+                        push!(thread_candidates[tid], priority)
+                    end
+                else
+                    # Insufficient samples - include as low confidence
+                    directions = determine_directions(
+                        Int(ci_idx), Int(cj_idx),
+                        positive_complexes, negative_complexes, unrestricted_complexes
+                    )
+
+                    priority = PairPriority(
+                        Int(ci_idx), Int(cj_idx), directions,
+                        0.0, corr_acc.n, false
+                    )
+
+                    push!(thread_candidates[tid], priority)
+                end
+
+                chunk_pairs_processed += 1
+            end
+
+            # Update the progress counter and progress bar after processing each chunk
+            old_count = Threads.atomic_add!(progress_counter, chunk_pairs_processed)
+            ProgressMeter.update!(prog, min(old_count + chunk_pairs_processed, length(pair_keys)))
         end
 
-        for j in (i+1):n_active
-            cj_idx = active_indices[j]
+        # Combine results from all threads
+        for tid in 1:Threads.nthreads()
+            append!(candidate_pairs, thread_candidates[tid])
+        end
+    else
+        @info "Using serial processing for correlation pairs" n_pairs = length(correlation_pairs)
+        # Serial processing for smaller problems
+        pair_count = 0
+        total_pairs = length(correlation_pairs)
 
-            # Skip complexes with no variance unless they're the only ones
-            if length(high_variance_complexes) > 0 && cj_idx ∉ high_variance_complexes
-                continue
-            end
+        # Create a new progress tracker for serial processing
+        prog = Progress(total_pairs, desc="Processing correlations: ", barlen=40)
 
-            # Skip trivially concordant pairs
-            pair = Int(ci_idx) < Int(cj_idx) ?
-                   (Int(ci_idx), Int(cj_idx)) :
-                   (Int(cj_idx), Int(ci_idx))
+        for ((ci_idx, cj_idx), corr_acc) in correlation_pairs
+            if corr_acc.n >= config.min_valid_samples
+                # Calculate correlation
+                corr_value = correlation(corr_acc)
 
-            if pair in trivial_pairs
-                continue
-            end
+                # Include pairs with high correlation or borderline cases
+                if abs(corr_value) >= (config.correlation_threshold * 0.9)
+                    directions = determine_directions(
+                        Int(ci_idx), Int(cj_idx),
+                        positive_complexes, negative_complexes, unrestricted_complexes
+                    )
 
-            # Determine directions
-            directions = determine_directions(
-                Int(ci_idx), Int(cj_idx),
-                positive_complexes, negative_complexes, unrestricted_complexes
-            )
+                    priority = PairPriority(
+                        Int(ci_idx), Int(cj_idx), directions,
+                        corr_value, corr_acc.n,
+                        abs(corr_value) >= config.correlation_threshold
+                    )
 
-            # Get correlation info if available
-            pair_key = (ci_idx, cj_idx)
-            corr_stats = get(pair_corr, pair_key, nothing)
-
-            # Decide whether to include this pair
-            include_pair = false
-            is_high_confidence = false
-            corr = 0.0
-            n_samples = 0
-
-            if !isnothing(corr_stats)
-                n_samples = corr_stats.n
-
-                if n_samples >= config.min_valid_samples
-                    # Sufficient samples - check correlation
-                    corr = correlation(corr_stats)
-                    is_high_confidence = abs(corr) >= config.correlation_threshold
-                    include_pair = is_high_confidence  # Only include if correlation is high
-                else
-                    # Insufficient samples - include anyway
-                    include_pair = true
+                    push!(candidate_pairs, priority)
                 end
             else
-                # No correlation data - include
-                include_pair = true
-            end
+                # Insufficient samples - include as low confidence
+                directions = determine_directions(
+                    Int(ci_idx), Int(cj_idx),
+                    positive_complexes, negative_complexes, unrestricted_complexes
+                )
 
-            # Only add pairs that should be included
-            if include_pair
-                push!(candidate_pairs, PairPriority(
+                priority = PairPriority(
                     Int(ci_idx), Int(cj_idx), directions,
-                    corr, n_samples, is_high_confidence
-                ))
-            end
-        end
-    end
+                    0.0, corr_acc.n, false
+                )
 
+                push!(candidate_pairs, priority)
+            end
+
+            # Update progress after processing each pair
+            pair_count += 1
+            ProgressMeter.update!(prog, pair_count)
+        end
+
+        # Finish the progress bar
+        ProgressMeter.finish!(prog)
+    end
     # Log statistics
     high_corr_count = count(p -> p.is_high_confidence, candidate_pairs)
     low_sample_count = count(p -> p.n_samples < config.min_valid_samples, candidate_pairs)
-    filtered_count = Int(n_active * (n_active - 1) / 2 - length(candidate_pairs) - length(trivial_pairs))
-    skipped_trivial = length(trivial_pairs)
 
-    @info "Correlation filtering complete" total_pairs = length(candidate_pairs) high_correlation = high_corr_count low_samples = low_sample_count filtered_pairs = filtered_count skipped_trivial = skipped_trivial sampling_failed = sampling_failed
+    # Calculate total potential pairs and filtered count
+    total_possible_pairs = Int(n_active * (n_active - 1) / 2)
+    filtered_count = total_possible_pairs - length(candidate_pairs) - length(trivial_pairs)
+
+    @info "Correlation filtering complete" total_pairs = length(candidate_pairs) high_correlation = high_corr_count low_samples = low_sample_count filtered_pairs = filtered_count skipped_trivial = length(trivial_pairs)
 
     return candidate_pairs
 end
@@ -1273,6 +1420,7 @@ function process_in_stages(
 
             # Skip if already concordant
             if are_concordant(concordance_tracker, tracker_idx1, tracker_idx2)
+                stage_results["skipped_by_transitivity"] += 1
                 continue
             end
 
