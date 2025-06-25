@@ -48,7 +48,7 @@ Configuration for concordance analysis with memory and performance optimizations
 Base.@kwdef struct ConcordanceConfig
     tolerance::Float64 = DEFAULT_TOLERANCE
     correlation_threshold::Float64 = DEFAULT_CORRELATION_THRESHOLD
-    sample_size::Int = 10
+    sample_size::Int = 1000
     sample_batch_size::Int = DEFAULT_SAMPLE_BATCH_SIZE
     concordance_batch_size::Int = DEFAULT_BATCH_SIZE
     stage_size::Int = DEFAULT_STAGE_SIZE
@@ -937,11 +937,10 @@ end
 """
 $(TYPEDSIGNATURES)
 
-Perform streaming correlation analysis with proper filtering:
-- Include pairs with high correlation (above threshold)
-- Include pairs with insufficient samples or failed correlation
-- Filter out pairs with sufficient samples but low correlation
-- Filter out trivially concordant pairs already identified
+Perform streaming correlation analysis for complex concordance with direct matrix sampling.
+- Uses memory-efficient direct matrix sampling
+- Filters out balanced complexes and trivial pairs
+- Returns PairPriority objects for high-correlation candidates
 """
 function streaming_correlation_filter(
     model::AbstractFBCModels.AbstractFBCModel,
@@ -956,9 +955,6 @@ function streaming_correlation_filter(
     settings=[],
     config::ConcordanceConfig=ConcordanceConfig()
 )
-    n_complexes = length(complexes)
-    n_reactions = isa(A_matrix, SharedSparseMatrix) ? A_matrix.n : A_matrix.n_reactions
-
     # Setup random number generator with seed for reproducibility
     master_rng = Random.MersenneTwister(config.seed === nothing ? rand(UInt) : config.seed)
 
@@ -985,7 +981,6 @@ function streaming_correlation_filter(
     end
 
     # Calculate optimal batch size based on available memory
-    # We want to avoid materializing the entire activity matrix in memory
     memory_per_active_complex = 8  # bytes per sample (Float64)
     available_memory_for_samples = config.max_memory_per_worker * 0.5  # Use half of available memory
     max_samples_in_memory = floor(Int, available_memory_for_samples / (n_active * memory_per_active_complex))
@@ -1002,31 +997,28 @@ function streaming_correlation_filter(
 
     @info "Starting streaming correlation analysis" n_active effective_batch_size total_samples_needed = config.sample_size
 
-    # Use raw JuMP model for sample generation for better memory efficiency
-    constraints = flux_balance_constraints(model)    # Create optimization model once for both feasible point and sampling
-    opt_model = optimization_model(constraints, optimizer=optimizer)
+    # Generate constraints once
+    constraints = flux_balance_constraints(model)
 
-    # Apply optimizer settings if provided
-    for (name, value) in settings
-        set_optimizer_attribute(opt_model, name, value)
-    end
+    # Generate diverse warmup points using FVA (do this just once)
+    @info "Generating diverse warmup points"
+    warmup = vcat(
+        (
+            transpose(v) for (_, vs) in COBREXA.constraints_variability(
+                constraints,
+                constraints.fluxes;
+                optimizer=optimizer,
+                output=(_, om) -> JuMP.value.(om[:x]),
+                output_type=Vector{Float64},
+                workers=workers(),
+            ) for v in vs
+        )...,
+    )
 
-    # Generate a feasible starting point for sampling
-    @info "Finding initial feasible point for sampling"
-    optimize!(opt_model)
-    if termination_status(opt_model) != MOI.OPTIMAL
-        @warn "Failed to find initial feasible point for sampling"
-        return PairPriority[]
-    end
-
-    # Extract initial point for sampling
-    n_vars = num_variables(opt_model)
-    start_point = zeros(Float64, 1, n_vars)
-    if JuMP.has_values(opt_model)  # Check if model has solution values
-        for i in 1:n_vars
-            # Don't use has_value for individual variables - just check if model has values
-            start_point[1, i] = JuMP.value(opt_model[:x][i])
-        end
+    # Limit warmup points to control memory usage
+    if size(warmup, 1) > 100
+        indices = randperm(size(warmup, 1))[1:100]
+        warmup = warmup[indices, :]
     end
 
     # Sample in batches and update statistics
@@ -1036,96 +1028,36 @@ function streaming_correlation_filter(
     # Pre-allocate matrix for batch activities
     activities = zeros(Float64, n_active, effective_batch_size)
 
-    # Track progress
+    # Progress tracking
     prog = Progress(config.sample_size, desc="Generating samples: ", barlen=40)
 
-    # Determine optimal number of chains based on available threads and workers
-    optimal_chains = min(
-        Threads.nthreads(),  # Limited by available threads
-        4,                   # Reasonable upper limit for most systems
-        n_active ÷ 1000 + 1  # Scale with problem size
-    )
-
-    @info "Sampling configuration" batch_size = effective_batch_size chains = optimal_chains
-    # Generate samples in batches
+    # Process in batches
     for batch in 1:n_batches
-        # Adjust batch size for the last batch
+        # Determine batch size for this iteration
         current_batch_size = min(effective_batch_size, config.sample_size - (batch - 1) * effective_batch_size)
 
-        # Generate random samples using efficient ACHR or uniform sampling
-        # Use the master_rng to generate reproducible batch seeds
+        # Generate random batch seed
         batch_seed = rand(master_rng, UInt)
 
-        # For first batch or large problems: use multiple starting points
-        # For subsequent batches: use previous samples as starting points for faster convergence
-        current_start_variables = if batch == 1 || n_active > 10000
-            # For first batch or large problems, create multiple starting points
-            if batch == 1 && optimal_chains > 1
-                # Generate multiple diverse starting points for first batch
-                multi_start = zeros(Float64, optimal_chains, n_vars)
-                multi_start[1, :] = start_point[1, :]  # Use our original feasible point
+        # Generate exact number of samples needed for this batch
+        # Calculate iterations needed based on warmup size
+        n_warmup = size(warmup, 1)
+        iterations_needed = ceil(Int, current_batch_size / n_warmup)
 
-                # Generate additional starting points with small perturbations
-                for i in 2:optimal_chains
-                    # Copy with small random perturbations (within feasible space)
-                    multi_start[i, :] = start_point[1, :]
-                    # Add small random noise to non-zero elements
-                    for j in 1:n_vars
-                        if abs(start_point[1, j]) > config.tolerance
-                            # Add up to ±10% noise
-                            multi_start[i, j] *= (1.0 + 0.1 * randn(master_rng))
-                        end
-                    end
-                end
-                multi_start
-            else
-                # Single chain for subsequent batches or small problems
-                start_point
-            end
-        else
-            # For subsequent batches, use last samples as starting points
-            # This significantly improves convergence speed
-            samples[end-min(optimal_chains, size(samples, 1))+1:end, :]
-        end
-
-        # For complex problems, use multiple chains for better coverage
-        use_chains = batch == 1 ? optimal_chains : min(optimal_chains, size(current_start_variables, 1))
-
-        # Create a JuMP model for the optimization with settings applied
-        jump_model = nothing
-        if !isempty(settings)
-            jump_model = Model(optimizer)
-            for (name, value) in settings
-                set_optimizer_attribute(jump_model, name, value)
-            end
-        end
-
-        # Run the sampler with optimized parameters
-        sample_tree = sample_constraints(
-            COBREXA.sample_chain_achr,  # First parameter should be the sampler function
-            constraints;        # Second parameter is the constraints
-            start_variables=current_start_variables,
+        # Get samples
+        sample_matrix = COBREXA.sample_constraint_variables(
+            COBREXA.sample_chain_achr,
+            constraints;
+            start_variables=warmup,
             seed=batch_seed,
-            n_chains=use_chains,
-            collect_iterations=[current_batch_size ÷ use_chains + (batch == n_batches ? current_batch_size % use_chains : 0)],
+            n_chains=4,
+            collect_iterations=[iterations_needed],
             workers=workers()
         )
 
-        # Extract the sample matrix from the constraint tree result
-        sample_matrix = Matrix{Float64}(undef, n_vars, current_batch_size)
-        sample_idx = 1
-
-        # Extract reaction values from the constraint tree
-        for rxn_id in Symbol.(AbstractFBCModels.reactions(model))
-            if haskey(sample_tree.fluxes, rxn_id) && sample_idx <= n_vars
-                # Extract flux values for this reaction - directly access the value without .value
-                flux_values = sample_tree.fluxes[rxn_id]  # Remove .value here
-                # Store in sample matrix (up to current_batch_size)
-                for j in 1:min(current_batch_size, length(flux_values))
-                    sample_matrix[sample_idx, j] = flux_values[j]
-                end
-            end
-            sample_idx += 1
+        # If we got more samples than needed, truncate
+        if size(sample_matrix, 1) > current_batch_size
+            sample_matrix = sample_matrix[1:current_batch_size, :]
         end
 
         # Compute complex activities in parallel using threads
@@ -1135,7 +1067,7 @@ function streaming_correlation_filter(
 
             for s in 1:current_batch_size
                 # Compute activity using sparse dot product
-                activities[j, s] = dot(row, sample_matrix[:, s])
+                activities[j, s] = dot(row, sample_matrix[s, :])
             end
         end
 
@@ -1197,10 +1129,6 @@ function streaming_correlation_filter(
             end
         end
 
-        # Explicit memory cleanup to ensure we don't keep unnecessary data
-        samples = nothing
-        GC.gc()
-
         # Update progress bar
         ProgressMeter.update!(prog, min((batch * effective_batch_size), config.sample_size))
     end
@@ -1210,110 +1138,15 @@ function streaming_correlation_filter(
     # Generate candidate pairs with priority information
     @info "Generating candidate pairs" high_variance_complexes = length(high_variance_complexes) correlation_pairs = length(correlation_pairs)
 
-    # Process correlations in parallel with threads
-    candidate_pairs_lock = ReentrantLock()
     candidate_pairs = PairPriority[]
+    # Process correlations and generate PairPriority objects
+    for ((ci_idx, cj_idx), corr_acc) in correlation_pairs
+        if corr_acc.n >= config.min_valid_samples
+            # Calculate correlation
+            corr_value = correlation(corr_acc)
 
-    # Use parallel processing if there are many pairs
-    if length(correlation_pairs) > 10000 && Threads.nthreads() > 1
-        @info "Using parallel processing for correlation pairs" n_threads = Threads.nthreads()
-
-        # Thread-local storage for results
-        thread_candidates = [PairPriority[] for _ in 1:Threads.nthreads()]
-
-        # Process in parallel chunks
-        pair_keys = collect(keys(correlation_pairs))
-        chunk_size = max(1, length(pair_keys) ÷ Threads.nthreads())
-
-        # Add a counter for processed pairs to track progress
-        progress_counter = Threads.Atomic{Int}(0)
-
-        Threads.@threads for chunk_start in 1:chunk_size:length(pair_keys)
-            tid = Threads.threadid()
-            chunk_end = min(chunk_start + chunk_size - 1, length(pair_keys))
-            chunk_pairs_processed = 0
-
-            for pair_idx in chunk_start:chunk_end
-                (ci_idx, cj_idx) = pair_keys[pair_idx]
-                corr_acc = correlation_pairs[pair_keys[pair_idx]]
-
-                if corr_acc.n >= config.min_valid_samples
-                    # Calculate correlation
-                    corr_value = correlation(corr_acc)
-
-                    # Include pairs with high correlation or borderline cases
-                    if abs(corr_value) >= (config.correlation_threshold)
-                        directions = determine_directions(
-                            Int(ci_idx), Int(cj_idx),
-                            positive_complexes, negative_complexes, unrestricted_complexes
-                        )
-
-                        priority = PairPriority(
-                            Int(ci_idx), Int(cj_idx), directions,
-                            corr_value, corr_acc.n,
-                            abs(corr_value) >= config.correlation_threshold
-                        )
-
-                        push!(thread_candidates[tid], priority)
-                    end
-                else
-                    # Insufficient samples - include as low confidence
-                    directions = determine_directions(
-                        Int(ci_idx), Int(cj_idx),
-                        positive_complexes, negative_complexes, unrestricted_complexes
-                    )
-
-                    priority = PairPriority(
-                        Int(ci_idx), Int(cj_idx), directions,
-                        0.0, corr_acc.n, false
-                    )
-
-                    push!(thread_candidates[tid], priority)
-                end
-
-                chunk_pairs_processed += 1
-            end
-
-            # Update the progress counter and progress bar after processing each chunk
-            old_count = Threads.atomic_add!(progress_counter, chunk_pairs_processed)
-            ProgressMeter.update!(prog, min(old_count + chunk_pairs_processed, length(pair_keys)))
-        end
-
-        # Combine results from all threads
-        for tid in 1:Threads.nthreads()
-            append!(candidate_pairs, thread_candidates[tid])
-        end
-    else
-        @info "Using serial processing for correlation pairs" n_pairs = length(correlation_pairs)
-        # Serial processing for smaller problems
-        pair_count = 0
-        total_pairs = length(correlation_pairs)
-
-        # Create a new progress tracker for serial processing
-        prog = Progress(total_pairs, desc="Processing correlations: ", barlen=40)
-
-        for ((ci_idx, cj_idx), corr_acc) in correlation_pairs
-            if corr_acc.n >= config.min_valid_samples
-                # Calculate correlation
-                corr_value = correlation(corr_acc)
-
-                # Include pairs with high correlation or borderline cases
-                if abs(corr_value) >= (config.correlation_threshold * 0.9)
-                    directions = determine_directions(
-                        Int(ci_idx), Int(cj_idx),
-                        positive_complexes, negative_complexes, unrestricted_complexes
-                    )
-
-                    priority = PairPriority(
-                        Int(ci_idx), Int(cj_idx), directions,
-                        corr_value, corr_acc.n,
-                        abs(corr_value) >= config.correlation_threshold
-                    )
-
-                    push!(candidate_pairs, priority)
-                end
-            else
-                # Insufficient samples - include as low confidence
+            # Include pairs with high correlation or borderline cases
+            if abs(corr_value) >= (config.correlation_threshold)
                 directions = determine_directions(
                     Int(ci_idx), Int(cj_idx),
                     positive_complexes, negative_complexes, unrestricted_complexes
@@ -1321,20 +1154,28 @@ function streaming_correlation_filter(
 
                 priority = PairPriority(
                     Int(ci_idx), Int(cj_idx), directions,
-                    0.0, corr_acc.n, false
+                    corr_value, corr_acc.n,
+                    abs(corr_value) >= config.correlation_threshold
                 )
 
                 push!(candidate_pairs, priority)
             end
+        else
+            # Insufficient samples - include as low confidence
+            directions = determine_directions(
+                Int(ci_idx), Int(cj_idx),
+                positive_complexes, negative_complexes, unrestricted_complexes
+            )
 
-            # Update progress after processing each pair
-            pair_count += 1
-            ProgressMeter.update!(prog, pair_count)
+            priority = PairPriority(
+                Int(ci_idx), Int(cj_idx), directions,
+                0.0, corr_acc.n, false
+            )
+
+            push!(candidate_pairs, priority)
         end
-
-        # Finish the progress bar
-        ProgressMeter.finish!(prog)
     end
+
     # Log statistics
     high_corr_count = count(p -> p.is_high_confidence, candidate_pairs)
     low_sample_count = count(p -> p.n_samples < config.min_valid_samples, candidate_pairs)
