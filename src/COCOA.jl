@@ -1462,7 +1462,7 @@ function concordance_analysis(
     trivial_pairs = find_trivially_concordant_pairs(complexes)
     @info "Found trivially concordant pairs" n_pairs = length(trivial_pairs)
 
-    # Step 3: Identify balanced complexes via FVA (in addition to trivially balanced)
+    # Step 3: Identify balanced complexes via AVA (in addition to trivially balanced)
     @info "Identifying balanced complexes via activity varibability analysis (AVA)"
 
     # Create complex activity expressions for FVA

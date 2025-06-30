@@ -11,17 +11,40 @@ global_logger(ConsoleLogger(stderr, Logging.Info))
 
 # Load necessary packages
 using Distributed
-using SlurmClusterManager
 using JLD2
 using DataFrames
 
-# Add SLURM workers
-println("=== Setting up SLURM workers ===")
-manager = SlurmManager()
-addprocs(manager)
-println("✓ Added $(nworkers()) workers across $(length(Set(workers()))) nodes")
+# Check if we should add workers
+if nworkers() == 1
+    # No workers added via -p flag, try to add based on available CPUs
+    n_cpus = parse(Int, get(ENV, "SLURM_CPUS_PER_TASK", "1"))
 
-# Load packages on all workers
+    if n_cpus > 1
+        # Decide on worker/thread split based on total CPUs
+        if n_cpus <= 8
+            n_workers = n_cpus
+            n_threads = 1
+        elseif n_cpus <= 32
+            n_workers = div(n_cpus, 2)
+            n_threads = 2
+        else
+            n_workers = div(n_cpus, 4)
+            n_threads = 4
+        end
+
+        println("=== Auto-configuring workers ===")
+        println("Available CPUs: $n_cpus")
+        println("Adding $(n_workers-1) workers with $n_threads threads each")
+
+        addprocs(n_workers - 1; exeflags=`--threads=$n_threads`)
+    else
+        println("⚠️ Running with single process (no parallelism)")
+    end
+else
+    println("✓ Running with $(nworkers()) pre-configured workers")
+end
+
+# Load packages on all workers (if any exist)
 @everywhere begin
     # Simply use the parent directory of the script location
     project_path = abspath(joinpath(@__DIR__, ".."))
@@ -36,7 +59,7 @@ println("✓ Added $(nworkers()) workers across $(length(Set(workers()))) nodes"
     using HiGHS
     using GLPK
     using Gurobi
-    println("Worker $(myid()) ready on $(gethostname())")
+    println("Worker $(myid()) ready on $(gethostname()) with $(Threads.nthreads()) threads")
 end
 
 # Parse command line arguments with full support for all COCOA commands
@@ -103,7 +126,7 @@ function parse_commandline()
         "--correlation-threshold", "-c"
         help = "Correlation threshold for concordance"
         arg_type = Float64
-        default = 0.85
+        default = 0.95
         "--batch-size", "-b"
         help = "Batch size for concordance analysis"
         arg_type = Int
