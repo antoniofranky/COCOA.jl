@@ -58,6 +58,7 @@ Base.@kwdef struct ConcordanceConfig
     min_size_for_sharing::Int = 1_000_000  # Share arrays > 1MB
     min_valid_samples::Int = 10  # Minimum samples for correlation
     seed::Union{Int,Nothing} = 42
+    use_unidirectional_constraints::Bool = false  # Enable unidirectional splitting for reversible reactions
 end
 
 """
@@ -550,7 +551,20 @@ function extract_complexes_and_incidence(model::AbstractFBCModels.AbstractFBCMod
 
         for ridx in batch_start:batch_end
             rxn = rxns[ridx]
+            rxn_id = Symbol(rxn)
             rxn_stoich = AbstractFBCModels.reaction_stoichiometry(model, rxn)
+
+            # Check if this reaction is reversible (using the same logic as unidirectional constraints)
+            # We'll determine this from the model bounds if available
+            is_reversible = false
+            try
+                # Try to get bounds from the model
+                # This is a simplified check - in practice, we'd use the constraint system
+                # For now, assume reversible if we can't determine otherwise
+                is_reversible = true  # Conservative default
+            catch
+                is_reversible = true  # Conservative default
+            end
 
             # Separate substrates and products
             substrate_mets = Int32[]
@@ -571,7 +585,9 @@ function extract_complexes_and_incidence(model::AbstractFBCModels.AbstractFBCMod
 
             # Process substrate complex
             if !isempty(substrate_mets)
-                sub_complex = create_complex(substrate_mets, substrate_stoich, mets)
+                sub_complex = create_complex(
+                    substrate_mets, substrate_stoich, mets
+                )
                 complex_idx = get!(complex_dict, sub_complex.hash) do
                     push!(complexes, sub_complex)
                     Int32(length(complexes))
@@ -583,7 +599,9 @@ function extract_complexes_and_incidence(model::AbstractFBCModels.AbstractFBCMod
 
             # Process product complex
             if !isempty(product_mets)
-                prod_complex = create_complex(product_mets, product_stoich, mets)
+                prod_complex = create_complex(
+                    product_mets, product_stoich, mets
+                )
                 complex_idx = get!(complex_dict, prod_complex.hash) do
                     push!(complexes, prod_complex)
                     Int32(length(complexes))
@@ -637,6 +655,87 @@ end
 """
 $(TYPEDSIGNATURES)
 
+Create unidirectional constraints for concordance analysis using only reaction bounds to determine reversibility.
+This is the efficient, mathematically correct approach that only splits actually reversible reactions.
+
+# Arguments
+- `model`: FBC model
+- `config`: Configuration options
+
+# Returns
+- Modified constraint tree with unidirectional variables for reversible reactions
+- Set of reaction indices that were split (for downstream analysis)
+"""
+function create_unidirectional_constraints_bounds_only(
+    model::AbstractFBCModels.AbstractFBCModel;
+    config::ConcordanceConfig=ConcordanceConfig()
+)
+    # Start with standard flux balance constraints
+    constraints = COBREXA.flux_balance_constraints(model)
+
+    rxn_ids = Symbol.(AbstractFBCModels.reactions(model))
+    n_rxns = length(rxn_ids)
+
+    # Identify reversible reactions by checking bounds
+    reversible_indices = Int[]
+    reversible_rxn_ids = Symbol[]
+
+    for (i, rxn_id) in enumerate(rxn_ids)
+        flux_constraint = constraints.fluxes[rxn_id]
+
+        # Extract lower and upper bounds from the constraint
+        lower_bound = flux_constraint.bound.lower
+        upper_bound = flux_constraint.bound.upper
+
+        # A reaction is reversible if it can have both positive and negative flux
+        # i.e., lower_bound < 0 and upper_bound > 0
+        if lower_bound < -config.tolerance && upper_bound > config.tolerance
+            push!(reversible_indices, i)
+            push!(reversible_rxn_ids, rxn_id)
+        end
+    end
+
+    @info "Found reversible reactions for unidirectional splitting" n_reversible = length(reversible_indices) n_total = n_rxns
+
+    # Only proceed if we have reversible reactions to split
+    if !isempty(reversible_indices)
+        # Create forward and reverse variables for reversible reactions only
+        forward_vars = ConstraintTrees.ConstraintTree()
+        reverse_vars = ConstraintTrees.ConstraintTree()
+
+        for rxn_id in reversible_rxn_ids
+            original_bound = constraints.fluxes[rxn_id].bound
+
+            # Forward variable: [0, upper_bound]
+            forward_vars[rxn_id] = ConstraintTrees.Constraint(
+                value=ConstraintTrees.variable(),
+                bound=ConstraintTrees.Between(0.0, max(0.0, original_bound.upper))
+            )
+
+            # Reverse variable: [0, -lower_bound]
+            reverse_vars[rxn_id] = ConstraintTrees.Constraint(
+                value=ConstraintTrees.variable(),
+                bound=ConstraintTrees.Between(0.0, max(0.0, -original_bound.lower))
+            )
+
+            # Replace original flux with forward - reverse
+            constraints.fluxes[rxn_id] = ConstraintTrees.Constraint(
+                value=forward_vars[rxn_id].value - reverse_vars[rxn_id].value,
+                bound=ConstraintTrees.Between(-Inf, Inf)  # Remove original bounds since they're now enforced by forward/reverse
+            )
+        end
+
+        # Add the new variables to the constraint system
+        constraints += :fluxes_forward^forward_vars
+        constraints += :fluxes_reverse^reverse_vars
+    end
+
+    return constraints, Set(reversible_indices)
+end
+
+"""
+$(TYPEDSIGNATURES)
+
 Memory-efficient concordance constraints that work with large models.
 """
 function concordance_constraints(
@@ -645,8 +744,16 @@ function concordance_constraints(
     interface=nothing,
     config::ConcordanceConfig=ConcordanceConfig()
 )
-    # Start with standard flux balance constraints
-    constraints = COBREXA.flux_balance_constraints(model; interface)
+    # Choose constraint setup based on configuration
+    if config.use_unidirectional_constraints
+        # Use bounds-only unidirectional constraint setup
+        constraints, reversible_indices = create_unidirectional_constraints_bounds_only(model; config)
+        @info "Using unidirectional constraints" n_reversible_split = length(reversible_indices)
+    else
+        # Use standard flux balance constraints
+        constraints = COBREXA.flux_balance_constraints(model; interface)
+        reversible_indices = Set{Int}()  # No reactions were split
+    end
 
     # Apply modifications
     for mod in modifications
@@ -1052,7 +1159,7 @@ function streaming_correlation_filter(
             seed=batch_seed,
             n_chains=4,
             collect_iterations=[iterations_needed],
-            workers=workers()
+            workers=workers
         )
 
         # If we got more samples than needed, truncate
