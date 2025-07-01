@@ -29,8 +29,8 @@ using .ElementarySteps
 using .ModelPreparation
 
 # Configuration constants
-const DEFAULT_BATCH_SIZE = 10
-const DEFAULT_STAGE_SIZE = 100
+const DEFAULT_BATCH_SIZE = 100
+const DEFAULT_STAGE_SIZE = 500
 const DEFAULT_SAMPLE_BATCH_SIZE = 100
 const DEFAULT_CORRELATION_THRESHOLD = 0.95
 const DEFAULT_TOLERANCE = 1e-9
@@ -40,7 +40,9 @@ const MAX_MEMORY_PER_WORKER = 2e9  # 2GB per worker default
 export concordance_constraints, concordance_analysis
 export split_into_elementary_steps
 export prepare_model_for_concordance
-export ConcordanceConfig, ConcordanceTracker
+export ConcordanceConfig, ConcordanceTracker, AnalysisBuffers
+# TODO: Remove:
+export ensure_buffer_capacity!
 
 """
 Configuration for concordance analysis with memory and performance optimizations.
@@ -59,6 +61,70 @@ Base.@kwdef struct ConcordanceConfig
     min_valid_samples::Int = 10  # Minimum samples for correlation
     seed::Union{Int,Nothing} = 42
     use_unidirectional_constraints::Bool = true  # Enable unidirectional splitting for reversible reactions
+end
+
+"""
+Pre-allocated buffers for memory-efficient concordance analysis.
+Reusing these buffers eliminates allocation overhead during analysis.
+"""
+mutable struct AnalysisBuffers
+    # Activity computation buffers
+    activities::Matrix{Float64}  # [n_active_complexes, batch_size]
+    sample_buffer::Matrix{Float64}  # [batch_size, n_reactions]
+    flux_buffer::Vector{Float64}  # [n_reactions]
+
+    # Optimization result buffers
+    optimization_results::Vector{Float64}  # For collecting results
+    constraint_coeffs::Vector{Float64}  # For building constraints
+
+    # Correlation computation buffers
+    x_values::Vector{Float64}  # For correlation calculation
+    y_values::Vector{Float64}  # For correlation calculation
+
+    # Sparse matrix operation buffers
+    sparse_indices::Vector{Int}  # For sparse operations
+    sparse_values::Vector{Float64}  # For sparse operations
+
+    function AnalysisBuffers(n_active_complexes::Int, n_reactions::Int, max_batch_size::Int)
+        new(
+            zeros(Float64, n_active_complexes, max_batch_size),
+            zeros(Float64, max_batch_size, n_reactions),
+            zeros(Float64, n_reactions),
+            zeros(Float64, max_batch_size),
+            zeros(Float64, n_reactions),
+            zeros(Float64, max_batch_size),
+            zeros(Float64, max_batch_size),
+            Vector{Int}(undef, n_reactions),
+            Vector{Float64}(undef, n_reactions)
+        )
+    end
+end
+
+"""
+Resize buffers if needed to accommodate larger batch sizes.
+"""
+function ensure_buffer_capacity!(buffers::AnalysisBuffers, required_batch_size::Int, n_reactions::Int)
+    current_batch_capacity = size(buffers.activities, 2)
+
+    if required_batch_size > current_batch_capacity
+        # Resize activity and sample buffers
+        n_active = size(buffers.activities, 1)
+        buffers.activities = zeros(Float64, n_active, required_batch_size)
+        buffers.sample_buffer = zeros(Float64, required_batch_size, n_reactions)
+
+        # Resize result buffers
+        resize!(buffers.optimization_results, required_batch_size)
+        resize!(buffers.x_values, required_batch_size)
+        resize!(buffers.y_values, required_batch_size)
+    end
+
+    # Ensure reaction-sized buffers are adequate
+    if length(buffers.flux_buffer) < n_reactions
+        resize!(buffers.flux_buffer, n_reactions)
+        resize!(buffers.constraint_coeffs, n_reactions)
+        resize!(buffers.sparse_indices, n_reactions)
+        resize!(buffers.sparse_values, n_reactions)
+    end
 end
 
 """
@@ -544,6 +610,16 @@ function extract_complexes_and_incidence(model::AbstractFBCModels.AbstractFBCMod
     sizehint!(J_cols, 2 * n_rxns)
     sizehint!(V_vals, 2 * n_rxns)
 
+    # Pre-allocate buffers for metabolite processing to avoid repeated allocations
+    substrate_mets = Int32[]
+    substrate_stoich = Float32[]
+    product_mets = Int32[]
+    product_stoich = Float32[]
+    sizehint!(substrate_mets, 10)  # Reasonable estimate for typical reaction size
+    sizehint!(substrate_stoich, 10)
+    sizehint!(product_mets, 10)
+    sizehint!(product_stoich, 10)
+
     # Process reactions in batches
     batch_size = min(1000, n_rxns)
     for batch_start in 1:batch_size:n_rxns
@@ -566,11 +642,11 @@ function extract_complexes_and_incidence(model::AbstractFBCModels.AbstractFBCMod
                 is_reversible = true  # Conservative default
             end
 
-            # Separate substrates and products
-            substrate_mets = Int32[]
-            substrate_stoich = Float32[]
-            product_mets = Int32[]
-            product_stoich = Float32[]
+            # Separate substrates and products (reuse pre-allocated buffers)
+            empty!(substrate_mets)
+            empty!(substrate_stoich)
+            empty!(product_mets)
+            empty!(product_stoich)
 
             for (met, coeff) in rxn_stoich
                 met_idx = met_idx_map[met]
@@ -655,82 +731,53 @@ end
 """
 $(TYPEDSIGNATURES)
 
-Create unidirectional constraints for concordance analysis using only reaction bounds to determine reversibility.
-This is the efficient, mathematically correct approach that only splits actually reversible reactions.
+Create unidirectional constraints for concordance analysis by splitting reactions into forward and reverse fluxes.
 
 # Arguments
 - `model`: FBC model
 - `config`: Configuration options
 
 # Returns
-- Modified constraint tree with unidirectional variables for reversible reactions
+- Modified constraint tree with unidirectional variables for all reactions
 - Set of reaction indices that were split (for downstream analysis)
 """
-function create_unidirectional_constraints_bounds_only(
+function create_unidirectional_constraints(
     model::AbstractFBCModels.AbstractFBCModel;
     config::ConcordanceConfig=ConcordanceConfig()
 )
     # Start with standard flux balance constraints
     constraints = COBREXA.flux_balance_constraints(model)
 
+    # Use COBREXA's built-in functions for unidirectional splitting of all reactions
+    constraints += COBREXA.sign_split_variables(
+        constraints.fluxes,
+        positive=:fluxes_forward,
+        negative=:fluxes_reverse
+    )
+
+    constraints *= :directional_flux_balance^COBREXA.sign_split_constraints(
+        positive=constraints.fluxes_forward,
+        negative=constraints.fluxes_reverse,
+        signed=constraints.fluxes,
+    )
+
+    # Substitute and prune variables for efficiency
+    subst_vals = [ConstraintTrees.variable(; idx).value for idx = 1:ConstraintTrees.variable_count(constraints)]
+
+    constraints.fluxes = ConstraintTrees.zip(constraints.fluxes, constraints.fluxes_forward, constraints.fluxes_reverse) do f, p, n
+        (var_idx,) = f.value.idxs
+        subst_value = p.value - n.value
+        subst_vals[var_idx] = subst_value
+        ConstraintTrees.Constraint(subst_value) # bidirectional bound is dropped
+    end
+
+    constraints = ConstraintTrees.prune_variables(ConstraintTrees.substitute(constraints, subst_vals))
+
+    # All reactions were split since we applied splitting to all fluxes
     rxn_ids = Symbol.(AbstractFBCModels.reactions(model))
-    n_rxns = length(rxn_ids)
+    all_indices = Set(1:length(rxn_ids))
 
-    # Identify reversible reactions by checking bounds
-    reversible_indices = Int[]
-    reversible_rxn_ids = Symbol[]
-
-    for (i, rxn_id) in enumerate(rxn_ids)
-        flux_constraint = constraints.fluxes[rxn_id]
-
-        # Extract lower and upper bounds from the constraint
-        lower_bound = flux_constraint.bound.lower
-        upper_bound = flux_constraint.bound.upper
-
-        # A reaction is reversible if it can have both positive and negative flux
-        # i.e., lower_bound < 0 and upper_bound > 0
-        if lower_bound < -config.tolerance && upper_bound > config.tolerance
-            push!(reversible_indices, i)
-            push!(reversible_rxn_ids, rxn_id)
-        end
-    end
-
-    @info "Found reversible reactions for unidirectional splitting" n_reversible = length(reversible_indices) n_total = n_rxns
-
-    # Only proceed if we have reversible reactions to split
-    if !isempty(reversible_indices)
-        # Create forward and reverse variables for reversible reactions only
-        forward_vars = ConstraintTrees.ConstraintTree()
-        reverse_vars = ConstraintTrees.ConstraintTree()
-
-        for rxn_id in reversible_rxn_ids
-            original_bound = constraints.fluxes[rxn_id].bound
-
-            # Forward variable: [0, upper_bound]
-            forward_vars[rxn_id] = ConstraintTrees.Constraint(
-                value=ConstraintTrees.variable(),
-                bound=ConstraintTrees.Between(0.0, max(0.0, original_bound.upper))
-            )
-
-            # Reverse variable: [0, -lower_bound]
-            reverse_vars[rxn_id] = ConstraintTrees.Constraint(
-                value=ConstraintTrees.variable(),
-                bound=ConstraintTrees.Between(0.0, max(0.0, -original_bound.lower))
-            )
-
-            # Replace original flux with forward - reverse
-            constraints.fluxes[rxn_id] = ConstraintTrees.Constraint(
-                value=forward_vars[rxn_id].value - reverse_vars[rxn_id].value,
-                bound=ConstraintTrees.Between(-Inf, Inf)  # Remove original bounds since they're now enforced by forward/reverse
-            )
-        end
-
-        # Add the new variables to the constraint system
-        constraints += :fluxes_forward^forward_vars
-        constraints += :fluxes_reverse^reverse_vars
-    end
-
-    return constraints, Set(reversible_indices)
+    return constraints, all_indices
 end
 
 """
@@ -747,12 +794,12 @@ function concordance_constraints(
     # Choose constraint setup based on configuration
     if config.use_unidirectional_constraints
         # Use bounds-only unidirectional constraint setup
-        constraints, reversible_indices = create_unidirectional_constraints_bounds_only(model; config)
-        @info "Using unidirectional constraints" n_reversible_split = length(reversible_indices)
+        constraints, split_indices = create_unidirectional_constraints(model; config)
+        @info "Using unidirectional constraints" n_reversible_split = length(split_indices)
     else
         # Use standard flux balance constraints
         constraints = COBREXA.flux_balance_constraints(model; interface)
-        reversible_indices = Set{Int}()  # No reactions were split
+        split_indices = Set{Int}()  # No reactions were split
     end
 
     # Apply modifications
@@ -1080,12 +1127,7 @@ function streaming_correlation_filter(
 
     # Get sparse matrix for faster operations
     A_sparse = isa(A_matrix, SharedSparseMatrix) ? sparse(A_matrix) : sparse(A_matrix)
-
-    # Prepare streaming statistics for complex activities
-    stats = Dict{Int32,StreamingStats}()
-    for i in active_indices
-        stats[i] = StreamingStats()
-    end
+    n_reactions = size(A_sparse, 2)
 
     # Calculate optimal batch size based on available memory
     memory_per_active_complex = 8  # bytes per sample (Float64)
@@ -1097,6 +1139,15 @@ function streaming_correlation_filter(
         config.sample_batch_size === nothing ? 100 : config.sample_batch_size,
         config.sample_size  # Never use a batch larger than total requested samples
     )
+
+    # Create pre-allocated buffers for efficient memory usage
+    buffers = AnalysisBuffers(n_active, n_reactions, effective_batch_size)
+
+    # Prepare streaming statistics for complex activities
+    stats = Dict{Int32,StreamingStats}()
+    for i in active_indices
+        stats[i] = StreamingStats()
+    end
 
     # Track high-variance complexes for filtering
     high_variance_complexes = Set{Int32}()
@@ -1132,9 +1183,6 @@ function streaming_correlation_filter(
     n_batches = ceil(Int, config.sample_size / effective_batch_size)
     correlation_pairs = Dict{Tuple{Int32,Int32},StreamingCorrelation}()
 
-    # Pre-allocate matrix for batch activities
-    activities = zeros(Float64, n_active, effective_batch_size)
-
     # Progress tracking
     prog = Progress(config.sample_size, desc="Generating samples: ", barlen=40)
 
@@ -1142,6 +1190,9 @@ function streaming_correlation_filter(
     for batch in 1:n_batches
         # Determine batch size for this iteration
         current_batch_size = min(effective_batch_size, config.sample_size - (batch - 1) * effective_batch_size)
+
+        # Ensure buffers can handle this batch size
+        ensure_buffer_capacity!(buffers, current_batch_size, n_reactions)
 
         # Generate random batch seed
         batch_seed = rand(master_rng, UInt)
@@ -1167,25 +1218,26 @@ function streaming_correlation_filter(
             sample_matrix = sample_matrix[1:current_batch_size, :]
         end
 
-        # Compute complex activities in parallel using threads
+        # Compute complex activities in parallel using threads (use pre-allocated buffer)
+        activities_view = view(buffers.activities, :, 1:current_batch_size)
         Threads.@threads for j in 1:n_active
             complex_idx = active_indices[j]
             row = A_sparse[complex_idx, :]
 
             for s in 1:current_batch_size
                 # Compute activity using sparse dot product
-                activities[j, s] = dot(row, sample_matrix[s, :])
+                activities_view[j, s] = dot(row, sample_matrix[s, :])
             end
         end
 
         # Update streaming statistics and correlations
-        GC.@preserve activities begin
+        GC.@preserve activities_view begin
             # First pass: Update statistics and identify high-variance complexes
             for j in 1:n_active
                 complex_idx = active_indices[j]
 
                 for s in 1:current_batch_size
-                    update!(stats[complex_idx], activities[j, s])
+                    update!(stats[complex_idx], activities_view[j, s])
                 end
 
                 # Check for high variance
@@ -1227,8 +1279,8 @@ function streaming_correlation_filter(
                         # Update correlation with current batch
                         for s in 1:current_batch_size
                             # Only consider samples where at least one complex has activity
-                            if abs(activities[i, s]) > config.tolerance || abs(activities[j, s]) > config.tolerance
-                                update!(correlation_pairs[pair_key], activities[i, s], activities[j, s])
+                            if abs(activities_view[i, s]) > config.tolerance || abs(activities_view[j, s]) > config.tolerance
+                                update!(correlation_pairs[pair_key], activities_view[i, s], activities_view[j, s])
                             end
                         end
                     end
@@ -1291,7 +1343,7 @@ function streaming_correlation_filter(
     total_possible_pairs = Int(n_active * (n_active - 1) / 2)
     filtered_count = total_possible_pairs - length(candidate_pairs) - length(trivial_pairs)
 
-    @info "Correlation filtering complete" total_pairs = length(candidate_pairs) high_correlation = high_corr_count low_samples = low_sample_count filtered_pairs = filtered_count skipped_trivial = length(trivial_pairs)
+    @info "Correlation filtering complete" total_pairs = length(candidate_pairs) high_activity_correlation = high_corr_count low_samples = low_sample_count filtered_pairs = filtered_count skipped_trivial = length(trivial_pairs)
 
     return candidate_pairs
 end
