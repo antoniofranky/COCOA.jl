@@ -58,7 +58,7 @@ Base.@kwdef struct ConcordanceConfig
     min_size_for_sharing::Int = 1_000_000  # Share arrays > 1MB
     min_valid_samples::Int = 10  # Minimum samples for correlation
     seed::Union{Int,Nothing} = 42
-    use_unidirectional_constraints::Bool = false  # Enable unidirectional splitting for reversible reactions
+    use_unidirectional_constraints::Bool = true  # Enable unidirectional splitting for reversible reactions
 end
 
 """
@@ -1159,7 +1159,7 @@ function streaming_correlation_filter(
             seed=batch_seed,
             n_chains=4,
             collect_iterations=[iterations_needed],
-            workers=workers
+            workers=workers()
         )
 
         # If we got more samples than needed, truncate
