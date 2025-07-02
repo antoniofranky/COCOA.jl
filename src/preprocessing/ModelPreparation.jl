@@ -70,21 +70,6 @@ function prepare_model_for_concordance(model::AbstractFBCModel;
         remove_zero_stoichiometry!(work_model, remove_zero_rows, remove_zero_cols)
     end
 
-    # 4. Look for blocked reactions again
-    if remove_blocked
-        if fast
-            @info "Looking for blocked reactions using fast LP preprocessing..."
-            blocked_fast = find_blocked_reactions_fast(work_model, optimizer, flux_tolerance)
-        else
-            @info "Looking for blocked reactions using parallel FVA preprocessing..."
-            blocked_fast = find_blocked_reactions_parallel(work_model, optimizer, flux_tolerance, workers)
-        end
-        if !isempty(blocked_fast)
-            remove_reactions!(work_model, blocked_fast)
-            @info "Removed $(length(blocked_fast)) blocked reactions)"
-        end
-    end
-
     @info "Model preparation complete: $(n_original_rxns) → $(length(work_model.reactions)) reactions"
     return work_model
 

@@ -6,6 +6,43 @@ COnstraint-based COncordance Analysis for metabolic networks - optimized for lar
 This module implements memory-efficient methods for identifying concordant complexes in metabolic
 networks. Optimized for models with >30,000 complexes and reactions on HPC clusters with
 SharedArrays support for single-node parallelism.
+
+## Reproducibility Guarantees
+
+COCOA implements best practices for scientific reproducibility using hierarchical random number
+generation (RNG) with StableRNGs.jl:
+
+- **Cross-platform reproducibility**: Uses StableRNGs instead of Julia's default RNG
+- **Hierarchical seeding**: Master seed generates deterministic component-specific seeds
+- **Deterministic sampling**: All random operations (warmup, batching, sampling) are reproducible
+- **Seed logging**: All component seeds are logged for verification and debugging
+
+### RNG Components
+
+The analysis pipeline uses a minimal set of RNGs for reproducibility:
+- **Master RNG**: Generates deterministic seeds for all components
+- **Sampling RNG**: Handles all random sampling operations (warmup selection, batch seeds, etc.)
+
+This simplified approach ensures reproducibility while minimizing complexity.
+
+### Usage for Reproducible Results
+
+```julia
+# Same master seed will produce identical results across runs and platforms
+results1 = concordance_analysis(model; optimizer=optimizer, seed=1234)
+results2 = concordance_analysis(model; optimizer=optimizer, seed=1234)
+# results1 == results2 (within numerical precision)
+
+# Different seeds produce different but reproducible results
+results3 = concordance_analysis(model; optimizer=optimizer, seed=5678)
+# results3 != results1, but results3 is reproducible with seed=5678
+```
+
+For complete reproducibility, ensure:
+1. Same Julia version and package versions
+2. Same model and analysis parameters  
+3. Same optimizer and solver settings
+4. Same seed value
 """
 module COCOA
 
@@ -19,48 +56,128 @@ using SharedArrays
 using DataFrames
 using Statistics
 using Random
+using StableRNGs
 using JuMP
 using DocStringExtensions
 using ProgressMeter
+using JLD2
 
 include("preprocessing/ElementarySteps.jl")
 include("preprocessing/ModelPreparation.jl")
 using .ElementarySteps
 using .ModelPreparation
 
-# Configuration constants
-const DEFAULT_BATCH_SIZE = 100
-const DEFAULT_STAGE_SIZE = 500
-const DEFAULT_SAMPLE_BATCH_SIZE = 100
-const DEFAULT_CORRELATION_THRESHOLD = 0.95
-const DEFAULT_TOLERANCE = 1e-9
-const MAX_MEMORY_PER_WORKER = 2e9  # 2GB per worker default
-
 # Re-export main functions
 export concordance_constraints, concordance_analysis
 export split_into_elementary_steps
 export prepare_model_for_concordance
-export ConcordanceConfig, ConcordanceTracker, AnalysisBuffers
-# TODO: Remove:
-export ensure_buffer_capacity!
+export ConcordanceTracker, AnalysisBuffers
+# Export RNG management utilities for advanced users
+export RNGManager, create_master_rng, get_rng, log_seeds
 
 """
-Configuration for concordance analysis with memory and performance optimizations.
+RNG Management and Hierarchical Seeding Utilities
+
+These functions implement best practices for reproducible random number generation
+in scientific computing, using StableRNGs for cross-platform reproducibility.
 """
-Base.@kwdef struct ConcordanceConfig
-    tolerance::Float64 = DEFAULT_TOLERANCE
-    correlation_threshold::Float64 = DEFAULT_CORRELATION_THRESHOLD
-    sample_size::Int = 1000
-    sample_batch_size::Int = DEFAULT_SAMPLE_BATCH_SIZE
-    concordance_batch_size::Int = DEFAULT_BATCH_SIZE
-    stage_size::Int = DEFAULT_STAGE_SIZE
-    max_memory_per_worker::Float64 = MAX_MEMORY_PER_WORKER
-    reduce_model::Bool = false
-    use_shared_arrays::Bool = true  # Enable SharedArrays by default
-    min_size_for_sharing::Int = 1_000_000  # Share arrays > 1MB
-    min_valid_samples::Int = 10  # Minimum samples for correlation
-    seed::Union{Int,Nothing} = 42
-    use_unidirectional_constraints::Bool = true  # Enable unidirectional splitting for reversible reactions
+
+"""
+    create_master_rng(seed::Int=1234) -> StableRNG
+
+Create a master RNG with the given seed for hierarchical seeding.
+This ensures reproducible generation of seeds for different components.
+"""
+function create_master_rng(seed::Int=1234)
+    return StableRNG(seed)
+end
+
+"""
+    derive_seed(master_rng::AbstractRNG, component::String) -> UInt64
+
+Derive a deterministic seed for a specific component from the master RNG.
+Each component gets a unique, reproducible seed based on the master seed.
+"""
+function derive_seed(master_rng::AbstractRNG, component::String)
+    # Create a temporary RNG to get a deterministic seed
+    temp_rng = copy(master_rng)
+    # Hash the component name to get a unique offset
+    component_hash = hash(component)
+    # Advance the RNG state based on the hash to ensure uniqueness
+    for _ in 1:(component_hash%100+1)
+        rand(temp_rng)
+    end
+    return rand(temp_rng, UInt64)
+end
+
+"""
+    create_component_rng(master_rng::AbstractRNG, component::String) -> StableRNG
+
+Create a dedicated RNG for a specific component using hierarchical seeding.
+"""
+function create_component_rng(master_rng::AbstractRNG, component::String)
+    seed = derive_seed(master_rng, component)
+    return StableRNG(seed)
+end
+
+"""
+    RNGManager
+
+Manages RNG instances for different components of the analysis pipeline.
+Ensures reproducible, hierarchical seeding across all random operations.
+
+# Fields
+- `master_rng`: The master RNG for hierarchical seeding
+- `component_rngs`: Dictionary of component-specific RNGs
+- `seed_log`: Log of seeds used for each component for reproducibility
+"""
+mutable struct RNGManager
+    master_rng::StableRNG
+    component_rngs::Dict{String,StableRNG}
+    seed_log::Dict{String,UInt64}
+
+    function RNGManager(master_seed::Int=1234)
+        master_rng = create_master_rng(master_seed)
+        new(master_rng, Dict{String,StableRNG}(), Dict{String,UInt64}())
+    end
+end
+
+"""
+    get_rng(manager::RNGManager, component::String) -> StableRNG
+
+Get or create an RNG for a specific component.
+Logs the seed for reproducibility documentation.
+"""
+function get_rng(manager::RNGManager, component::String)
+    if !haskey(manager.component_rngs, component)
+        seed = derive_seed(manager.master_rng, component)
+        manager.component_rngs[component] = StableRNG(seed)
+        manager.seed_log[component] = seed
+        @debug "Created RNG for component '$component' with seed $seed"
+    end
+    return manager.component_rngs[component]
+end
+
+"""
+    reset_component(manager::RNGManager, component::String)
+
+Reset a specific component's RNG to its initial state for reproducible re-runs.
+"""
+function reset_component(manager::RNGManager, component::String)
+    if haskey(manager.seed_log, component)
+        seed = manager.seed_log[component]
+        manager.component_rngs[component] = StableRNG(seed)
+        @debug "Reset RNG for component '$component' to seed $seed"
+    end
+end
+
+"""
+    log_seeds(manager::RNGManager) -> Dict{String, UInt64}
+
+Return a copy of the seed log for reproducibility documentation.
+"""
+function log_seeds(manager::RNGManager)
+    return copy(manager.seed_log)
 end
 
 """
@@ -589,7 +706,8 @@ $(TYPEDSIGNATURES)
 Extract complexes and build incidence matrix with optional shared memory.
 """
 function extract_complexes_and_incidence(model::AbstractFBCModels.AbstractFBCModel;
-    config::ConcordanceConfig=ConcordanceConfig())
+    use_shared_arrays::Bool=true,
+    min_size_for_sharing::Int=1_000_000)
     rxns = AbstractFBCModels.reactions(model)
     mets = AbstractFBCModels.metabolites(model)
     n_rxns = length(rxns)
@@ -697,8 +815,8 @@ function extract_complexes_and_incidence(model::AbstractFBCModels.AbstractFBCMod
     A_sparse = sparse(Int.(I_rows), Int.(J_cols), V_vals, length(complexes), n_rxns)
 
     # Use shared memory if enabled and beneficial
-    if config.use_shared_arrays && nworkers() > 0 &&
-       (nnz(A_sparse) * (sizeof(Int32) + sizeof(Float32)) > config.min_size_for_sharing)
+    if use_shared_arrays && nworkers() > 0 &&
+       (nnz(A_sparse) * (sizeof(Int32) + sizeof(Float32)) > min_size_for_sharing)
         A_matrix = SharedSparseMatrix(A_sparse)
     else
         A_matrix = SparseIncidenceMatrix(Int.(I_rows), Int.(J_cols), V_vals,
@@ -735,15 +853,13 @@ Create unidirectional constraints for concordance analysis by splitting reaction
 
 # Arguments
 - `model`: FBC model
-- `config`: Configuration options
 
 # Returns
 - Modified constraint tree with unidirectional variables for all reactions
 - Set of reaction indices that were split (for downstream analysis)
 """
 function create_unidirectional_constraints(
-    model::AbstractFBCModels.AbstractFBCModel;
-    config::ConcordanceConfig=ConcordanceConfig()
+    model::AbstractFBCModels.AbstractFBCModel
 )
     # Start with standard flux balance constraints
     constraints = COBREXA.flux_balance_constraints(model)
@@ -789,12 +905,14 @@ function concordance_constraints(
     model::AbstractFBCModels.AbstractFBCModel;
     modifications=Function[],
     interface=nothing,
-    config::ConcordanceConfig=ConcordanceConfig()
+    use_unidirectional_constraints::Bool=true,
+    use_shared_arrays::Bool=true,
+    min_size_for_sharing::Int=1_000_000
 )
     # Choose constraint setup based on configuration
-    if config.use_unidirectional_constraints
+    if use_unidirectional_constraints
         # Use bounds-only unidirectional constraint setup
-        constraints, split_indices = create_unidirectional_constraints(model; config)
+        constraints, split_indices = create_unidirectional_constraints(model)
         @info "Using unidirectional constraints" n_reversible_split = length(split_indices)
     else
         # Use standard flux balance constraints
@@ -808,7 +926,8 @@ function concordance_constraints(
     end
 
     # Extract complexes with memory optimization
-    complexes, A_matrix, complex_dict = extract_complexes_and_incidence(model; config)
+    complexes, A_matrix, complex_dict = extract_complexes_and_incidence(model;
+        use_shared_arrays, min_size_for_sharing)
 
     # Create complex activity variables
     rxn_ids = Symbol.(AbstractFBCModels.reactions(model))
@@ -1105,107 +1224,82 @@ function streaming_correlation_filter(
     negative_complexes::Set{Int},
     unrestricted_complexes::Set{Int},
     trivial_pairs::Set{Tuple{Int,Int}};
+    constraints::ConstraintTree,
     optimizer,
     settings=[],
-    config::ConcordanceConfig=ConcordanceConfig()
+    tolerance::Float64=1e-9,
+    correlation_threshold::Float64=0.95,
+    sample_size::Int=1000,
+    sample_batch_size::Int=100,
+    max_memory_per_worker::Float64=2e9,
+    min_valid_samples::Int=10,
+    seed::Union{Int,Nothing}=42
 )
-    # Setup random number generator with seed for reproducibility
-    master_rng = Random.MersenneTwister(config.seed === nothing ? rand(UInt) : config.seed)
+    # Setup RNG
+    master_seed = seed === nothing ? 1234 : seed
+    rng_manager = RNGManager(master_seed)
 
-    # Filter out balanced complexes
-    active_indices = Int32[]
-    for (i, c) in enumerate(complexes)
-        if !(c.id in balanced_complexes)
-            push!(active_indices, Int32(i))
-        end
-    end
+    @info "Starting efficient streaming correlation analysis" master_seed = master_seed
 
-    n_active = length(active_indices)
+    # Filter active complexes
+    active_complexes = [c for c in complexes if !(c.id in balanced_complexes)]
+    n_active = length(active_complexes)
+
     if n_active == 0
         return PairPriority[]
     end
 
-    # Get sparse matrix for faster operations
-    A_sparse = isa(A_matrix, SharedSparseMatrix) ? sparse(A_matrix) : sparse(A_matrix)
-    n_reactions = size(A_sparse, 2)
+    @info "Starting streaming correlation analysis" n_active total_samples_needed = sample_size
 
-    # Calculate optimal batch size based on available memory
-    memory_per_active_complex = 8  # bytes per sample (Float64)
-    available_memory_for_samples = config.max_memory_per_worker * 0.5  # Use half of available memory
-    max_samples_in_memory = floor(Int, available_memory_for_samples / (n_active * memory_per_active_complex))
+    # Generate warmup points from complex activities (NO REBUILDING!)
+    @info "Generating warmup points from existing complex activities"
 
-    effective_batch_size = min(
-        max_samples_in_memory,
-        config.sample_batch_size === nothing ? 100 : config.sample_batch_size,
-        config.sample_size  # Never use a batch larger than total requested samples
-    )
-
-    # Create pre-allocated buffers for efficient memory usage
-    buffers = AnalysisBuffers(n_active, n_reactions, effective_batch_size)
-
-    # Prepare streaming statistics for complex activities
-    stats = Dict{Int32,StreamingStats}()
-    for i in active_indices
-        stats[i] = StreamingStats()
-    end
-
-    # Track high-variance complexes for filtering
-    high_variance_complexes = Set{Int32}()
-    variance_threshold = config.tolerance * 100  # Threshold for considering a complex as high-variance
-
-    @info "Starting streaming correlation analysis" n_active effective_batch_size total_samples_needed = config.sample_size
-
-    # Generate constraints once
-    constraints = flux_balance_constraints(model)
-
-    # Generate diverse warmup points using FVA (do this just once)
-    @info "Generating diverse warmup points"
+    # Sample directly from the existing constraints.complexes
     warmup = vcat(
         (
             transpose(v) for (_, vs) in COBREXA.constraints_variability(
                 constraints,
-                constraints.fluxes;
+                constraints.complexes;  # Use existing complex constraints directly!
                 optimizer=optimizer,
+                settings=settings,
                 output=(_, om) -> JuMP.value.(om[:x]),
                 output_type=Vector{Float64},
-                workers=workers(),
+                workers=workers()
             ) for v in vs
         )...,
     )
 
     # Limit warmup points to control memory usage
     if size(warmup, 1) > 100
-        indices = randperm(size(warmup, 1))[1:100]
+        sampling_rng = get_rng(rng_manager, "sampling")
+        indices = sort(randperm(sampling_rng, size(warmup, 1))[1:100])
         warmup = warmup[indices, :]
+        @info "Limited warmup points to 100 using deterministic selection"
     end
 
-    # Sample in batches and update statistics
-    n_batches = ceil(Int, config.sample_size / effective_batch_size)
-    correlation_pairs = Dict{Tuple{Int32,Int32},StreamingCorrelation}()
+    @info "Generated warmup points" warmup_size = size(warmup) warmup_range = (minimum(warmup), maximum(warmup))
+
+    # Sample complex activities directly from existing constraints
+    n_batches = ceil(Int, sample_size / sample_batch_size)
+    correlation_pairs = Dict{Tuple{Symbol,Symbol},StreamingCorrelation}()
+    sampling_rng = get_rng(rng_manager, "sampling")
 
     # Progress tracking
-    prog = Progress(config.sample_size, desc="Generating samples: ", barlen=40)
+    prog = Progress(sample_size, desc="Generating samples: ", barlen=40)
 
-    # Process in batches
     for batch in 1:n_batches
-        # Determine batch size for this iteration
-        current_batch_size = min(effective_batch_size, config.sample_size - (batch - 1) * effective_batch_size)
+        current_batch_size = min(sample_batch_size, sample_size - (batch - 1) * sample_batch_size)
+        batch_seed = rand(sampling_rng, UInt64)
 
-        # Ensure buffers can handle this batch size
-        ensure_buffer_capacity!(buffers, current_batch_size, n_reactions)
-
-        # Generate random batch seed
-        batch_seed = rand(master_rng, UInt)
-
-        # Generate exact number of samples needed for this batch
-        # Calculate iterations needed based on warmup size
+        # Calculate iterations needed
         n_warmup = size(warmup, 1)
         iterations_needed = ceil(Int, current_batch_size / n_warmup)
 
-        # Get samples
-        sample_matrix = COBREXA.sample_constraint_variables(
+        # Sample complex activities directly from existing constraints.complexes
+        activity_samples = COBREXA.sample_constraints(
             COBREXA.sample_chain_achr,
             constraints;
+            output=constraints.complexes,  # Use existing constraints directly!
             start_variables=warmup,
             seed=batch_seed,
             n_chains=4,
@@ -1213,137 +1307,93 @@ function streaming_correlation_filter(
             workers=workers()
         )
 
-        # If we got more samples than needed, truncate
-        if size(sample_matrix, 1) > current_batch_size
-            sample_matrix = sample_matrix[1:current_batch_size, :]
-        end
+        # Filter to only active complexes and convert to matrix format
+        activity_matrix = Matrix{Float64}(undef, current_batch_size, n_active)
 
-        # Compute complex activities in parallel using threads (use pre-allocated buffer)
-        activities_view = view(buffers.activities, :, 1:current_batch_size)
-        Threads.@threads for j in 1:n_active
-            complex_idx = active_indices[j]
-            row = A_sparse[complex_idx, :]
-
-            for s in 1:current_batch_size
-                # Compute activity using sparse dot product
-                activities_view[j, s] = dot(row, sample_matrix[s, :])
+        for (i, c) in enumerate(active_complexes)
+            if haskey(activity_samples, c.id)
+                complex_values = activity_samples[c.id]
+                n_samples = min(length(complex_values), current_batch_size)
+                activity_matrix[1:n_samples, i] = complex_values[1:n_samples]
+                if n_samples < current_batch_size
+                    activity_matrix[(n_samples+1):end, i] .= 0.0
+                end
+            else
+                activity_matrix[:, i] .= 0.0
             end
         end
 
-        # Update streaming statistics and correlations
-        GC.@preserve activities_view begin
-            # First pass: Update statistics and identify high-variance complexes
-            for j in 1:n_active
-                complex_idx = active_indices[j]
+        # Update correlations (rest remains the same)
+        for i in 1:n_active
+            ci = active_complexes[i]
+            if ci.id in balanced_complexes
+                continue
+            end
 
+            for j in (i+1):n_active
+                cj = active_complexes[j]
+                if cj.id in balanced_complexes
+                    continue
+                end
+
+                # Check trivial pairs
+                ci_original_idx = findfirst(c -> c.id == ci.id, complexes)
+                cj_original_idx = findfirst(c -> c.id == cj.id, complexes)
+                pair_indices = (ci_original_idx < cj_original_idx) ? (ci_original_idx, cj_original_idx) : (cj_original_idx, ci_original_idx)
+                if pair_indices in trivial_pairs
+                    continue
+                end
+
+                # Initialize correlation if needed
+                pair_key = (ci.id, cj.id)
+                if !haskey(correlation_pairs, pair_key)
+                    correlation_pairs[pair_key] = StreamingCorrelation()
+                end
+
+                # Update correlation
                 for s in 1:current_batch_size
-                    update!(stats[complex_idx], activities_view[j, s])
-                end
-
-                # Check for high variance
-                if variance(stats[complex_idx]) > variance_threshold
-                    push!(high_variance_complexes, complex_idx)
-                end
-            end
-
-            # Second pass: Update correlations only for promising pairs
-            if !isempty(high_variance_complexes)
-                Threads.@threads for i in 1:n_active
-                    ci_idx = active_indices[i]
-
-                    # Skip if low variance (major optimization)
-                    if ci_idx ∉ high_variance_complexes
-                        continue
-                    end
-
-                    for j in (i+1):n_active
-                        cj_idx = active_indices[j]
-
-                        # Skip if low variance
-                        if cj_idx ∉ high_variance_complexes
-                            continue
-                        end
-
-                        # Skip trivially concordant pairs
-                        pair = (Int(ci_idx) < Int(cj_idx)) ? (Int(ci_idx), Int(cj_idx)) : (Int(cj_idx), Int(ci_idx))
-                        if pair in trivial_pairs
-                            continue
-                        end
-
-                        # Initialize correlation if needed
-                        pair_key = (ci_idx, cj_idx)
-                        if !haskey(correlation_pairs, pair_key)
-                            correlation_pairs[pair_key] = StreamingCorrelation()
-                        end
-
-                        # Update correlation with current batch
-                        for s in 1:current_batch_size
-                            # Only consider samples where at least one complex has activity
-                            if abs(activities_view[i, s]) > config.tolerance || abs(activities_view[j, s]) > config.tolerance
-                                update!(correlation_pairs[pair_key], activities_view[i, s], activities_view[j, s])
-                            end
-                        end
+                    act_i = activity_matrix[s, i]
+                    act_j = activity_matrix[s, j]
+                    if abs(act_i) > tolerance || abs(act_j) > tolerance
+                        update!(correlation_pairs[pair_key], act_i, act_j)
                     end
                 end
             end
         end
 
-        # Update progress bar
-        ProgressMeter.update!(prog, min((batch * effective_batch_size), config.sample_size))
+        ProgressMeter.update!(prog, min(batch * sample_batch_size, sample_size))
     end
 
     ProgressMeter.finish!(prog)
 
-    # Generate candidate pairs with priority information
-    @info "Generating candidate pairs" high_variance_complexes = length(high_variance_complexes) correlation_pairs = length(correlation_pairs)
+    # Rest of the function remains the same...
+    @info "Completed efficient sampling" seed_log = log_seeds(rng_manager)
 
+    # Generate candidate pairs
     candidate_pairs = PairPriority[]
-    # Process correlations and generate PairPriority objects
-    for ((ci_idx, cj_idx), corr_acc) in correlation_pairs
-        if corr_acc.n >= config.min_valid_samples
-            # Calculate correlation
+
+    for ((ci_id, cj_id), corr_acc) in correlation_pairs
+        if corr_acc.n >= min_valid_samples
             corr_value = correlation(corr_acc)
 
-            # Include pairs with high correlation or borderline cases
-            if abs(corr_value) >= (config.correlation_threshold)
+            if abs(corr_value) >= correlation_threshold
+                ci_idx = findfirst(c -> c.id == ci_id, complexes)
+                cj_idx = findfirst(c -> c.id == cj_id, complexes)
+
                 directions = determine_directions(
-                    Int(ci_idx), Int(cj_idx),
+                    ci_idx, cj_idx,
                     positive_complexes, negative_complexes, unrestricted_complexes
                 )
 
-                priority = PairPriority(
-                    Int(ci_idx), Int(cj_idx), directions,
-                    corr_value, corr_acc.n,
-                    abs(corr_value) >= config.correlation_threshold
-                )
-
-                push!(candidate_pairs, priority)
+                push!(candidate_pairs, PairPriority(
+                    ci_idx, cj_idx, directions,
+                    corr_value, corr_acc.n, true
+                ))
             end
-        else
-            # Insufficient samples - include as low confidence
-            directions = determine_directions(
-                Int(ci_idx), Int(cj_idx),
-                positive_complexes, negative_complexes, unrestricted_complexes
-            )
-
-            priority = PairPriority(
-                Int(ci_idx), Int(cj_idx), directions,
-                0.0, corr_acc.n, false
-            )
-
-            push!(candidate_pairs, priority)
         end
     end
 
-    # Log statistics
-    high_corr_count = count(p -> p.is_high_confidence, candidate_pairs)
-    low_sample_count = count(p -> p.n_samples < config.min_valid_samples, candidate_pairs)
-
-    # Calculate total potential pairs and filtered count
-    total_possible_pairs = Int(n_active * (n_active - 1) / 2)
-    filtered_count = total_possible_pairs - length(candidate_pairs) - length(trivial_pairs)
-
-    @info "Correlation filtering complete" total_pairs = length(candidate_pairs) high_activity_correlation = high_corr_count low_samples = low_sample_count filtered_pairs = filtered_count skipped_trivial = length(trivial_pairs)
+    @info "Efficient correlation filtering complete" total_pairs = length(candidate_pairs)
 
     return candidate_pairs
 end
@@ -1364,7 +1414,8 @@ function process_in_stages(
     optimizer,
     settings=[],
     workers=Distributed.workers(),
-    config::ConcordanceConfig=ConcordanceConfig()
+    stage_size::Int=500,
+    tolerance::Float64=1e-9
 )
     stage_results = Dict{String,Any}(
         "stages_completed" => 0,
@@ -1438,8 +1489,8 @@ function process_in_stages(
         end
 
         # Take stage batch
-        stage_size = min(config.stage_size, length(filtered_pairs))
-        stage_pairs = filtered_pairs[1:stage_size]
+        stage_size_actual = min(stage_size, length(filtered_pairs))
+        stage_pairs = filtered_pairs[1:stage_size_actual]
 
         @info "Processing stage $stage_count" pairs = length(stage_pairs)
 
@@ -1447,7 +1498,7 @@ function process_in_stages(
         batch_results = process_concordance_batch(
             constraints, complexes, stage_pairs, A_matrix, A_rows;
             optimizer=optimizer, settings=settings,
-            workers=workers, config=config
+            workers=workers, tolerance=tolerance
         )
 
         processed_pairs += length(stage_pairs)
@@ -1488,7 +1539,7 @@ function process_in_stages(
         @info "Stage $stage_count complete" new_concordant = new_concordant
 
         # Update remaining pairs
-        remaining_pairs = filtered_pairs[(stage_size+1):end]
+        remaining_pairs = filtered_pairs[(stage_size_actual+1):end]
     end
     ProgressMeter.finish!(prog)
     return stage_results
@@ -1508,7 +1559,7 @@ function process_concordance_batch(
     optimizer,
     settings=[],
     workers=Distributed.workers(),
-    config::ConcordanceConfig=ConcordanceConfig()
+    tolerance::Float64=1e-9
 )
     # Get sparse matrix representation
     A_sparse = isa(A_matrix, SharedSparseMatrix) ? sparse(A_matrix) : sparse(A_matrix)
@@ -1542,7 +1593,7 @@ function process_concordance_batch(
             om, c1_idx, c2_idx,
             A_rows[c1_idx], A_rows[c2_idx],
             direction;
-            tolerance=config.tolerance
+            tolerance=tolerance
         )
         return (c1_idx, c2_idx, direction, is_conc, lambda)
     end
@@ -1581,6 +1632,27 @@ end
 $(TYPEDSIGNATURES)
 
 Main concordance analysis function optimized for large models and HPC execution.
+
+# Arguments
+- `model`: Metabolic model to analyze
+- `optimizer`: Optimization solver (e.g., HiGHS.Optimizer)
+- `modifications=Function[]`: Model modifications to apply
+- `settings=[]`: Solver settings
+- `workers=workers()`: Worker processes for parallel computation
+- `tolerance=1e-9`: Numerical tolerance for concordance testing
+- `correlation_threshold=0.95`: Minimum correlation for candidate pairs
+- `sample_size=1000`: Number of flux samples for correlation analysis
+- `sample_batch_size=100`: Batch size for sampling
+- `stage_size=500`: Number of pairs to process per stage
+- `max_memory_per_worker=2e9`: Maximum memory usage per worker (bytes)
+- `use_shared_arrays=true`: Enable SharedArrays for parallel processing
+- `min_size_for_sharing=1_000_000`: Minimum array size for shared memory
+- `min_valid_samples=10`: Minimum samples required for correlation
+- `seed=42`: Master random seed for hierarchical reproducible RNG. Uses StableRNGs for cross-platform reproducibility and generates deterministic seeds for different analysis components (warmup generation, batch coordination, etc.)
+- `use_unidirectional_constraints=true`: Split reversible reactions
+
+# Returns
+Named tuple with concordance analysis results including complexes, modules, and statistics.
 """
 function concordance_analysis(
     model;
@@ -1588,7 +1660,17 @@ function concordance_analysis(
     optimizer,
     settings=[],
     workers=Distributed.workers(),
-    config::ConcordanceConfig=ConcordanceConfig()
+    tolerance::Float64=1e-9,
+    correlation_threshold::Float64=0.95,
+    sample_size::Int=1000,
+    sample_batch_size::Int=100,
+    stage_size::Int=500,
+    max_memory_per_worker::Float64=2e9,
+    use_shared_arrays::Bool=true,
+    min_size_for_sharing::Int=1_000_000,
+    min_valid_samples::Int=10,
+    seed::Union{Int,Nothing}=42,
+    use_unidirectional_constraints::Bool=true
 )
     start_time = time()
 
@@ -1599,13 +1681,15 @@ function concordance_analysis(
         model
     end
 
-    @info "Starting concordance analysis" n_workers = length(workers) config
+    @info "Starting concordance analysis" n_workers = length(workers) tolerance correlation_threshold sample_size use_unidirectional_constraints
 
     # Build constraints
-    constraints = concordance_constraints(model; modifications, config)
+    constraints = concordance_constraints(model; modifications,
+        use_unidirectional_constraints, use_shared_arrays, min_size_for_sharing)
 
     # Extract complexes with potential shared memory 
-    complexes, A_matrix, _ = extract_complexes_and_incidence(model; config)
+    complexes, A_matrix, _ = extract_complexes_and_incidence(model;
+        use_shared_arrays, min_size_for_sharing)
     n_complexes = length(complexes)
     complex_ids = [c.id for c in complexes]
 
@@ -1665,11 +1749,11 @@ function concordance_analysis(
 
         if haskey(complex_ranges, cid)
             min_val, max_val = complex_ranges[cid]
-            if abs(min_val) < config.tolerance && abs(max_val) < config.tolerance
+            if abs(min_val) < tolerance && abs(max_val) < tolerance
                 push!(balanced_complexes, cid)
-            elseif min_val >= -config.tolerance  # Can only be positive
+            elseif min_val >= -tolerance  # Can only be positive
                 push!(positive_complexes, i)
-            elseif max_val <= config.tolerance  # Can only be negative
+            elseif max_val <= tolerance  # Can only be negative
                 push!(negative_complexes, i)
             else
                 push!(unrestricted_complexes, i)
@@ -1682,7 +1766,7 @@ function concordance_analysis(
     @info "Complex classification" balanced = length(balanced_complexes) trivially_balanced = length(trivially_balanced) positive = length(positive_complexes) negative = length(negative_complexes) unrestricted = length(unrestricted_complexes)
 
     # Step 3: Initialize concordance tracker (with shared memory if enabled)
-    concordance_tracker = if config.use_shared_arrays && nworkers() > 0
+    concordance_tracker = if use_shared_arrays && nworkers() > 0
         SharedConcordanceTracker(complex_ids)
     else
         ConcordanceTracker(complex_ids)
@@ -1701,9 +1785,11 @@ function concordance_analysis(
     candidate_priorities = streaming_correlation_filter(
         model, complexes, A_matrix, balanced_complexes,
         positive_complexes, negative_complexes, unrestricted_complexes, trivial_pairs;
+        constraints=constraints,  # Pass the constraints for direct complex sampling
         optimizer=optimizer,
         settings=settings,
-        config=config
+        tolerance, correlation_threshold, sample_size, sample_batch_size,
+        max_memory_per_worker, min_valid_samples, seed
     )
 
     @info "Candidate pairs identified" n_pairs = length(candidate_priorities)
@@ -1715,7 +1801,7 @@ function concordance_analysis(
         model, constraints, complexes, candidate_priorities, A_matrix,
         concordance_tracker;
         optimizer=optimizer, settings=settings,
-        workers=workers, config=config
+        workers=workers, stage_size, tolerance
     )
 
     # Step 6: Build concordance modules
@@ -1774,6 +1860,7 @@ function concordance_analysis(
     @info "Concordance analysis complete" stats
 
     return (
+        A=A_matrix,
         complexes=complexes_df,
         modules=modules_df,
         lambdas=lambda_df,
