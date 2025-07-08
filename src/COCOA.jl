@@ -1020,18 +1020,7 @@ function concordance_constraints(
     complexes, A_matrix, complex_dict = extract_complexes_and_incidence(model;
         use_shared_arrays, min_size_for_sharing)
 
-    # Verify the alignment between incidence matrix and flux variables
-    actual_flux_keys = collect(keys(constraints.fluxes))
-    expected_flux_keys = original_rxn_ids
 
-    @info "Checking flux variable alignment"
-    @info "Expected flux keys (first 5): $(expected_flux_keys[1:min(5, length(expected_flux_keys))])"
-    @info "Actual flux keys (first 5): $(actual_flux_keys[1:min(5, length(actual_flux_keys))])"
-
-    # They should match after proper unidirectional constraint setup
-    if length(actual_flux_keys) != length(expected_flux_keys)
-        @error "Mismatch in flux variable count: expected $(length(expected_flux_keys)), got $(length(actual_flux_keys))"
-    end
 
     # Create complex activity expressions
     complex_activities = ConstraintTrees.ConstraintTree()
@@ -1075,28 +1064,6 @@ function concordance_constraints(
 
     # Add complex activities to the constraint tree
     constraints = constraints * (:complexes^complex_activities)
-
-    # NOW debug complex activity construction AFTER adding complexes to constraints
-    @info "Debugging complex activity construction"
-
-    # Test with a simple optimization
-    test_constraints = deepcopy(constraints)
-    x_test = COBREXA.optimized_values(test_constraints, objective=test_constraints.objective.value, optimizer=HiGHS.Optimizer)
-
-    # Check some complex activities
-    sample_complexes = collect(keys(x_test.complexes))[1:min(10, length(x_test.complexes))]
-    for cid in sample_complexes
-        activity_val = x_test.complexes[cid]
-        @info "Test optimization - Complex $cid: activity = $activity_val"
-    end
-
-    # Also check the flux values that contribute to these activities
-    @info "Sample flux values:"
-    sample_fluxes = collect(keys(x_test.fluxes))[1:min(10, length(x_test.fluxes))]
-    for fid in sample_fluxes
-        flux_val = x_test.fluxes[fid]
-        @info "  Flux $fid: $flux_val"
-    end
 
     return constraints
 end
@@ -2130,24 +2097,25 @@ function concordance_analysis(
     @info "Found trivially concordant pairs" n_pairs = length(trivial_pairs)
 
     # Step 3: Perform Activity Variability Analysis (AVA) and generate warmup points simultaneously
-    @info "Performing AVA and generating warmup points"
+    @info "Performing Activity Variability Analysis and generating warmup points"
 
     # Define a custom output function to capture both activity and flux vectors
-    function fva_output_with_warmup(_, om)
-        activity = JuMP.objective_value(om)
+    function ava_output_with_warmup(dir, om)
+        objective_val = JuMP.objective_value(om)
         flux_vector = JuMP.value.(om[:x])
+        # Correct for direction: dir=-1 for minimization, dir=1 for maximization
+        activity = dir * objective_val
         return (activity, flux_vector)
     end
 
-    # Run FVA once on all complexes (excluding balanced ones)
-    active_complex_targets = [constraints.complexes[c.id].value for c in complexes if !(c.id in balanced_complexes)]
-
-    fva_results = COBREXA.constraints_variability(
+    # Run FVA on all complexes (we'll filter out balanced ones during processing)
+    ava_results = COBREXA.constraints_variability(
         constraints,
-        active_complex_targets;
+        constraints.complexes;
         optimizer=optimizer,
         settings=settings,
-        output=fva_output_with_warmup,
+        output=ava_output_with_warmup,
+        output_type=Tuple{Float64,Vector{Float64}},
         workers=workers,
     )
 
@@ -2155,9 +2123,33 @@ function concordance_analysis(
     complex_ranges = Dict{Symbol,Tuple{Float64,Float64}}()
     warmup_points = Vector{Float64}[]
 
-    # Convert warmup points to a matrix
-    warmup = isempty(warmup_points) ? Matrix{Float64}(undef, 0, 0) :
-             collect(transpose(reduce(hcat, warmup_points)))
+    # Process FVA results correctly - iterate directly over the Tree
+    for (cid, (min_result, max_result)) in ava_results
+        # Only process complexes that are not balanced
+        if min_result !== nothing && max_result !== nothing
+            min_activity, min_flux = min_result
+            max_activity, max_flux = max_result
+
+            # Store the activity range
+            complex_ranges[cid] = (min_activity, max_activity)
+
+            # Store warmup points  
+            push!(warmup_points, min_flux)
+            push!(warmup_points, max_flux)
+        end
+    end
+
+    # Convert warmup points to a matrix with robust handling
+    warmup = if isempty(warmup_points)
+        Matrix{Float64}(undef, 0, 0)
+    else
+        try
+            collect(transpose(reduce(hcat, warmup_points)))
+        catch e
+            @warn "Failed to create warmup matrix: $e. Using empty matrix."
+            Matrix{Float64}(undef, 0, 0)
+        end
+    end
 
     # Classify complexes by activity patterns using the extracted ranges
     balanced_complexes = Set{Symbol}()
@@ -2168,6 +2160,7 @@ function concordance_analysis(
     # Start with trivially balanced complexes
     union!(balanced_complexes, trivially_balanced)
 
+    # Robust classification with proper error handling
     for (i, c) in enumerate(complexes)
         cid = c.id
 
@@ -2178,6 +2171,8 @@ function concordance_analysis(
 
         if haskey(complex_ranges, cid)
             min_val, max_val = complex_ranges[cid]
+
+            # Robust numerical comparison
             if abs(min_val) < tolerance && abs(max_val) < tolerance
                 push!(balanced_complexes, cid)
             elseif min_val >= -tolerance  # Can only be positive
@@ -2188,46 +2183,14 @@ function concordance_analysis(
                 push!(unrestricted_complexes, i)
             end
         else
+            # If no FVA range available, classify as unrestricted
             push!(unrestricted_complexes, i)
         end
     end
-    # Fix the debugging code
-    @info "Debugging FVA results and complex classification"
 
-    # Check some sample FVA results
-    sample_complexes = collect(keys(complex_ranges))[1:min(10, length(complex_ranges))]
-    for cid in sample_complexes
-        min_val, max_val = complex_ranges[cid]
-        @info "Complex $cid: range = [$min_val, $max_val]"
-    end
 
-    # Check the overall distribution of min/max values
-    all_mins = [v[1] for v in values(complex_ranges)]
-    all_maxs = [v[2] for v in values(complex_ranges)]
 
-    @info "FVA statistics:"
-    @info "  Min values: min=$(minimum(all_mins)), max=$(maximum(all_mins)), mean=$(mean(all_mins))"
-    @info "  Max values: min=$(minimum(all_maxs)), max=$(maximum(all_maxs)), mean=$(mean(all_maxs))"
-    @info "  Ranges with negative min: $(count(x -> x < -tolerance, all_mins))"
-    @info "  Ranges with negative max: $(count(x -> x < -tolerance, all_maxs))"
 
-    # Also debug the incidence matrix signs
-    A_sparse = isa(A_matrix, SharedSparseMatrix) ? sparse(A_matrix) : sparse(A_matrix)
-    @info "Incidence matrix statistics:"
-    @info "  Total non-zeros: $(nnz(A_sparse))"
-    @info "  Positive coefficients: $(count(x -> x > 0, A_sparse.nzval))"
-    @info "  Negative coefficients: $(count(x -> x < 0, A_sparse.nzval))"
-    @info "  Zero coefficients: $(count(x -> x ≈ 0, A_sparse.nzval))"
-
-    # Check some sample incidence matrix rows - FIXED VERSION
-    for i in 1:min(5, size(A_sparse, 1))
-        row = A_sparse[i, :]
-        # For sparse vectors, findnz returns (indices, values), not (row_indices, col_indices, values)
-        nz_indices, nz_vals = findnz(row)
-        if !isempty(nz_vals)
-            @info "Complex $i incidence: indices=$(nz_indices[1:min(3, length(nz_indices))]), values=$(nz_vals[1:min(3, length(nz_vals))])"
-        end
-    end
     @info "Complex classification" balanced = length(balanced_complexes) trivially_balanced = length(trivially_balanced) positive = length(positive_complexes) negative = length(negative_complexes) unrestricted = length(unrestricted_complexes)
 
     # Step 3: Initialize concordance tracker
