@@ -469,11 +469,11 @@ end
 Shared concordance tracker that maintains consistency across processes.
 """
 mutable struct SharedConcordanceTracker
-    # Shared arrays for Union-Find
+    # Shared arrays for Union-Find - keep Int32 for memory efficiency in shared memory
     parent::SharedArray{Int32,1}
     rank::SharedArray{Int32,1}
 
-    # Complex mappings (read-only after initialization)
+    # Complex mappings (read-only after initialization) - use Int for interface
     id_to_idx::Dict{Symbol,Int}
     idx_to_id::Vector{Symbol}
 
@@ -503,7 +503,7 @@ mutable struct SharedConcordanceTracker
             nothing
         end
 
-        # Create mappings (same on all processes)
+        # Create mappings (same on all processes) - use Int for interface
         id_to_idx = Dict(id => i for (i, id) in enumerate(complex_ids))
         idx_to_id = copy(complex_ids)
 
@@ -513,14 +513,14 @@ mutable struct SharedConcordanceTracker
 end
 
 # Union-Find operations for regular tracker
-function find_set!(tracker::ConcordanceTracker, x::Union{Int,Int32})
+function find_set!(tracker::ConcordanceTracker, x::Int)
     if tracker.parent[x] != x
         tracker.parent[x] = find_set!(tracker, tracker.parent[x])
     end
     return tracker.parent[x]
 end
 
-function union_sets!(tracker::ConcordanceTracker, x::Union{Int,Int32}, y::Union{Int,Int32})
+function union_sets!(tracker::ConcordanceTracker, x::Int, y::Int)
     root_x = find_set!(tracker, x)
     root_y = find_set!(tracker, y)
 
@@ -548,19 +548,22 @@ function union_sets!(tracker::ConcordanceTracker, x::Union{Int,Int32}, y::Union{
 end
 
 # Shared tracker operations
-function find_set!(tracker::SharedConcordanceTracker, x::Union{Int,Int32})
+function find_set!(tracker::SharedConcordanceTracker, x::Int)
+    # Convert to Int32 for internal storage access
+    x32 = Int32(x)
+
     # Use atomic operations for thread safety
-    parent_x = tracker.parent[x]
-    if parent_x != x
+    parent_x = tracker.parent[x32]
+    if parent_x != x32
         # Path compression with atomic update
-        root = find_set!(tracker, parent_x)
-        tracker.parent[x] = root
+        root = find_set!(tracker, Int(parent_x))
+        tracker.parent[x32] = Int32(root)
         return root
     end
     return x
 end
 
-function union_sets!(tracker::SharedConcordanceTracker, x::Union{Int,Int32}, y::Union{Int,Int32})
+function union_sets!(tracker::SharedConcordanceTracker, x::Int, y::Int)
     # Only process 1 should modify
     if myid() != 1
         return
@@ -573,16 +576,20 @@ function union_sets!(tracker::SharedConcordanceTracker, x::Union{Int,Int32}, y::
         return root_x
     end
 
+    # Convert to Int32 for internal access
+    root_x32 = Int32(root_x)
+    root_y32 = Int32(root_y)
+
     # Union by rank with atomic operations
-    if tracker.rank[root_x] < tracker.rank[root_y]
-        tracker.parent[root_x] = root_y
+    if tracker.rank[root_x32] < tracker.rank[root_y32]
+        tracker.parent[root_x32] = root_y32
         return root_y
-    elseif tracker.rank[root_x] > tracker.rank[root_y]
-        tracker.parent[root_y] = root_x
+    elseif tracker.rank[root_x32] > tracker.rank[root_y32]
+        tracker.parent[root_y32] = root_x32
         return root_x
     else
-        tracker.parent[root_y] = root_x
-        tracker.rank[root_x] += 1
+        tracker.parent[root_y32] = root_x32
+        tracker.rank[root_x32] += 1
         return root_x
     end
 end
@@ -593,7 +600,7 @@ function are_concordant(tracker::Union{ConcordanceTracker,SharedConcordanceTrack
 end
 
 # Non-concordance operations for regular tracker
-function add_non_concordant!(tracker::ConcordanceTracker, x::Union{Int,Int32}, y::Union{Int,Int32})
+function add_non_concordant!(tracker::ConcordanceTracker, x::Int, y::Int)
     # Store in canonical order
     pair = x < y ? (x, y) : (y, x)
     if pair ∉ tracker.non_concordant_pairs
@@ -609,7 +616,7 @@ function add_non_concordant!(tracker::ConcordanceTracker, x::Union{Int,Int32}, y
     end
 end
 
-function is_non_concordant(tracker::ConcordanceTracker, x::Union{Int,Int32}, y::Union{Int,Int32})
+function is_non_concordant(tracker::ConcordanceTracker, x::Int, y::Int)
     # Direct check
     pair = x < y ? (x, y) : (y, x)
     if pair in tracker.non_concordant_pairs
@@ -743,7 +750,7 @@ function find_trivially_balanced_complexes(
     complexes::Vector{Complex}
 )::Set{Symbol}
     # Build metabolite participation mapping
-    metabolite_participation = Dict{Int32,Vector{Int}}()
+    metabolite_participation = Dict{Int,Vector{Int}}()
 
     for (cidx, complex) in enumerate(complexes)
         for met_idx in complex.metabolite_indices
@@ -776,7 +783,7 @@ appears in exactly those two complexes.
 """
 function find_trivially_concordant_pairs(complexes::Vector{Complex})::Set{Tuple{Int,Int}}
     # Build metabolite participation mapping
-    metabolite_participation = Dict{Int32,Vector{Int}}()
+    metabolite_participation = Dict{Int,Vector{Int}}()
 
     for (cidx, complex) in enumerate(complexes)
         for met_idx in complex.metabolite_indices
@@ -1630,8 +1637,8 @@ function streaming_correlation_filter(
     n_warmup_points_per_chain = min(50, size(warmup, 1))  # Limit warmup points
 
     # More aggressive burn-in and thinning to reduce total iterations
-    burn_in_period = 16  # Reduced from 32
-    thinning_interval = 8  # Reduced from 16
+    burn_in_period = 32
+    thinning_interval = 8
 
     # Calculate required collections more efficiently
     target_samples_per_chain = ceil(Int, sample_size / n_chains)
@@ -1640,7 +1647,7 @@ function streaming_correlation_filter(
     # Generate iteration list more efficiently
     iters_to_collect = collect(burn_in_period:thinning_interval:(burn_in_period+(n_collections_per_chain-1)*thinning_interval))
 
-    @info "Optimized sampling parameters" n_chains n_warmup_points_per_chain n_collections_per_chain
+    @info "Optimized sampling parameters" n_chains n_warmup_points_per_chain n_collections_per_chain iters_to_collect
 
     # === MEMORY-EFFICIENT SAMPLING ===
     @info "Generating flux samples with memory optimization"
@@ -1707,7 +1714,7 @@ function streaming_correlation_filter(
     @info "Extracting activities with zero-copy access"
 
     # Instead of copying all activities, create views/references
-    activity_refs = Dict{Symbol,Any}()
+    activity_refs = Dict{Symbol,Vector{Float64}}()
     for c in active_complexes
         if haskey(all_samples, c.id)
             activity_refs[c.id] = all_samples[c.id]  # Direct reference, no copy
@@ -2091,12 +2098,12 @@ function process_concordance_batch(
     end
 
     # Aggregate results by pair
-    pair_results = Dict{Tuple{Int,Int},Dict{Symbol,Tuple{Bool,Any}}}()
+    pair_results = Dict{Tuple{Int,Int},Dict{Symbol,Tuple{Bool,Union{Float64,Nothing}}}}()
 
     for (c1_idx, c2_idx, direction, is_conc, lambda) in results
         pair_key = (c1_idx, c2_idx)
         if !haskey(pair_results, pair_key)
-            pair_results[pair_key] = Dict{Symbol,Tuple{Bool,Any}}()
+            pair_results[pair_key] = Dict{Symbol,Tuple{Bool,Union{Float64,Nothing}}}()
         end
         pair_results[pair_key][direction] = (is_conc, lambda)
     end
