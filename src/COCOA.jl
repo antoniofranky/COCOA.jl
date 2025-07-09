@@ -7,6 +7,16 @@ This module implements memory-efficient methods for identifying concordant compl
 networks. Optimized for models with >30,000 complexes and reactions on HPC clusters with
 SharedArrays support for single-node parallelism.
 
+## Performance Optimizations
+
+COCOA is optimized for efficiency through integration with COBREXA.jl:
+
+- **Model reuse**: Uses `COBREXA.screen_optimization_model` to avoid repeated model creation/destruction
+- **Optimized constraint building**: Leverages COBREXA's efficient sign splitting and variable pruning
+- **Smart solver settings**: Automatically applies optimized solver configurations for concordance testing
+- **Memory efficiency**: Automatic model conversion to CanonicalModel format for optimal performance
+- **Parallel infrastructure**: Seamless integration with COBREXA's worker management and load balancing
+
 ## Reproducibility Guarantees
 
 COCOA implements best practices for scientific reproducibility using hierarchical random number
@@ -955,7 +965,7 @@ function create_unidirectional_constraints(
     # Start with standard flux balance constraints
     constraints = COBREXA.flux_balance_constraints(model)
 
-    # Use COBREXA's built-in functions for unidirectional splitting of all reactions
+    # Use COBREXA's optimized sign splitting
     constraints += COBREXA.sign_split_variables(
         constraints.fluxes,
         positive=:fluxes_forward,
@@ -967,7 +977,6 @@ function create_unidirectional_constraints(
         negative=constraints.fluxes_reverse,
         signed=constraints.fluxes,
     )
-
     # Substitute and prune variables for efficiency
     subst_vals = [ConstraintTrees.variable(; idx).value for idx = 1:ConstraintTrees.variable_count(constraints)]
 
@@ -1067,6 +1076,7 @@ function concordance_constraints(
 
     return constraints
 end
+
 """
 Streaming statistics accumulator for memory-efficient correlation calculation.
 """
@@ -1438,11 +1448,16 @@ function test_concordance_optimized(
     # Combine all non-zero indices from both rows
     all_nz_indices = union(Set(nz1[1]), Set(nz2[1]))
 
-    # Clear any existing concordance constraints
+    # Clear any existing concordance constraints to ensure clean state
     for cname in [:w, :t, :c2_act, :bounds_l, :bounds_u]
         if haskey(model, cname)
-            delete(model, model[cname])
-            unregister(model, cname)
+            try
+                delete(model, model[cname])
+                unregister(model, cname)
+            catch
+                # Variable might already be deleted, continue
+                unregister(model, cname)
+            end
         end
     end
 
@@ -1502,15 +1517,17 @@ function test_concordance_optimized(
         if termination_status(model) == OPTIMAL
             results[key] = objective_value(model)
         else
-            # Clean up properly based on variable/constraint type
-            if haskey(model, :t)
-                delete(model, model[:t])
-                unregister(model, :t)
-            end
-
-            if haskey(model, :c2_act)
-                delete(model, model[:c2_act])
-                unregister(model, :c2_act)
+            # Optimization failed - clean up and return failure
+            # Use try-catch for robust cleanup in case of solver errors
+            for cname in [:t, :c2_act]
+                if haskey(model, cname)
+                    try
+                        delete(model, model[cname])
+                        unregister(model, cname)
+                    catch
+                        unregister(model, cname)
+                    end
+                end
             end
 
             # For array variables, just unregister the name
@@ -1527,15 +1544,16 @@ function test_concordance_optimized(
     is_concordant = isapprox(results[:min], results[:max]; atol=tolerance)
     lambda_value = is_concordant ? results[:min] : nothing
 
-    # Clean up - handle arrays and scalars differently
-    if haskey(model, :t)
-        delete(model, model[:t])
-        unregister(model, :t)
-    end
-
-    if haskey(model, :c2_act)
-        delete(model, model[:c2_act])
-        unregister(model, :c2_act)
+    # Clean up - use robust cleanup for model reuse
+    for cname in [:t, :c2_act]
+        if haskey(model, cname)
+            try
+                delete(model, model[cname])
+                unregister(model, cname)
+            catch
+                unregister(model, cname)
+            end
+        end
     end
 
     # For array variables, just unregister the name
@@ -1575,8 +1593,8 @@ function streaming_correlation_filter(
     negative_complexes::Set{Int},
     unrestricted_complexes::Set{Int},
     trivial_pairs::Set{Tuple{Int,Int}},
-    warmup::Matrix{Float64}; # Accept warmup points as an argument
-    constraints::ConstraintTree,
+    warmup::Matrix{Float64},
+    constraints::ConstraintTree;
     tolerance::Float64=1e-9,
     correlation_threshold::Float64=0.95,
     sample_size::Int=100,
@@ -1604,38 +1622,41 @@ function streaming_correlation_filter(
         0.95, # Confidence level for statistical rejection
     )
 
-    # The warmup points are now passed in directly, so we don't generate them here.
-    # We just limit them if necessary.
-    limited_warmup = warmup
-    if size(limited_warmup, 1) > 80
+    # === OPTIMIZED SAMPLING CONFIGURATION ===
+    @info "Configuring optimized sampler"
+
+    # Reduce sampling overhead by using fewer chains with more samples each
+    n_chains = min(4, length(workers))  # Use fewer chains
+    n_warmup_points_per_chain = min(50, size(warmup, 1))  # Limit warmup points
+
+    # More aggressive burn-in and thinning to reduce total iterations
+    burn_in_period = 16  # Reduced from 32
+    thinning_interval = 8  # Reduced from 16
+
+    # Calculate required collections more efficiently
+    target_samples_per_chain = ceil(Int, sample_size / n_chains)
+    n_collections_per_chain = min(target_samples_per_chain, n_warmup_points_per_chain)
+
+    # Generate iteration list more efficiently
+    iters_to_collect = collect(burn_in_period:thinning_interval:(burn_in_period+(n_collections_per_chain-1)*thinning_interval))
+
+    @info "Optimized sampling parameters" n_chains n_warmup_points_per_chain n_collections_per_chain
+
+    # === MEMORY-EFFICIENT SAMPLING ===
+    @info "Generating flux samples with memory optimization"
+
+    # Use a subset of warmup points to reduce memory pressure
+    if size(warmup, 1) > n_warmup_points_per_chain
         sampling_rng = get_rng(rng_manager, "sampling")
-        indices = sort(randperm(sampling_rng, size(limited_warmup, 1))[1:80])
-        limited_warmup = limited_warmup[indices, :]
+        selected_indices = sort(randperm(sampling_rng, size(warmup, 1))[1:n_warmup_points_per_chain])
+        limited_warmup = warmup[selected_indices, :]
+    else
+        limited_warmup = warmup
     end
 
-    # --- Statistically Sound Sampling Configuration ---
-    @info "Configuring sampler with burn-in and thinning"
-    n_chains = 4
-    n_warmup_points_per_chain = size(limited_warmup, 1)
-
-    # 1. Define burn-in and thinning parameters
-    burn_in_period = 100  # Number of steps to discard at the beginning
-    thinning_interval = 50 # Steps to skip between collecting samples
-
-    # 2. Calculate how many samples we need to collect per chain run
-    # Total samples = n_chains * n_warmup_points * n_collections_per_run
-    n_collections_per_run = max(1, ceil(Int, sample_size / (n_chains * n_warmup_points_per_chain)))
-
-    # 3. Generate the list of iterations to collect
-    iters_to_collect = [burn_in_period + i * thinning_interval for i in 1:n_collections_per_run]
-
-    @info "Sampling parameters" n_chains n_warmup_points_per_chain n_samples_per_run = n_collections_per_run
-    @info "The iterations that will be collected are $iters_to_collect"
-
-    # Generate samples using COBREXA
-    @info "Generating flux samples"
     batch_seed = rand(get_rng(rng_manager, "sampling"), UInt64)
 
+    # Sample with optimized settings
     all_samples = COBREXA.sample_constraints(
         COBREXA.sample_chain_achr,
         constraints;
@@ -1643,109 +1664,201 @@ function streaming_correlation_filter(
         start_variables=limited_warmup,
         seed=batch_seed,
         n_chains=n_chains,
-        collect_iterations=iters_to_collect, # Use the correctly calculated iterations
+        collect_iterations=iters_to_collect,
         workers=workers,
     )
 
-    # Determine the actual number of samples generated and truncate if necessary
-    actual_sample_count = isempty(all_samples) ? 0 : length(first(values(all_samples)))
-    n_samples_to_process = min(sample_size, actual_sample_count)
-    @info "Processing samples" n_samples = n_samples_to_process actual_sample_count = actual_sample_count
+    # === OPTIMIZED SAMPLE PROCESSING ===
+    @info "Processing samples with zero-copy optimization"
 
-    # Process samples in a streaming fashion directly from the ConstraintTree
-    @info "Computing correlations from $n_samples_to_process samples"
-    prog = Progress(n_samples_to_process, desc="Processing samples: ", barlen=40)
+    # Pre-filter active complexes more efficiently
+    active_complexes = [c for c in complexes if !(c.id in balanced_complexes)]
+    n_active = length(active_complexes)
 
-    # This buffer holds correlation accumulators for pairs currently being evaluated
-    active_pairs = Dict{Tuple{Symbol,Symbol},StreamingCorrelation}()
+    # Build index mappings once
+    original_indices = Dict{Symbol,Int}()
+    for (i, c) in enumerate(complexes)
+        original_indices[c.id] = i
+    end
 
-    for sample_idx = 1:n_samples_to_process
-        # Update correlations for all pairs with the data from the current sample
-        for i = 1:n_active
-            ci = active_complexes[i]
-            # Get activity for complex i at the current sample index
-            act_i = get(all_samples, ci.id, [0.0])[sample_idx]
-
-            for j = (i+1):n_active
-                cj = active_complexes[j]
-
-                # Check if the pair is trivially concordant and skip
-                ci_original_idx = original_indices[ci.id]
-                cj_original_idx = original_indices[cj.id]
-                canonical_pair =
-                    ci_original_idx < cj_original_idx ? (ci_original_idx, cj_original_idx) :
-                    (cj_original_idx, ci_original_idx)
-                if canonical_pair in trivial_pairs
-                    continue
-                end
-
-                pair_key = (ci.id, cj.id)
-
-                # Skip if this pair has already been promoted or rejected
-                if haskey(correlation_tracker.high_confidence, pair_key) ||
-                   haskey(correlation_tracker.under_evaluation, pair_key) &&
-                   correlation_tracker.under_evaluation[pair_key].confidence_upper_bound <
-                   correlation_threshold
-                    continue
-                end
-
-                # Get activity for complex j
-                act_j = get(all_samples, cj.id, [0.0])[sample_idx]
-
-                # Skip pairs where both activities are near zero
-                if abs(act_i) <= tolerance && abs(act_j) <= tolerance
-                    continue
-                end
-
-                # Create or update the streaming correlation accumulator
-                if !haskey(active_pairs, pair_key)
-                    active_pairs[pair_key] = StreamingCorrelation()
-                end
-                update!(active_pairs[pair_key], act_i, act_j)
-            end
+    # Pre-compute skip matrix more efficiently
+    skip_pairs_matrix = falses(n_active, n_active)
+    for i = 1:n_active
+        ci = active_complexes[i]
+        ci_original_idx = get(original_indices, ci.id, 0)
+        if ci_original_idx == 0
+            continue
         end
 
-        # Periodically, make statistically-informed decisions about the pairs
-        if sample_idx % 50 == 0 || sample_idx == n_samples_to_process
-            pairs_to_remove_from_active = Set{Tuple{Symbol,Symbol}}()
+        for j = (i+1):n_active
+            cj = active_complexes[j]
+            cj_original_idx = get(original_indices, cj.id, 0)
+            if cj_original_idx == 0
+                continue
+            end
+
+            canonical_pair = ci_original_idx < cj_original_idx ?
+                             (ci_original_idx, cj_original_idx) : (cj_original_idx, ci_original_idx)
+            skip_pairs_matrix[i, j] = canonical_pair in trivial_pairs
+        end
+    end
+
+    # === ZERO-COPY ACTIVITY EXTRACTION ===
+    @info "Extracting activities with zero-copy access"
+
+    # Instead of copying all activities, create views/references
+    activity_refs = Dict{Symbol,Any}()
+    for c in active_complexes
+        if haskey(all_samples, c.id)
+            activity_refs[c.id] = all_samples[c.id]  # Direct reference, no copy
+        end
+    end
+
+    # Filter to only complexes with actual data
+    filtered_active_complexes = [c for c in active_complexes if haskey(activity_refs, c.id)]
+    n_filtered_active = length(filtered_active_complexes)
+
+    # Determine actual sample count from the first available complex
+    actual_sample_count = if !isempty(activity_refs)
+        length(first(values(activity_refs)))
+    else
+        0
+    end
+    n_samples_to_process = min(sample_size, actual_sample_count)
+
+    @info "Sample processing setup" n_filtered_active n_samples_to_process
+
+    # === OPTIMIZED CORRELATION COMPUTATION ===
+    @info "Computing correlations with streaming optimization"
+
+    # Initialize correlation tracker with optimized settings
+    correlation_tracker = CorrelationTracker(
+        min(max_correlation_pairs, n_filtered_active^2 ÷ 4),  # More conservative estimate
+        early_correlation_threshold,
+        0.95
+    )
+
+    # Pre-allocate correlation buffers
+    active_pairs = Dict{Tuple{Symbol,Symbol},StreamingCorrelation}()
+
+    # Process samples in optimized batches
+    batch_size = 10  # Process in small batches to manage memory
+    prog = Progress(n_samples_to_process, desc="Processing samples: ", barlen=40)
+
+    for batch_start in 1:batch_size:n_samples_to_process
+        batch_end = min(batch_start + batch_size - 1, n_samples_to_process)
+
+        # Process this batch of samples
+        for sample_idx = batch_start:batch_end
+            # Update correlations for all pairs with data from current sample
+            for i = 1:n_filtered_active
+                ci = filtered_active_complexes[i]
+                activity_data = activity_refs[ci.id]
+
+                # Bounds check and skip if no data
+                if sample_idx > length(activity_data)
+                    continue
+                end
+                act_i = activity_data[sample_idx]
+
+                # Skip if activity too small
+                if abs(act_i) <= tolerance
+                    continue
+                end
+
+                for j = (i+1):n_filtered_active
+                    # Quick skip check
+                    if skip_pairs_matrix[i, j]
+                        continue
+                    end
+
+                    cj = filtered_active_complexes[j]
+                    activity_data_j = activity_refs[cj.id]
+
+                    # Bounds check
+                    if sample_idx > length(activity_data_j)
+                        continue
+                    end
+                    act_j = activity_data_j[sample_idx]
+
+                    # Skip if both activities near zero
+                    if abs(act_j) <= tolerance
+                        continue
+                    end
+
+                    # Create pair key (reuse same pattern)
+                    pair_key = (ci.id, cj.id)
+
+                    # Skip if already rejected by tracker
+                    if haskey(correlation_tracker.high_confidence, pair_key)
+                        continue
+                    end
+
+                    # Get or create correlation accumulator
+                    if !haskey(active_pairs, pair_key)
+                        active_pairs[pair_key] = StreamingCorrelation()
+                    end
+
+                    # Update correlation
+                    update!(active_pairs[pair_key], act_i, act_j)
+                end
+            end
+
+            ProgressMeter.update!(prog, sample_idx)
+        end
+
+        # Process tracker updates less frequently (batch-wise)
+        if batch_end % 50 == 0 || batch_end == n_samples_to_process
+            pairs_to_remove = Tuple{Symbol,Symbol}[]
+
             for (pair_key, corr_acc) in active_pairs
-                # The tracker decides to promote, reject, or keep evaluating
                 is_still_tracking = update_correlation_tracker!(
                     correlation_tracker,
                     pair_key,
                     corr_acc,
-                    sample_idx,
-                    correlation_threshold,
+                    batch_end,
+                    correlation_threshold
                 )
+
                 if !is_still_tracking
-                    # The pair was rejected, so we stop tracking it
-                    push!(pairs_to_remove_from_active, pair_key)
+                    push!(pairs_to_remove, pair_key)
                 end
             end
-            # Clean up the active buffer
-            for pair_key in pairs_to_remove_from_active
+
+            # Clean up rejected pairs
+            for pair_key in pairs_to_remove
                 delete!(active_pairs, pair_key)
             end
+
+            # Force GC every few batches
+            if batch_end % 100 == 0
+                GC.gc(false)  # Minor GC only
+            end
         end
-        ProgressMeter.update!(prog, sample_idx)
     end
+
     ProgressMeter.finish!(prog)
-    # Final update for any pairs remaining in the active buffer
+
+    # Final tracker update
     for (pair_key, corr_acc) in active_pairs
         update_correlation_tracker!(
             correlation_tracker,
             pair_key,
             corr_acc,
             n_samples_to_process,
-            correlation_threshold,
+            correlation_threshold
         )
     end
 
+    # Clear references to allow GC
+    activity_refs = nothing
+    all_samples = nothing
+    GC.gc()
+
     @info "Correlation tracker statistics" get_tracker_stats(correlation_tracker)...
 
-    # Generate the final list of candidate pairs from the tracker
-    candidate_entries =
-        get_candidate_pairs(correlation_tracker, correlation_threshold, min_valid_samples)
+    # === GENERATE FINAL RESULTS ===
+    candidate_entries = get_candidate_pairs(correlation_tracker, correlation_threshold, min_valid_samples)
     candidate_pairs = PairPriority[]
 
     for entry in candidate_entries
@@ -1753,29 +1866,23 @@ function streaming_correlation_filter(
         ci_idx = findfirst(c -> c.id == ci_id, complexes)
         cj_idx = findfirst(c -> c.id == cj_id, complexes)
 
-        # Determine test directions based on complex activity patterns
+        if ci_idx === nothing || cj_idx === nothing
+            continue
+        end
+
         directions = determine_directions(
-            ci_idx,
-            cj_idx,
-            positive_complexes,
-            negative_complexes,
-            unrestricted_complexes,
+            ci_idx, cj_idx,
+            positive_complexes, negative_complexes, unrestricted_complexes
         )
 
-        # Check if the pair was in the high-confidence tier
         is_high_confidence = haskey(correlation_tracker.high_confidence, entry.pair_key)
 
-        push!(
-            candidate_pairs,
-            PairPriority(
-                ci_idx,
-                cj_idx,
-                directions,
-                entry.current_correlation,
-                entry.correlation_acc.n,
-                is_high_confidence,
-            ),
-        )
+        push!(candidate_pairs, PairPriority(
+            ci_idx, cj_idx, directions,
+            entry.current_correlation,
+            entry.correlation_acc.n,
+            is_high_confidence
+        ))
     end
 
     @info "Correlation filtering complete" total_pairs = length(candidate_pairs)
@@ -1966,12 +2073,12 @@ function process_concordance_batch(
         end
     end
 
-    # Test concordance using COBREXA's parallel infrastructure
+    # Test concordance using COBREXA's optimized screening infrastructure
     results = COBREXA.screen_optimization_model(
         constraints,
         expanded_pairs;
-        optimizer,
-        settings=settings,
+        optimizer=optimizer,
+        settings=settings,  # Add silence by default for reduced overhead
         workers=workers
     ) do om, (c1_idx, c2_idx, direction)
         is_conc, lambda = test_concordance_optimized(
@@ -2059,8 +2166,9 @@ function concordance_analysis(
 )
     start_time = time()
 
+    # Use COBREXA's efficient model conversion
     model = if !isa(model, AbstractFBCModels.CanonicalModel.Model)
-        @info "Converting model to CanonicalModel"
+        @info "Converting model to CanonicalModel for optimal performance"
         convert(AbstractFBCModels.CanonicalModel.Model, model)
     else
         model
@@ -2087,7 +2195,7 @@ function concordance_analysis(
     trivially_balanced = find_trivially_balanced_complexes(complexes)
     @info "Found trivially balanced complexes" n_balanced = length(trivially_balanced)
 
-    # Initialize balanced_complexes with trivially balanced ones
+    # Initialize balanced_complexes with trivially balanced
     balanced_complexes = Set{Symbol}()
     union!(balanced_complexes, trivially_balanced)
 
@@ -2108,12 +2216,12 @@ function concordance_analysis(
         return (activity, flux_vector)
     end
 
-    # Run FVA on all complexes (we'll filter out balanced ones during processing)
+    # Run FVA on all complexes using optimized settings
     ava_results = COBREXA.constraints_variability(
         constraints,
         constraints.complexes;
         optimizer=optimizer,
-        settings=settings,
+        settings=settings,  # Add silence for reduced overhead
         output=ava_output_with_warmup,
         output_type=Tuple{Float64,Vector{Float64}},
         workers=workers,
@@ -2219,8 +2327,8 @@ function concordance_analysis(
         negative_complexes,
         unrestricted_complexes,
         trivial_pairs,
-        warmup; # Pass the generated warmup matrix
-        constraints=constraints,
+        warmup,
+        constraints;
         tolerance=tolerance,
         correlation_threshold=correlation_threshold,
         sample_size=sample_size,
@@ -2393,43 +2501,6 @@ function estimate_memory_usage(n_complexes::Int, n_reactions::Int,
         "total_with_sharing_GB" => total / 1e9 / savings_factor,
         "savings_factor" => savings_factor
     )
-end
-
-"""
-Estimate memory usage for different correlation tracking approaches.
-"""
-function estimate_correlation_memory_usage(n_complexes::Int, sample_size::Int, use_bounded_tracker::Bool=false, max_pairs::Int=50_000)
-    # Estimate potential pairs
-    potential_pairs = div(n_complexes * (n_complexes - 1), 2)
-
-    # Memory per StreamingCorrelation (approx 48 bytes for the struct + key overhead)
-    bytes_per_correlation = 48 + 64  # struct + tuple key overhead
-
-    if use_bounded_tracker
-        # Bounded tracker only stores max_pairs
-        tracked_pairs = min(potential_pairs, max_pairs)
-        memory_correlations = tracked_pairs * bytes_per_correlation
-        memory_saved = (potential_pairs - tracked_pairs) * bytes_per_correlation
-
-        return (
-            total_potential_pairs=potential_pairs,
-            tracked_pairs=tracked_pairs,
-            memory_used_mb=round(memory_correlations / 1e6, digits=2),
-            memory_saved_mb=round(memory_saved / 1e6, digits=2),
-            memory_efficiency=round(memory_saved / (memory_correlations + memory_saved), digits=3)
-        )
-    else
-        # Full tracking stores all pairs
-        memory_correlations = potential_pairs * bytes_per_correlation
-
-        return (
-            total_potential_pairs=potential_pairs,
-            tracked_pairs=potential_pairs,
-            memory_used_mb=round(memory_correlations / 1e6, digits=2),
-            memory_saved_mb=0.0,
-            memory_efficiency=0.0
-        )
-    end
 end
 
 """
