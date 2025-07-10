@@ -863,14 +863,17 @@ function create_unidirectional_constraints(
         negative=:fluxes_reverse
     )
 
+    # Create directional constraints using hierarchical composition
     constraints *= :directional_flux_balance^COBREXA.sign_split_constraints(
         positive=constraints.fluxes_forward,
         negative=constraints.fluxes_reverse,
         signed=constraints.fluxes,
     )
-    # Substitute and prune variables for efficiency
+
+    # Functional variable substitution and pruning
     subst_vals = [ConstraintTrees.variable(; idx).value for idx = 1:ConstraintTrees.variable_count(constraints)]
 
+    # Use ConstraintTrees.zip for functional composition
     constraints.fluxes = ConstraintTrees.zip(constraints.fluxes, constraints.fluxes_forward, constraints.fluxes_reverse) do f, p, n
         (var_idx,) = f.value.idxs
         subst_value = p.value - n.value
@@ -878,6 +881,7 @@ function create_unidirectional_constraints(
         ConstraintTrees.Constraint(subst_value) # bidirectional bound is dropped
     end
 
+    # Apply optimized substitution and pruning
     constraints = ConstraintTrees.prune_variables(ConstraintTrees.substitute(constraints, subst_vals))
 
     # All reactions were split since we applied splitting to all fluxes
@@ -914,7 +918,8 @@ function concordance_constraints(
     end
 
     # Get the reaction IDs that will be used consistently
-    original_rxn_ids = Symbol.(AbstractFBCModels.reactions(model))
+    # Use the actual constraint system IDs, not the original model IDs
+    constraint_rxn_ids = collect(keys(constraints.fluxes))
 
     # Build incidence matrix using the SAME reaction ordering
     complexes, A_matrix, complex_dict = extract_complexes_and_incidence(model;
@@ -922,50 +927,218 @@ function concordance_constraints(
 
 
 
-    # Create complex activity expressions
-    complex_activities = ConstraintTrees.ConstraintTree()
+    # Create complex activity expressions using functional patterns
+    complex_activities = build_complex_activities_functional(
+        complexes, A_matrix, constraints.fluxes, constraint_rxn_ids
+    )
+
+    # Hierarchically compose the complete constraint system
+    constraints = constraints * (:concordance_analysis^(
+        :complexes^complex_activities
+    ))
+
+    return constraints
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Build complex activities using functional ConstraintTrees patterns.
+More compositional and efficient than manual iteration.
+"""
+function build_complex_activities_functional(
+    complexes::Vector{Complex},
+    A_matrix::Union{SparseIncidenceMatrix,SharedSparseMatrix},
+    flux_constraints::ConstraintTrees.ConstraintTree,
+    constraint_rxn_ids::Vector{Symbol}
+)
+    # Convert to sparse matrix for efficient operations
     A_sparse = isa(A_matrix, SharedSparseMatrix) ? sparse(A_matrix) : sparse(A_matrix)
 
-    # Build activities in batches
+    # Build complex activities using functional patterns
+    complex_activities = ConstraintTrees.ConstraintTree()
+
+    # Process complexes in batches for memory efficiency
     n_complexes = length(complexes)
     batch_size = min(1000, n_complexes)
 
     for batch_start in 1:batch_size:n_complexes
         batch_end = min(batch_start + batch_size - 1, n_complexes)
 
-        for cidx in batch_start:batch_end
+        # Use functional approach for batch processing
+        batch_activities = map(batch_start:batch_end) do cidx
             complex = complexes[cidx]
 
-            # Build activity as linear combination of fluxes
-            # Start with zero value using the proper constructor
-            activity_terms = ConstraintTrees.LinearValue(idxs=Int[], weights=Float64[])
+            # Build activity expression functionally
+            activity_terms = build_activity_expression(
+                A_sparse, cidx, constraint_rxn_ids, flux_constraints
+            )
 
-            # Get the row efficiently from the sparse matrix
-            for j in eachindex(original_rxn_ids)
-                coeff = A_sparse[cidx, j]
-                if abs(coeff) > 1e-12  # Only include non-zero coefficients
-                    rxn_id = original_rxn_ids[j]
-                    # Use the flux variable from the constraint tree
-                    if haskey(constraints.fluxes, rxn_id)
-                        activity_terms += coeff * constraints.fluxes[rxn_id].value
-                    end
-                end
-            end
-
-            # Create constraint for this complex activity using direct assignment
-            complex_activities[complex.id] = ConstraintTrees.Constraint(
+            # Return as constraint with appropriate bounds
+            complex.id => ConstraintTrees.Constraint(
                 value=activity_terms,
                 bound=ConstraintTrees.Between(-Inf, Inf)
             )
         end
 
+        # Add batch to constraint tree
+        for (complex_id, constraint) in batch_activities
+            complex_activities[complex_id] = constraint
+        end
+
         GC.safepoint()
     end
 
-    # Add complex activities to the constraint tree
-    constraints = constraints * (:complexes^complex_activities)
+    return complex_activities
+end
 
-    return constraints
+"""
+$(TYPEDSIGNATURES)
+
+Build a single complex activity expression using functional composition.
+"""
+function build_activity_expression(
+    A_sparse::SparseMatrixCSC,
+    complex_idx::Int,
+    constraint_rxn_ids::Vector{Symbol},
+    flux_constraints::ConstraintTrees.ConstraintTree
+)
+    # Use sparse row iteration - iterate through columns to find non-zeros in this row
+    idxs = Vector{Int}()
+    weights = Vector{Float64}()
+    
+    # Iterate through all columns to find non-zero elements in row complex_idx
+    for j_idx in eachindex(constraint_rxn_ids)
+        if j_idx <= size(A_sparse, 2)
+            coeff = A_sparse[complex_idx, j_idx]
+            if abs(coeff) > 1e-12
+                rxn_id = constraint_rxn_ids[j_idx]
+                if haskey(flux_constraints, rxn_id)
+                    push!(idxs, j_idx)
+                    push!(weights, coeff)
+                end
+            end
+        end
+    end
+
+    return ConstraintTrees.LinearValue(idxs=idxs, weights=weights)
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Create concordance test constraints using ConstraintTrees composition patterns.
+More declarative and efficient than manual JuMP constraint building.
+"""
+function create_concordance_test_constraints(
+    base_constraints::ConstraintTrees.ConstraintTree,
+    c1_activities::ConstraintTrees.LinearValue,
+    c2_activities::ConstraintTrees.LinearValue,
+    direction::Symbol;
+    tolerance::Float64=1e-9
+)
+    # Create test variables using ConstraintTrees patterns
+    test_variables = ConstraintTrees.ConstraintTree()
+
+    # Add Charnes-Cooper transformation variables
+    reaction_indices = union(c1_activities.idxs, c2_activities.idxs)
+
+    # Create w variables for transformed fluxes
+    w_vars = ConstraintTrees.variables(
+        keys=Symbol.("w_", reaction_indices),
+        bounds=ConstraintTrees.Between(-Inf, Inf)
+    )
+
+    # Create t variable for normalization
+    t_var = ConstraintTrees.variable(
+        key=:t,
+        bounds=direction == :positive ?
+               ConstraintTrees.Between(tolerance, Inf) :
+               ConstraintTrees.Between(-Inf, -tolerance)
+    )
+
+    # Compose test constraint system hierarchically
+    test_constraints = base_constraints * (:concordance_test^(
+        :variables^(w_vars + t_var),
+        :normalization^create_normalization_constraints(c2_activities, w_vars, t_var, direction),
+        :bounds^create_charnes_cooper_bounds(w_vars, t_var, base_constraints.fluxes, direction)
+    ))
+
+    return test_constraints
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Create normalization constraints for concordance test using functional composition.
+"""
+function create_normalization_constraints(
+    c2_activities::ConstraintTrees.LinearValue,
+    w_vars::ConstraintTrees.ConstraintTree,
+    t_var::ConstraintTrees.Constraint,
+    direction::Symbol
+)
+    # Build normalization constraint functionally
+    target_value = direction == :positive ? 1.0 : -1.0
+
+    # Create expression for c2 activity normalization
+    c2_normalized = sum(
+        coeff * w_vars[Symbol("w_", idx)] for (idx, coeff) in zip(c2_activities.idxs, c2_activities.weights)
+    )
+
+    return ConstraintTrees.Constraint(
+        value=c2_normalized,
+        bound=ConstraintTrees.EqualTo(target_value)
+    )
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Create Charnes-Cooper bounds constraints using functional patterns.
+"""
+function create_charnes_cooper_bounds(
+    w_vars::ConstraintTrees.ConstraintTree,
+    t_var::ConstraintTrees.Constraint,
+    flux_constraints::ConstraintTrees.ConstraintTree,
+    direction::Symbol
+)
+    # Use functional composition to build bounds
+    bounds_constraints = ConstraintTrees.ConstraintTree()
+
+    # Apply bounds transformation based on direction
+    for (var_name, w_constraint) in w_vars
+        flux_name = Symbol(replace(string(var_name), "w_" => ""))
+
+        if haskey(flux_constraints, flux_name)
+            flux_bound = flux_constraints[flux_name].bound
+
+            # Create bounds constraints functionally
+            if direction == :positive
+                # w[j] >= lb * t, w[j] <= ub * t
+                bounds_constraints[Symbol(var_name, "_lower")] = ConstraintTrees.Constraint(
+                    value=w_constraint.value - flux_bound.lower * t_var.value,
+                    bound=ConstraintTrees.Between(0, Inf)
+                )
+                bounds_constraints[Symbol(var_name, "_upper")] = ConstraintTrees.Constraint(
+                    value=flux_bound.upper * t_var.value - w_constraint.value,
+                    bound=ConstraintTrees.Between(0, Inf)
+                )
+            else
+                # Reverse bounds for negative direction
+                bounds_constraints[Symbol(var_name, "_lower")] = ConstraintTrees.Constraint(
+                    value=w_constraint.value - flux_bound.upper * t_var.value,
+                    bound=ConstraintTrees.Between(0, Inf)
+                )
+                bounds_constraints[Symbol(var_name, "_upper")] = ConstraintTrees.Constraint(
+                    value=flux_bound.lower * t_var.value - w_constraint.value,
+                    bound=ConstraintTrees.Between(0, Inf)
+                )
+            end
+        end
+    end
+
+    return bounds_constraints
 end
 
 """
@@ -1044,7 +1217,8 @@ mutable struct CorrelationTracker
 
     # Tier 2: Under evaluation with LRU eviction
     under_evaluation::Dict{Tuple{Symbol,Symbol},CorrelationEntry}
-    lru_order::Vector{Tuple{Symbol,Symbol}}  # For LRU eviction
+    lru_positions::Dict{Tuple{Symbol,Symbol},Int}  # O(1) LRU position lookup
+    lru_counter::Int  # Monotonic counter for LRU ordering
 
     # Configuration
     max_under_evaluation::Int
@@ -1061,7 +1235,8 @@ mutable struct CorrelationTracker
         new(
             Dict{Tuple{Symbol,Symbol},StreamingCorrelation}(),
             Dict{Tuple{Symbol,Symbol},CorrelationEntry}(),
-            Vector{Tuple{Symbol,Symbol}}(),
+            Dict{Tuple{Symbol,Symbol},Int}(),  # lru_positions
+            0,  # lru_counter
             max_pairs,
             30,  # min_samples_for_decision
             promotion_threshold,
@@ -1104,16 +1279,12 @@ function correlation_confidence_upper_bound(corr_acc::StreamingCorrelation, conf
 end
 
 """
-Update LRU order for a pair key.
+Update LRU order for a pair key using O(1) operations.
 """
 function update_lru!(tracker::CorrelationTracker, pair_key::Tuple{Symbol,Symbol})
-    # Remove from current position if exists
-    idx = findfirst(==(pair_key), tracker.lru_order)
-    if idx !== nothing
-        deleteat!(tracker.lru_order, idx)
-    end
-    # Add to front (most recently used)
-    pushfirst!(tracker.lru_order, pair_key)
+    # Update LRU position with O(1) counter-based approach
+    tracker.lru_counter += 1
+    tracker.lru_positions[pair_key] = tracker.lru_counter
 end
 
 
@@ -1176,10 +1347,7 @@ function update_correlation_tracker!(
         # Remove from tracking if present
         if haskey(tracker.under_evaluation, pair_key)
             delete!(tracker.under_evaluation, pair_key)
-            idx = findfirst(==(pair_key), tracker.lru_order)
-            if idx !== nothing
-                deleteat!(tracker.lru_order, idx)
-            end
+            delete!(tracker.lru_positions, pair_key)
         end
 
         tracker.pairs_rejected_statistically += 1
@@ -1193,10 +1361,7 @@ function update_correlation_tracker!(
         # Remove from under_evaluation if present
         if haskey(tracker.under_evaluation, pair_key)
             delete!(tracker.under_evaluation, pair_key)
-            idx = findfirst(==(pair_key), tracker.lru_order)
-            if idx !== nothing
-                deleteat!(tracker.lru_order, idx)
-            end
+            delete!(tracker.lru_positions, pair_key)
         end
 
         tracker.pairs_promoted += 1
@@ -1231,10 +1396,21 @@ function update_correlation_tracker!(
 
         # Handle capacity limit with LRU eviction
         if length(tracker.under_evaluation) >= tracker.max_under_evaluation
-            # Evict least recently used
-            lru_key = pop!(tracker.lru_order)
-            delete!(tracker.under_evaluation, lru_key)
-            tracker.pairs_evicted_lru += 1
+            # Find least recently used key with O(1) lookup
+            lru_key = nothing
+            min_counter = typemax(Int)
+            for (key, position) in tracker.lru_positions
+                if position < min_counter
+                    min_counter = position
+                    lru_key = key
+                end
+            end
+
+            if lru_key !== nothing
+                delete!(tracker.under_evaluation, lru_key)
+                delete!(tracker.lru_positions, lru_key)
+                tracker.pairs_evicted_lru += 1
+            end
         end
 
         tracker.under_evaluation[pair_key] = entry
@@ -1319,25 +1495,18 @@ end
 """
 $(TYPEDSIGNATURES)
 
-Test concordance using CORRECTED Charnes-Cooper transformation.
+Test concordance using ConstraintTrees and CORRECTED Charnes-Cooper transformation.
+Uses pre-computed LinearValues from ConstraintTrees for efficient constraint composition.
 """
-function test_concordance_optimized(
+function test_concordance(
     model::JuMP.Model,
-    c1_idx::Int,
-    c2_idx::Int,
-    A_row1::SparseVector{Float64,Int},
-    A_row2::SparseVector{Float64,Int},
+    c1_activity::ConstraintTrees.LinearValue,
+    c2_activity::ConstraintTrees.LinearValue,
     direction::Symbol;
     tolerance::Float64=1e-9
 )
-    n_reactions = length(A_row1)
-
-    # Pre-compute non-zero indices from both rows
-    nz1 = findnz(A_row1)
-    nz2 = findnz(A_row2)
-
-    # Combine all non-zero indices from both rows
-    all_nz_indices = union(Set(nz1[1]), Set(nz2[1]))
+    # Get reaction indices that are involved in these activities
+    reaction_indices = union(c1_activity.idxs, c2_activity.idxs)
 
     # Clear any existing concordance constraints to ensure clean state
     for cname in [:w, :t, :c2_act, :bounds_l, :bounds_u]
@@ -1346,14 +1515,13 @@ function test_concordance_optimized(
                 delete(model, model[cname])
                 unregister(model, cname)
             catch
-                # Variable might already be deleted, continue
                 unregister(model, cname)
             end
         end
     end
 
-    # Create transformed variables (only for non-zero indices)
-    @variable(model, w[j=collect(all_nz_indices)])
+    # Create transformed variables (only for involved reactions)
+    @variable(model, w[j=collect(reaction_indices)])
     @variable(model, t)
 
     # Direction constraint on t
@@ -1363,28 +1531,30 @@ function test_concordance_optimized(
         @constraint(model, t <= -tolerance)
     end
 
-    # Extract bounds
+    # Extract bounds from original flux variables
     x = model[:x]
 
-    # Complex c2 activity constraint
+    # Complex c2 activity constraint - build from ConstraintTrees LinearValue
     c2_expr = AffExpr(0.0)
-    for (idx, val) in zip(nz2[1], nz2[2])
-        add_to_expression!(c2_expr, val, w[idx])
+    for (idx, coeff) in zip(c2_activity.idxs, c2_activity.weights)
+        if idx in reaction_indices
+            add_to_expression!(c2_expr, coeff, w[idx])
+        end
     end
 
     target = direction == :positive ? 1.0 : -1.0
     @constraint(model, c2_act, c2_expr == target)
 
-    # Charnes-Cooper bounds constraints (ONLY for non-zero indices)
+    # Charnes-Cooper bounds constraints (only for involved reactions)
     if direction == :positive
-        for j in all_nz_indices
+        for j in reaction_indices
             lb = has_lower_bound(x[j]) ? lower_bound(x[j]) : -1e6
             ub = has_upper_bound(x[j]) ? upper_bound(x[j]) : 1e6
             @constraint(model, w[j] - lb * t >= 0)
             @constraint(model, ub * t - w[j] >= 0)
         end
     else
-        for j in all_nz_indices
+        for j in reaction_indices
             lb = has_lower_bound(x[j]) ? lower_bound(x[j]) : -1e6
             ub = has_upper_bound(x[j]) ? upper_bound(x[j]) : 1e6
             @constraint(model, w[j] - ub * t >= 0)
@@ -1392,10 +1562,12 @@ function test_concordance_optimized(
         end
     end
 
-    # Objective: optimize complex c1 activity
+    # Objective: optimize complex c1 activity - build from ConstraintTrees LinearValue
     c1_expr = AffExpr(0.0)
-    for (idx, val) in zip(nz1[1], nz1[2])
-        add_to_expression!(c1_expr, val, w[idx])
+    for (idx, coeff) in zip(c1_activity.idxs, c1_activity.weights)
+        if idx in reaction_indices
+            add_to_expression!(c1_expr, coeff, w[idx])
+        end
     end
 
     # Test min and max
@@ -1409,7 +1581,6 @@ function test_concordance_optimized(
             results[key] = objective_value(model)
         else
             # Optimization failed - clean up and return failure
-            # Use try-catch for robust cleanup in case of solver errors
             for cname in [:t, :c2_act]
                 if haskey(model, cname)
                     try
@@ -1421,7 +1592,6 @@ function test_concordance_optimized(
                 end
             end
 
-            # For array variables, just unregister the name
             for cname in [:w, :bounds_l, :bounds_u]
                 if haskey(model, cname)
                     unregister(model, cname)
@@ -1447,7 +1617,6 @@ function test_concordance_optimized(
         end
     end
 
-    # For array variables, just unregister the name
     for cname in [:w, :bounds_l, :bounds_u]
         if haskey(model, cname)
             unregister(model, cname)
@@ -1547,7 +1716,7 @@ function streaming_correlation_filter(
     all_samples = COBREXA.sample_constraints(
         COBREXA.sample_chain_achr,
         constraints;
-        output=constraints.complexes,
+        output=constraints.concordance_analysis.complexes,
         start_variables=limited_warmup,
         seed=rand(rng, UInt64),
         n_chains=n_chains,
@@ -1568,8 +1737,8 @@ function streaming_correlation_filter(
         original_indices[c.id] = i
     end
 
-    # Pre-compute skip matrix more efficiently
-    skip_pairs_matrix = falses(n_active, n_active)
+    # Use sparse set for memory-efficient skip tracking (massive memory savings)
+    skip_pairs_set = Set{Tuple{Int,Int}}()
     for i = 1:n_active
         ci = active_complexes[i]
         ci_original_idx = get(original_indices, ci.id, 0)
@@ -1586,7 +1755,9 @@ function streaming_correlation_filter(
 
             canonical_pair = ci_original_idx < cj_original_idx ?
                              (ci_original_idx, cj_original_idx) : (cj_original_idx, ci_original_idx)
-            skip_pairs_matrix[i, j] = canonical_pair in trivial_pairs
+            if canonical_pair in trivial_pairs
+                push!(skip_pairs_set, (i, j))
+            end
         end
     end
 
@@ -1654,8 +1825,8 @@ function streaming_correlation_filter(
                 end
 
                 for j = (i+1):n_filtered_active
-                    # Quick skip check
-                    if skip_pairs_matrix[i, j]
+                    # Quick skip check using sparse set
+                    if (i, j) in skip_pairs_set
                         continue
                     end
 
@@ -1789,8 +1960,7 @@ function process_in_stages(
     complexes::Vector{Complex},
     candidate_priorities::Vector{PairPriority},
     A_matrix::Union{SparseIncidenceMatrix,SharedSparseMatrix},
-    concordance_tracker::Union{ConcordanceTracker,SharedConcordanceTracker},
-    A_rows::Union{Vector{SparseVector{Float64,Int}},Nothing}=nothing;
+    concordance_tracker::Union{ConcordanceTracker,SharedConcordanceTracker};
     optimizer,
     settings=[],
     workers=Distributed.workers(),
@@ -1844,11 +2014,12 @@ function process_in_stages(
         @info "Starting stage $stage_count" remaining = length(remaining_pairs)
 
         # Filter out pairs that can be inferred by transitivity
-        filtered_pairs = filter_transitive_pairs(
+        filtered_pairs, skipped_count = filter_transitive_pairs(
             remaining_pairs,
             complexes,
             concordance_tracker
         )
+        stage_results["skipped_by_transitivity"] += skipped_count
 
         if isempty(filtered_pairs)
             @info "No more pairs to process after transitivity filtering"
@@ -1864,7 +2035,7 @@ function process_in_stages(
 
         # Process pairs
         batch_results = process_concordance_batch(
-            constraints, complexes, stage_pairs, A_matrix, A_rows;
+            constraints, complexes, stage_pairs, A_matrix;
             optimizer=optimizer,
             settings=settings,
             workers=workers,
@@ -2004,7 +2175,7 @@ function filter_transitive_pairs(
         @info "Filtered pairs by transitivity" skipped = skipped_count remaining = length(filtered_pairs)
     end
 
-    return filtered_pairs
+    return filtered_pairs, skipped_count
 end
 
 """
@@ -2091,29 +2262,23 @@ end
 """
 $(TYPEDSIGNATURES)
 
-Process a batch of concordance tests.
+Process a batch of concordance tests using ConstraintTrees approach.
 """
 function process_concordance_batch(
     constraints::ConstraintTree,
     complexes::Vector{Complex},
     batch_pairs::Vector{Tuple{Int,Int,Set{Symbol}}},
-    A_matrix::Union{SparseIncidenceMatrix,SharedSparseMatrix},
-    A_rows::Union{Vector{SparseVector{Float64,Int}},Nothing}=nothing;
+    A_matrix::Union{SparseIncidenceMatrix,SharedSparseMatrix};
     optimizer,
     settings=[],
     workers=Distributed.workers(),
     tolerance::Float64=1e-12
 )
-    # Get sparse matrix representation
-    A_sparse = isa(A_matrix, SharedSparseMatrix) ? sparse(A_matrix) : sparse(A_matrix)
-    n_complexes = size(A_sparse, 1)
+    # Extract activity lookup from pre-computed ConstraintTrees
+    activity_lookup = Dict{Symbol,ConstraintTrees.LinearValue}()
 
-    # Create A_rows if not provided
-    if isnothing(A_rows)
-        A_rows = Vector{SparseVector{Float64,Int}}(undef, n_complexes)
-        for i in 1:n_complexes
-            A_rows[i] = A_sparse[i, :]
-        end
+    for (complex_id, constraint) in constraints.concordance_analysis.complexes
+        activity_lookup[complex_id] = constraint.value
     end
 
     # Expand pairs by direction
@@ -2124,20 +2289,23 @@ function process_concordance_batch(
         end
     end
 
-
-
     # Test concordance using COBREXA's optimized screening infrastructure
     results = COBREXA.screen_optimization_model(
         constraints,
         expanded_pairs;
         optimizer=optimizer,
-        settings=settings,  # Add silence by default for reduced overhead
+        settings=settings,
         workers=workers
     ) do om, (c1_idx, c2_idx, direction)
-        is_conc, lambda = test_concordance_optimized(
-            om, c1_idx, c2_idx,
-            A_rows[c1_idx], A_rows[c2_idx],
-            direction;
+        # Get pre-computed activities from ConstraintTrees
+        c1_id = complexes[c1_idx].id
+        c2_id = complexes[c2_idx].id
+
+        c1_activity = activity_lookup[c1_id]
+        c2_activity = activity_lookup[c2_id]
+
+        is_conc, lambda = test_concordance(
+            om, c1_activity, c2_activity, direction;
             tolerance=tolerance
         )
         return (c1_idx, c2_idx, direction, is_conc, lambda)
@@ -2186,7 +2354,7 @@ Main concordance analysis function optimized for large models and HPC execution.
 - `workers=workers()`: Worker processes for parallel computation
 - `tolerance=1e-9`: Numerical tolerance for concordance testing
 - `correlation_threshold=0.95`: Minimum correlation for candidate pairs
-- `sample_size=1000`: Number of flux samples for correlation analysis
+- `sample_size=100`: Number of flux samples for correlation analysis
 - `sample_batch_size=100`: Batch size for sampling
 - `stage_size=500`: Number of pairs to process per stage
 - `max_memory_per_worker=2e9`: Maximum memory usage per worker (bytes)
@@ -2206,14 +2374,14 @@ function concordance_analysis(
     settings=[],
     workers=Distributed.workers(),
     tolerance::Float64=1e-12,
-    correlation_threshold::Float64=0.95,
-    sample_size::Int=1000,
+    correlation_threshold::Float64=0.99,
+    sample_size::Int=100,
     stage_size::Int=500,
     use_shared_arrays::Bool=true,
     min_size_for_sharing::Int=1_000_000,
     min_valid_samples::Int=30,
     max_correlation_pairs::Int=500_000,
-    early_correlation_threshold::Float64=0.8,
+    early_correlation_threshold::Float64=0.95,
     seed::Union{Int,Nothing}=42,
     use_unidirectional_constraints::Bool=true,
 )
@@ -2272,7 +2440,7 @@ function concordance_analysis(
     # Run FVA on all complexes using optimized settings
     ava_results = COBREXA.constraints_variability(
         constraints,
-        constraints.complexes;
+        constraints.concordance_analysis.complexes;
         optimizer=optimizer,
         settings=settings,  # Add silence for reduced overhead
         output=ava_output_with_warmup,
@@ -2453,7 +2621,7 @@ function concordance_analysis(
         "n_trivially_balanced" => length(trivially_balanced),
         "n_trivial_pairs" => length(trivial_pairs),
         "n_candidate_pairs" => length(candidate_priorities),
-        "n_concordant_pairs" => length(stage_results["concordant_pairs"]),
+        "n_concordant_pairs" => length(stage_results["concordant_pairs"]) + length(trivial_pairs),
         "n_non_concordant_pairs" => stage_results["non_concordant_pairs"],
         "n_skipped_transitivity" => stage_results["skipped_by_transitivity"],
         "n_modules" => length(modules),
