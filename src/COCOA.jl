@@ -1486,7 +1486,7 @@ function streaming_correlation_filter(
     trivial_pairs::Set{Tuple{Int,Int}},
     warmup::Matrix{Float64},
     constraints::ConstraintTree;
-    tolerance::Float64=1e-9,
+    tolerance::Float64=1e-12,
     correlation_threshold::Float64=0.95,
     sample_size::Int=100,
     min_valid_samples::Int=30,
@@ -1517,7 +1517,7 @@ function streaming_correlation_filter(
 
     # Reduce sampling overhead by using fewer chains with more samples each
     n_chains = min(4, length(workers))  # Use fewer chains
-    n_warmup_points_per_chain = min(50, size(warmup, 1))  # Limit warmup points
+    n_warmup_points_per_chain = min(100, size(warmup, 1))  # Limit warmup points
 
     # More aggressive burn-in and thinning to reduce total iterations
     burn_in_period = 32
@@ -1543,15 +1543,13 @@ function streaming_correlation_filter(
         limited_warmup = warmup
     end
 
-    batch_seed = rand(rng, UInt64)
-
     # Sample with optimized settings
     all_samples = COBREXA.sample_constraints(
         COBREXA.sample_chain_achr,
         constraints;
         output=constraints.complexes,
         start_variables=limited_warmup,
-        seed=batch_seed,
+        seed=rand(rng, UInt64),
         n_chains=n_chains,
         collect_iterations=iters_to_collect,
         workers=workers,
@@ -1797,7 +1795,7 @@ function process_in_stages(
     settings=[],
     workers=Distributed.workers(),
     stage_size::Int=500,
-    tolerance::Float64=1e-9
+    tolerance::Float64=1e-12
 )
     stage_results = Dict{String,Any}(
         "stages_completed" => 0,
@@ -1830,6 +1828,10 @@ function process_in_stages(
         output=stdout,
         showspeed=true
     )
+
+    concordant_count = 0
+    eliminated_count = 0
+    prioritized_count = 0
 
     while !isempty(remaining_pairs)
         stage_count += 1
@@ -1875,6 +1877,8 @@ function process_in_stages(
         # Extract newly concordant pairs from this stage
         newly_concordant = Vector{Tuple{Symbol,Symbol}}()
         stage_concordant_count = 0
+        stage_prioritized_count = 0
+        pairs_eliminated = 0
 
         # Update tracker with results
         for result in batch_results
@@ -1899,10 +1903,7 @@ function process_in_stages(
             end
         end
 
-        stage_results["pairs_processed"] += length(stage_pairs)
-        stage_results["stages_completed"] = stage_count
-
-        @info "Stage $stage_count complete" new_concordant = stage_concordant_count
+        concordant_count = length(stage_results["concordant_pairs"])
 
         # Apply transitivity elimination after finding concordant pairs
         if stage_concordant_count > 0
@@ -1914,10 +1915,7 @@ function process_in_stages(
                 concordance_tracker
             )
             pairs_eliminated = prev_num_pairs - length(remaining_pairs)
-            @info "Applied transitivity elimination" (
-                pairs_eliminated=pairs_eliminated,
-                remaining_after_transitivity=length(remaining_pairs)
-            )
+            eliminated_count += pairs_eliminated
         end
 
         # Reprioritize if we found concordant pairs
@@ -1934,13 +1932,28 @@ function process_in_stages(
                 complexes
             )
 
-            @info "Reprioritized with accumulated concordant complexes" (
-                total_concordant_complexes=length(all_concordant_complexes),
-                newly_added_complexes=length(newly_concordant) * 2,
-                remaining_pairs=length(remaining_pairs),
-                priority_boost_applied=true
-            )
+            # Count prioritized pairs (those involving concordant complexes)
+            for (c1_idx, c2_idx, _) in remaining_pairs
+                if (complexes[c1_idx].id in all_concordant_complexes) || (complexes[c2_idx].id in all_concordant_complexes)
+                    stage_prioritized_count += 1
+                end
+            end
+            prioritized_count = stage_prioritized_count
         end
+
+        stage_results["pairs_processed"] += length(stage_pairs)
+        stage_results["stages_completed"] = stage_count
+
+        @info "Stage $stage_count complete" new_concordant = stage_concordant_count
+
+        # Update progress bar with live values
+        ProgressMeter.update!(prog, processed_pairs;
+            showvalues=[
+                (:concordant, concordant_count),
+                (:eliminated, eliminated_count),
+                (:prioritized, prioritized_count)
+            ]
+        )
     end
 
     ProgressMeter.finish!(prog)
@@ -2089,7 +2102,7 @@ function process_concordance_batch(
     optimizer,
     settings=[],
     workers=Distributed.workers(),
-    tolerance::Float64=1e-9
+    tolerance::Float64=1e-12
 )
     # Get sparse matrix representation
     A_sparse = isa(A_matrix, SharedSparseMatrix) ? sparse(A_matrix) : sparse(A_matrix)
@@ -2581,3 +2594,12 @@ function recommend_correlation_tracker_config(n_complexes::Int, available_memory
 end
 
 end # module COCOA
+
+
+# set_optimizer_attribute(model, "presolve", "on")  # Enable presolve (default)
+# set_optimizer_attribute(model, "parallel", "on")  # Use multi-threading if available
+# set_optimizer_attribute(model, "primal_feasibility_tolerance", 1e-9)
+# set_optimizer_attribute(model, "dual_feasibility_tolerance", 1e-9)
+# set_optimizer_attribute(model, "ipm_optimality_tolerance", 1e-9)
+# set_optimizer_attribute(model, "time_limit", 3600.0)  # Optional: 1 hour per problem
+# set_optimizer_attribute(model, "output_flag", false)  # Suppress solver output
