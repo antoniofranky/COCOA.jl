@@ -19,26 +19,16 @@ COCOA is optimized for efficiency through integration with COBREXA.jl:
 
 ## Reproducibility Guarantees
 
-COCOA implements best practices for scientific reproducibility using hierarchical random number
-generation (RNG) with StableRNGs.jl:
+COCOA implements reproducible random number generation using StableRNGs.jl:
 
 - **Cross-platform reproducibility**: Uses StableRNGs instead of Julia's default RNG
-- **Hierarchical seeding**: Master seed generates deterministic component-specific seeds
-- **Deterministic sampling**: All random operations (warmup, batching, sampling) are reproducible
-- **Seed logging**: All component seeds are logged for verification and debugging
-
-### RNG Components
-
-The analysis pipeline uses a minimal set of RNGs for reproducibility:
-- **Master RNG**: Generates deterministic seeds for all components
-- **Sampling RNG**: Handles all random sampling operations (warmup selection, batch seeds, etc.)
-
-This simplified approach ensures reproducibility while minimizing complexity.
+- **Deterministic sampling**: All random operations (warmup selection, batch seeds) are reproducible
+- **Simple seeding**: Single RNG with configurable seed for all random operations
 
 ### Usage for Reproducible Results
 
 ```julia
-# Same master seed will produce identical results across runs and platforms
+# Same seed will produce identical results across runs and platforms
 results1 = concordance_analysis(model; optimizer=optimizer, seed=1234)
 results2 = concordance_analysis(model; optimizer=optimizer, seed=1234)
 # results1 == results2 (within numerical precision)
@@ -81,112 +71,6 @@ using .ModelPreparation
 export concordance_constraints, concordance_analysis
 export split_into_elementary_steps
 export prepare_model_for_concordance
-
-
-"""
-RNG Management and Hierarchical Seeding Utilities
-
-These functions implement best practices for reproducible random number generation
-in scientific computing, using StableRNGs for cross-platform reproducibility.
-"""
-
-"""
-    create_master_rng(seed::Int=1234) -> StableRNG
-
-Create a master RNG with the given seed for hierarchical seeding.
-This ensures reproducible generation of seeds for different components.
-"""
-function create_master_rng(seed::Int=1234)
-    return StableRNG(seed)
-end
-
-"""
-    derive_seed(master_rng::AbstractRNG, component::String) -> UInt64
-
-Derive a deterministic seed for a specific component from the master RNG.
-Each component gets a unique, reproducible seed based on the master seed.
-"""
-function derive_seed(master_rng::AbstractRNG, component::String)
-    # Create a temporary RNG to get a deterministic seed
-    temp_rng = copy(master_rng)
-    # Hash the component name to get a unique offset
-    component_hash = hash(component)
-    # Advance the RNG state based on the hash to ensure uniqueness
-    for _ in 1:(component_hash%100+1)
-        rand(temp_rng)
-    end
-    return rand(temp_rng, UInt64)
-end
-
-"""
-    create_component_rng(master_rng::AbstractRNG, component::String) -> StableRNG
-
-Create a dedicated RNG for a specific component using hierarchical seeding.
-"""
-function create_component_rng(master_rng::AbstractRNG, component::String)
-    seed = derive_seed(master_rng, component)
-    return StableRNG(seed)
-end
-
-"""
-    RNGManager
-
-Manages RNG instances for different components of the analysis pipeline.
-Ensures reproducible, hierarchical seeding across all random operations.
-
-# Fields
-- `master_rng`: The master RNG for hierarchical seeding
-- `component_rngs`: Dictionary of component-specific RNGs
-- `seed_log`: Log of seeds used for each component for reproducibility
-"""
-mutable struct RNGManager
-    master_rng::StableRNG
-    component_rngs::Dict{String,StableRNG}
-    seed_log::Dict{String,UInt64}
-
-    function RNGManager(master_seed::Int=1234)
-        master_rng = create_master_rng(master_seed)
-        new(master_rng, Dict{String,StableRNG}(), Dict{String,UInt64}())
-    end
-end
-
-"""
-    get_rng(manager::RNGManager, component::String) -> StableRNG
-
-Get or create an RNG for a specific component.
-Logs the seed for reproducibility documentation.
-"""
-function get_rng(manager::RNGManager, component::String)
-    if !haskey(manager.component_rngs, component)
-        seed = derive_seed(manager.master_rng, component)
-        manager.component_rngs[component] = StableRNG(seed)
-        manager.seed_log[component] = seed
-        @debug "Created RNG for component '$component' with seed $seed"
-    end
-    return manager.component_rngs[component]
-end
-
-"""
-    reset_component(manager::RNGManager, component::String)
-
-Reset a specific component's RNG to its initial state for reproducible re-runs.
-"""
-function reset_component(manager::RNGManager, component::String)
-    if haskey(manager.seed_log, component)
-        seed = manager.seed_log[component]
-        manager.component_rngs[component] = StableRNG(seed)
-        @debug "Reset RNG for component '$component' to seed $seed"
-    end
-end
-
-"""
-    log_seeds(manager::RNGManager) -> Dict{String, UInt64}
-
-Return a copy of the seed log for reproducibility documentation.
-"""
-function log_seeds(manager::RNGManager)
-    return copy(manager.seed_log)
-end
 
 """
 Pre-allocated buffers for memory-efficient concordance analysis.
@@ -1611,9 +1495,8 @@ function streaming_correlation_filter(
     workers=Distributed.workers(),
     seed::Union{Int,Nothing}=42,
 )
-    # Setup RNG for reproducible sampling
-    master_seed = seed === nothing ? rand() : seed
-    rng_manager = RNGManager(master_seed)
+    # Setup simple RNG for reproducible sampling
+    rng = seed === nothing ? StableRNG() : StableRNG(seed)
 
     # Filter to get only complexes that need to be sampled
     active_complexes = [c for c in complexes if !(c.id in balanced_complexes)]
@@ -1654,14 +1537,13 @@ function streaming_correlation_filter(
 
     # Use a subset of warmup points to reduce memory pressure
     if size(warmup, 1) > n_warmup_points_per_chain
-        sampling_rng = get_rng(rng_manager, "sampling")
-        selected_indices = sort(randperm(sampling_rng, size(warmup, 1))[1:n_warmup_points_per_chain])
+        selected_indices = sort(randperm(rng, size(warmup, 1))[1:n_warmup_points_per_chain])
         limited_warmup = warmup[selected_indices, :]
     else
         limited_warmup = warmup
     end
 
-    batch_seed = rand(get_rng(rng_manager, "sampling"), UInt64)
+    batch_seed = rand(rng, UInt64)
 
     # Sample with optimized settings
     all_samples = COBREXA.sample_constraints(
@@ -1732,15 +1614,15 @@ function streaming_correlation_filter(
         0
     end
     n_samples_to_process = min(sample_size, actual_sample_count)
-
+    n_samples_generated = length(all_samples)
     @info "Sample processing setup" n_filtered_active n_samples_to_process
 
     # === OPTIMIZED CORRELATION COMPUTATION ===
-    @info "Computing correlations with streaming optimization"
+    @info "Computing correlations"
 
     # Initialize correlation tracker with optimized settings
     correlation_tracker = CorrelationTracker(
-        min(max_correlation_pairs, n_filtered_active^2 ÷ 4),  # More conservative estimate
+        min(max_correlation_pairs, n_filtered_active^2 ÷ 2),  # More conservative estimate
         early_correlation_threshold,
         0.95
     )
@@ -1900,11 +1782,11 @@ end
 """
 $(TYPEDSIGNATURES)
 
-Process concordance analysis in stages with transitivity filtering.
-Processes high-confidence pairs first, then uncertain pairs.
+Process concordance analysis in stages with intelligent reprioritization based on concordant discoveries.
+When concordant pairs are found, remaining pairs involving those complexes are prioritized.
+This exploits the clustering tendency of concordant complexes to dramatically improve efficiency.
 """
 function process_in_stages(
-    model::AbstractFBCModels.AbstractFBCModel,
     constraints::ConstraintTree,
     complexes::Vector{Complex},
     candidate_priorities::Vector{PairPriority},
@@ -1936,14 +1818,17 @@ function process_in_stages(
     stage_count = 0
     total_pairs = length(remaining_pairs)
     processed_pairs = 0
+    all_concordant_complexes = Set{Symbol}()  # Accumulate across stages
+
+    @info "Processing concordance tests in stages with intelligent prioritization"
 
     prog = Progress(
         total_pairs,
         desc="Concordance analysis: ",
         dt=1.0,
-        barlen=50,                     # Longer bar
-        output=stdout,                 # Ensure it goes to standard output
-        showspeed=true                 # Show processing speed
+        barlen=50,
+        output=stdout,
+        showspeed=true
     )
 
     while !isempty(remaining_pairs)
@@ -1956,72 +1841,54 @@ function process_in_stages(
 
         @info "Starting stage $stage_count" remaining = length(remaining_pairs)
 
-        # Filter out pairs that can be inferred
-        filtered_pairs = Tuple{Int,Int,Set{Symbol}}[]
-
-        for (c1_idx, c2_idx, directions) in remaining_pairs
-            # Get tracker indices
-            if isa(concordance_tracker, SharedConcordanceTracker)
-                tracker_idx1 = concordance_tracker.id_to_idx[complexes[c1_idx].id]
-                tracker_idx2 = concordance_tracker.id_to_idx[complexes[c2_idx].id]
-            else
-                tracker_idx1 = concordance_tracker.id_to_idx[complexes[c1_idx].id]
-                tracker_idx2 = concordance_tracker.id_to_idx[complexes[c2_idx].id]
-            end
-
-            # Skip if already concordant
-            if are_concordant(concordance_tracker, tracker_idx1, tracker_idx2)
-                stage_results["skipped_by_transitivity"] += 1
-                continue
-            end
-
-            # Skip if known non-concordant
-            if is_non_concordant(concordance_tracker, tracker_idx1, tracker_idx2)
-                stage_results["skipped_by_transitivity"] += 1
-                continue
-            end
-
-            push!(filtered_pairs, (c1_idx, c2_idx, directions))
-        end
+        # Filter out pairs that can be inferred by transitivity
+        filtered_pairs = filter_transitive_pairs(
+            remaining_pairs,
+            complexes,
+            concordance_tracker
+        )
 
         if isempty(filtered_pairs)
+            @info "No more pairs to process after transitivity filtering"
             break
         end
 
         # Take stage batch
         stage_size_actual = min(stage_size, length(filtered_pairs))
         stage_pairs = filtered_pairs[1:stage_size_actual]
+        remaining_pairs = filtered_pairs[(stage_size_actual+1):end]
 
         @info "Processing stage $stage_count" pairs = length(stage_pairs)
 
         # Process pairs
         batch_results = process_concordance_batch(
-            constraints, complexes, stage_pairs, A_matrix, A_rows; optimizer=optimizer, settings=settings,
-            workers=workers, tolerance=tolerance
+            constraints, complexes, stage_pairs, A_matrix, A_rows;
+            optimizer=optimizer,
+            settings=settings,
+            workers=workers,
+            tolerance=tolerance
         )
 
         processed_pairs += length(stage_pairs)
-        # Update progress meter after processing a batch
         ProgressMeter.update!(prog, processed_pairs)
 
+        # Extract newly concordant pairs from this stage
+        newly_concordant = Vector{Tuple{Symbol,Symbol}}()
+        stage_concordant_count = 0
+
         # Update tracker with results
-        new_concordant = 0
         for result in batch_results
             c1_idx, c2_idx, direction, is_concordant, lambda = result
 
             # Get tracker indices
-            if isa(concordance_tracker, SharedConcordanceTracker)
-                tracker_idx1 = concordance_tracker.id_to_idx[complexes[c1_idx].id]
-                tracker_idx2 = concordance_tracker.id_to_idx[complexes[c2_idx].id]
-            else
-                tracker_idx1 = concordance_tracker.id_to_idx[complexes[c1_idx].id]
-                tracker_idx2 = concordance_tracker.id_to_idx[complexes[c2_idx].id]
-            end
+            tracker_idx1 = concordance_tracker.id_to_idx[complexes[c1_idx].id]
+            tracker_idx2 = concordance_tracker.id_to_idx[complexes[c2_idx].id]
 
             if is_concordant
                 union_sets!(concordance_tracker, tracker_idx1, tracker_idx2)
                 push!(stage_results["concordant_pairs"], (c1_idx, c2_idx))
-                new_concordant += 1
+                push!(newly_concordant, (complexes[c1_idx].id, complexes[c2_idx].id))
+                stage_concordant_count += 1
 
                 if !isnothing(lambda)
                     stage_results["optimization_results"][(c1_idx, c2_idx, direction)] = lambda
@@ -2035,15 +1902,179 @@ function process_in_stages(
         stage_results["pairs_processed"] += length(stage_pairs)
         stage_results["stages_completed"] = stage_count
 
-        @info "Stage $stage_count complete" new_concordant = new_concordant
+        @info "Stage $stage_count complete" new_concordant = stage_concordant_count
 
-        # Update remaining pairs
-        remaining_pairs = filtered_pairs[(stage_size_actual+1):end]
+        # Apply transitivity elimination after finding concordant pairs
+        if stage_concordant_count > 0
+            prev_num_pairs = length(remaining_pairs)
+            remaining_pairs = apply_transitivity_elimination(
+                remaining_pairs,
+                newly_concordant,
+                complexes,
+                concordance_tracker
+            )
+            pairs_eliminated = prev_num_pairs - length(remaining_pairs)
+            @info "Applied transitivity elimination" (
+                pairs_eliminated=pairs_eliminated,
+                remaining_after_transitivity=length(remaining_pairs)
+            )
+        end
+
+        # Reprioritize if we found concordant pairs
+        if stage_concordant_count >= 1
+            # Add newly concordant complexes to accumulated set
+            for (c1_id, c2_id) in newly_concordant
+                push!(all_concordant_complexes, c1_id, c2_id)
+            end
+
+            # Reprioritize remaining pairs
+            remaining_pairs = reprioritize_by_concordant_complexes(
+                remaining_pairs,
+                all_concordant_complexes,
+                complexes
+            )
+
+            @info "Reprioritized with accumulated concordant complexes" (
+                total_concordant_complexes=length(all_concordant_complexes),
+                newly_added_complexes=length(newly_concordant) * 2,
+                remaining_pairs=length(remaining_pairs),
+                priority_boost_applied=true
+            )
+        end
     end
+
     ProgressMeter.finish!(prog)
+
+    @info "Concordance testing complete" (
+        total_stages=stage_count,
+        total_concordant_pairs=length(stage_results["concordant_pairs"]),
+        total_concordant_complexes=length(all_concordant_complexes)
+    )
+
     return stage_results
 end
 
+"""
+$(TYPEDSIGNATURES)
+
+Filter out pairs that can be inferred by transitivity to avoid redundant testing.
+"""
+function filter_transitive_pairs(
+    remaining_pairs::Vector{Tuple{Int,Int,Set{Symbol}}},
+    complexes::Vector{Complex},
+    concordance_tracker::Union{ConcordanceTracker,SharedConcordanceTracker}
+)
+    filtered_pairs = Tuple{Int,Int,Set{Symbol}}[]
+    skipped_count = 0
+
+    for (c1_idx, c2_idx, directions) in remaining_pairs
+        # Get tracker indices
+        tracker_idx1 = concordance_tracker.id_to_idx[complexes[c1_idx].id]
+        tracker_idx2 = concordance_tracker.id_to_idx[complexes[c2_idx].id]
+
+        # Skip if already concordant
+        if are_concordant(concordance_tracker, tracker_idx1, tracker_idx2)
+            skipped_count += 1
+            continue
+        end
+
+        # Skip if known non-concordant
+        if is_non_concordant(concordance_tracker, tracker_idx1, tracker_idx2)
+            skipped_count += 1
+            continue
+        end
+
+        push!(filtered_pairs, (c1_idx, c2_idx, directions))
+    end
+
+    if skipped_count > 0
+        @info "Filtered pairs by transitivity" skipped = skipped_count remaining = length(filtered_pairs)
+    end
+
+    return filtered_pairs
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Reprioritize remaining pairs by moving pairs involving concordant complexes to the front.
+Pairs involving concordant complexes are sorted by correlation strength.
+"""
+function reprioritize_by_concordant_complexes(
+    remaining_pairs::Vector{Tuple{Int,Int,Set{Symbol}}},
+    concordant_complexes::Set{Symbol},
+    complexes::Vector{Complex}
+)
+    if isempty(concordant_complexes)
+        return remaining_pairs
+    end
+
+    # Partition pairs: those involving concordant complexes vs others
+    priority_pairs = Vector{Tuple{Int,Int,Set{Symbol}}}()
+    regular_pairs = Vector{Tuple{Int,Int,Set{Symbol}}}()
+
+    for (c1_idx, c2_idx, directions) in remaining_pairs
+        c1_id = complexes[c1_idx].id
+        c2_id = complexes[c2_idx].id
+
+        if c1_id in concordant_complexes || c2_id in concordant_complexes
+            push!(priority_pairs, (c1_idx, c2_idx, directions))
+        else
+            push!(regular_pairs, (c1_idx, c2_idx, directions))
+        end
+    end
+
+    # Sort priority pairs by complex indices for deterministic ordering
+    # (We don't have correlation info at this stage, so use indices as proxy)
+    sort!(priority_pairs, by=p -> (p[1], p[2]))
+
+    @info "Reprioritization effect" (
+        priority_pairs=length(priority_pairs),
+        regular_pairs=length(regular_pairs),
+        priority_percentage=round(100 * length(priority_pairs) / length(remaining_pairs), digits=1)
+    )
+
+    # Return reprioritized list: priority pairs first, then regular pairs
+    return vcat(priority_pairs, regular_pairs)
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Apply transitivity elimination to remove pairs that are guaranteed to be concordant
+based on already discovered concordant pairs.
+"""
+function apply_transitivity_elimination(
+    remaining_pairs::Vector{Tuple{Int,Int,Set{Symbol}}},
+    newly_concordant::Vector{Tuple{Symbol,Symbol}},
+    complexes::Vector{Complex},
+    concordance_tracker::Union{ConcordanceTracker,SharedConcordanceTracker}
+)
+    if isempty(newly_concordant)
+        return remaining_pairs
+    end
+
+    # Filter out pairs that are now transitively concordant or non-concordant
+    filtered_pairs = filter(remaining_pairs) do (c1_idx, c2_idx, directions)
+        tracker_idx1 = concordance_tracker.id_to_idx[complexes[c1_idx].id]
+        tracker_idx2 = concordance_tracker.id_to_idx[complexes[c2_idx].id]
+
+        # Keep pair if it's not transitively determined
+        !are_concordant(concordance_tracker, tracker_idx1, tracker_idx2) &&
+            !is_non_concordant(concordance_tracker, tracker_idx1, tracker_idx2)
+    end
+
+    eliminated_count = length(remaining_pairs) - length(filtered_pairs)
+
+    if eliminated_count > 0
+        @info "Transitivity elimination" (
+            pairs_eliminated=eliminated_count,
+            remaining_pairs=length(filtered_pairs)
+        )
+    end
+
+    return filtered_pairs
+end
 """
 $(TYPEDSIGNATURES)
 
@@ -2079,6 +2110,8 @@ function process_concordance_batch(
             push!(expanded_pairs, (c1_idx, c2_idx, direction))
         end
     end
+
+
 
     # Test concordance using COBREXA's optimized screening infrastructure
     results = COBREXA.screen_optimization_model(
@@ -2159,7 +2192,7 @@ function concordance_analysis(
     optimizer,
     settings=[],
     workers=Distributed.workers(),
-    tolerance::Float64=1e-9,
+    tolerance::Float64=1e-12,
     correlation_threshold::Float64=0.95,
     sample_size::Int=1000,
     stage_size::Int=500,
@@ -2352,7 +2385,6 @@ function concordance_analysis(
     @info "Processing concordance tests in stages"
 
     stage_results = process_in_stages(
-        model,
         constraints,
         complexes,
         candidate_priorities,
