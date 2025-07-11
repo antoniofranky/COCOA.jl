@@ -74,7 +74,7 @@ function parse_commandline()
 
     @add_arg_table! s begin
         "command"
-        help = "Command: split, prepare, or concordance"
+        help = "Command: split, prepare, concordance, or split-and-analyze"
         required = true
         "input"
         help = "Input model file (.xml, .json, .mat, .jld2)"
@@ -101,6 +101,10 @@ function parse_commandline()
         help = "Random seed for reproducibility"
         arg_type = Int
         default = 42
+        "--split-fraction"
+        help = "Fraction of reactions to split (0.0-1.0)"
+        arg_type = Float64
+        default = 1.0
         "--split-elementary"
         help = "Split into elementary steps if not already done"
         action = :store_true
@@ -339,9 +343,87 @@ function main()
         println("  Processing time: $(round(results.stats["elapsed_time"] / 60, digits=2)) minutes")
         println("\n✓ Analysis complete!")
 
+    elseif command == "split-and-analyze"
+        println("\n=== Split and Analyze Workflow ===")
+        
+        # Load original model
+        println("Loading original model...")
+        original_model = load_model_smart(args["input"])
+        print_summary(original_model)
+        
+        # Step 1: Split into elementary steps
+        println("\nStep 1: Splitting reactions into elementary steps...")
+        println("  Split fraction: $(args["split-fraction"])")
+        println("  Mechanism: $(args["mechanism"])")
+        println("  Max substrates: $(args["max-substrates"])")
+        println("  Max products: $(args["max-products"])")
+        println("  Random seed: $(args["seed"])")
+        
+        split_model = COCOA.split_into_elementary_steps(
+            original_model;
+            ordered_fraction=args["mechanism"] == :fixed ? args["split-fraction"] : 0.0,
+            random_fraction=args["mechanism"] == :random ? args["split-fraction"] : 0.0,
+            max_substrates=args["max-substrates"],
+            max_products=args["max-products"],
+            seed=args["seed"]
+        )
+        
+        print_summary(split_model)
+        
+        # Step 2: Run concordance analysis
+        println("\nStep 2: Running concordance analysis...")
+        
+        config = COCOA.ConcordanceConfig(
+            sample_size=args["sample-size"],
+            correlation_threshold=args["correlation-threshold"],
+            concordance_batch_size=args["batch-size"],
+            stage_size=args["stage-size"],
+            seed=args["seed"]
+        )
+        
+        results = COCOA.concordance_analysis(
+            split_model;
+            optimizer=get_optimizer(args["optimizer"]),
+            workers=workers(),
+            config=config
+        )
+        
+        # Step 3: Save results
+        output_dir = args["output"]
+        println("\nStep 3: Saving results to: $output_dir/")
+        save_results(results, output_dir)
+        
+        # Save model statistics
+        model_stats = Dict(
+            "original_reactions" => length(AbstractFBCModels.reactions(original_model)),
+            "original_metabolites" => length(AbstractFBCModels.metabolites(original_model)),
+            "split_reactions" => length(AbstractFBCModels.reactions(split_model)),
+            "split_metabolites" => length(AbstractFBCModels.metabolites(split_model)),
+            "split_fraction" => args["split-fraction"],
+            "mechanism" => string(args["mechanism"]),
+            "max_substrates" => args["max-substrates"],
+            "max_products" => args["max-products"],
+            "seed" => args["seed"]
+        )
+        
+        # Merge with concordance results
+        merged_stats = merge(results.stats, model_stats)
+        
+        # Save merged statistics
+        stats_file = joinpath(output_dir, "model_stats.jld2")
+        JLD2.save(stats_file, "stats", merged_stats)
+        
+        println("\nSplit-and-Analyze Summary:")
+        println("  Original model: $(model_stats["original_reactions"]) reactions, $(model_stats["original_metabolites"]) metabolites")
+        println("  Split model: $(model_stats["split_reactions"]) reactions, $(model_stats["split_metabolites"]) metabolites")
+        println("  Complexes: $(nrow(results.complexes))")
+        println("  Kinetic modules: $(nrow(results.modules))")
+        println("  Processing time: $(round(results.stats["elapsed_time"] / 60, digits=2)) minutes")
+        println("\n✓ Split-and-analyze complete!")
+
     else
         println("❌ Unknown command: $command")
-        println("Available commands: split, prepare, concordance")
+        println("Available commands: split, prepare, concordance, split-and-analyze")
         exit(1)
     end
 end
