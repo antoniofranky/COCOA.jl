@@ -359,37 +359,36 @@ function test_concordance(
     c1_activity::ConstraintTrees.LinearValue,
     c2_activity::ConstraintTrees.LinearValue,
     direction::Symbol;
-    tolerance::Float64=1e-12,
+    tolerance::Float64=1e-9,
     optimizer,
     workers,
     settings=[]
 )
     # Use COBREXA to build base model, then add concordance constraints manually
-    # This approach works but is less efficient - we'll optimize later
     results = COBREXA.screen_optimization_model(
         base_constraints,
         [(JuMP.MIN_SENSE, :min), (JuMP.MAX_SENSE, :max)];
         optimizer=optimizer,
         settings=settings,
-        workers=workers  # Explicitly use all available workers
-    ) do om, (sense, key)
+        workers=workers
+    ) do om, (sense, _)
         # Get reaction indices that are involved in these activities
         reaction_indices = union(c1_activity.idxs, c2_activity.idxs)
-
+        
         # Create transformed variables (only for involved reactions)
         w = Dict(j => @variable(om) for j in reaction_indices)
         t = @variable(om)
-
+        
         # Direction constraint on t
         if direction == :positive
             @constraint(om, t >= tolerance)
         else
             @constraint(om, t <= -tolerance)
         end
-
+        
         # Extract bounds from original flux variables
         x = om[:x]
-
+        
         # Complex c2 activity constraint
         c2_expr = sum(
             c2_activity.weights[i] * w[c2_activity.idxs[i]]
@@ -398,7 +397,7 @@ function test_concordance(
         )
         target = direction == :positive ? 1.0 : -1.0
         @constraint(om, c2_expr == target)
-
+        
         # Charnes-Cooper bounds constraints
         if direction == :positive
             for j in reaction_indices
@@ -415,36 +414,36 @@ function test_concordance(
                 @constraint(om, lb * t - w[j] >= 0)
             end
         end
-
+        
         # Objective: optimize complex c1 activity
         c1_expr = sum(
             c1_activity.weights[i] * w[c1_activity.idxs[i]]
             for i in eachindex(c1_activity.idxs)
             if c1_activity.idxs[i] in reaction_indices
         )
-
+        
         @objective(om, sense, c1_expr)
         optimize!(om)
-
+        
         if termination_status(om) == OPTIMAL
             return objective_value(om)
         else
             return nothing
         end
     end
-
+    
     # Extract results
     min_val = results[1]
     max_val = results[2]
-
+    
     if min_val === nothing || max_val === nothing
         return (false, nothing)
     end
-
+    
     # Check concordance
     is_concordant = isapprox(min_val, max_val; atol=tolerance)
     lambda_value = is_concordant ? min_val : nothing
-
+    
     return (is_concordant, lambda_value)
 end
 
