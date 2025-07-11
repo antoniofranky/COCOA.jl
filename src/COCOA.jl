@@ -1006,7 +1006,7 @@ function build_activity_expression(
     # Use sparse row iteration - iterate through columns to find non-zeros in this row
     idxs = Vector{Int}()
     weights = Vector{Float64}()
-    
+
     # Iterate through all columns to find non-zero elements in row complex_idx
     for j_idx in eachindex(constraint_rxn_ids)
         if j_idx <= size(A_sparse, 2)
@@ -1050,19 +1050,20 @@ function create_concordance_test_constraints(
     )
 
     # Create t variable for normalization
-    t_var = ConstraintTrees.variable(
-        key=:t,
-        bounds=direction == :positive ?
-               ConstraintTrees.Between(tolerance, Inf) :
-               ConstraintTrees.Between(-Inf, -tolerance)
-    )
+    t_bound = direction == :positive ?
+              ConstraintTrees.Between(tolerance, Inf) :
+              ConstraintTrees.Between(-Inf, -tolerance)
+    t_constraint = ConstraintTrees.variable(bound=t_bound)
+    t_var = ConstraintTrees.ConstraintTree(:t => t_constraint)
 
     # Compose test constraint system hierarchically
-    test_constraints = base_constraints * (:concordance_test^(
-        :variables^(w_vars + t_var),
-        :normalization^create_normalization_constraints(c2_activities, w_vars, t_var, direction),
-        :bounds^create_charnes_cooper_bounds(w_vars, t_var, base_constraints.fluxes, direction)
-    ))
+    concordance_test_tree = ConstraintTrees.ConstraintTree(
+        :variables => w_vars + t_var,
+        :normalization => create_normalization_constraints(c2_activities, w_vars, t_constraint, direction),
+        :bounds => create_charnes_cooper_bounds(w_vars, t_constraint, base_constraints.fluxes, direction)
+    )
+    
+    test_constraints = base_constraints * ConstraintTrees.ConstraintTree(:concordance_test => concordance_test_tree)
 
     return test_constraints
 end
@@ -1083,7 +1084,7 @@ function create_normalization_constraints(
 
     # Create expression for c2 activity normalization
     c2_normalized = sum(
-        coeff * w_vars[Symbol("w_", idx)] for (idx, coeff) in zip(c2_activities.idxs, c2_activities.weights)
+        coeff * w_vars[Symbol("w_", idx)].value for (idx, coeff) in zip(c2_activities.idxs, c2_activities.weights)
     )
 
     return ConstraintTrees.Constraint(
@@ -1495,134 +1496,97 @@ end
 """
 $(TYPEDSIGNATURES)
 
-Test concordance using ConstraintTrees and CORRECTED Charnes-Cooper transformation.
-Uses pre-computed LinearValues from ConstraintTrees for efficient constraint composition.
+Test concordance using manual JuMP model building with Charnes-Cooper transformation.
+Uses pre-computed LinearValues for efficient constraint composition.
 """
 function test_concordance(
-    model::JuMP.Model,
+    base_constraints::ConstraintTrees.ConstraintTree,
     c1_activity::ConstraintTrees.LinearValue,
     c2_activity::ConstraintTrees.LinearValue,
     direction::Symbol;
-    tolerance::Float64=1e-9
+    tolerance::Float64=1e-9,
+    optimizer,
+    settings=[]
 )
-    # Get reaction indices that are involved in these activities
-    reaction_indices = union(c1_activity.idxs, c2_activity.idxs)
-
-    # Clear any existing concordance constraints to ensure clean state
-    for cname in [:w, :t, :c2_act, :bounds_l, :bounds_u]
-        if haskey(model, cname)
-            try
-                delete(model, model[cname])
-                unregister(model, cname)
-            catch
-                unregister(model, cname)
-            end
-        end
-    end
-
-    # Create transformed variables (only for involved reactions)
-    @variable(model, w[j=collect(reaction_indices)])
-    @variable(model, t)
-
-    # Direction constraint on t
-    if direction == :positive
-        @constraint(model, t >= tolerance)
-    else
-        @constraint(model, t <= -tolerance)
-    end
-
-    # Extract bounds from original flux variables
-    x = model[:x]
-
-    # Complex c2 activity constraint - build from ConstraintTrees LinearValue
-    c2_expr = AffExpr(0.0)
-    for (idx, coeff) in zip(c2_activity.idxs, c2_activity.weights)
-        if idx in reaction_indices
-            add_to_expression!(c2_expr, coeff, w[idx])
-        end
-    end
-
-    target = direction == :positive ? 1.0 : -1.0
-    @constraint(model, c2_act, c2_expr == target)
-
-    # Charnes-Cooper bounds constraints (only for involved reactions)
-    if direction == :positive
-        for j in reaction_indices
-            lb = has_lower_bound(x[j]) ? lower_bound(x[j]) : -1e6
-            ub = has_upper_bound(x[j]) ? upper_bound(x[j]) : 1e6
-            @constraint(model, w[j] - lb * t >= 0)
-            @constraint(model, ub * t - w[j] >= 0)
-        end
-    else
-        for j in reaction_indices
-            lb = has_lower_bound(x[j]) ? lower_bound(x[j]) : -1e6
-            ub = has_upper_bound(x[j]) ? upper_bound(x[j]) : 1e6
-            @constraint(model, w[j] - ub * t >= 0)
-            @constraint(model, lb * t - w[j] >= 0)
-        end
-    end
-
-    # Objective: optimize complex c1 activity - build from ConstraintTrees LinearValue
-    c1_expr = AffExpr(0.0)
-    for (idx, coeff) in zip(c1_activity.idxs, c1_activity.weights)
-        if idx in reaction_indices
-            add_to_expression!(c1_expr, coeff, w[idx])
-        end
-    end
-
-    # Test min and max
-    results = Dict{Symbol,Float64}()
-
-    for (sense, key) in [(JuMP.MIN_SENSE, :min), (JuMP.MAX_SENSE, :max)]
-        @objective(model, sense, c1_expr)
-        optimize!(model)
-
-        if termination_status(model) == OPTIMAL
-            results[key] = objective_value(model)
+    # Use COBREXA to build base model, then add concordance constraints manually
+    results = COBREXA.screen_optimization_model(
+        base_constraints,
+        [(JuMP.MIN_SENSE, :min), (JuMP.MAX_SENSE, :max)];
+        optimizer=optimizer,
+        settings=settings
+    ) do om, (sense, key)
+        # Get reaction indices that are involved in these activities
+        reaction_indices = union(c1_activity.idxs, c2_activity.idxs)
+        
+        # Create transformed variables (only for involved reactions)
+        w = Dict(j => @variable(om) for j in reaction_indices)
+        t = @variable(om)
+        
+        # Direction constraint on t
+        if direction == :positive
+            @constraint(om, t >= tolerance)
         else
-            # Optimization failed - clean up and return failure
-            for cname in [:t, :c2_act]
-                if haskey(model, cname)
-                    try
-                        delete(model, model[cname])
-                        unregister(model, cname)
-                    catch
-                        unregister(model, cname)
-                    end
-                end
+            @constraint(om, t <= -tolerance)
+        end
+        
+        # Extract bounds from original flux variables
+        x = om[:x]
+        
+        # Complex c2 activity constraint
+        c2_expr = sum(
+            c2_activity.weights[i] * w[c2_activity.idxs[i]]
+            for i in eachindex(c2_activity.idxs)
+            if c2_activity.idxs[i] in reaction_indices
+        )
+        target = direction == :positive ? 1.0 : -1.0
+        @constraint(om, c2_expr == target)
+        
+        # Charnes-Cooper bounds constraints
+        if direction == :positive
+            for j in reaction_indices
+                lb = has_lower_bound(x[j]) ? lower_bound(x[j]) : -1e6
+                ub = has_upper_bound(x[j]) ? upper_bound(x[j]) : 1e6
+                @constraint(om, w[j] - lb * t >= 0)
+                @constraint(om, ub * t - w[j] >= 0)
             end
-
-            for cname in [:w, :bounds_l, :bounds_u]
-                if haskey(model, cname)
-                    unregister(model, cname)
-                end
+        else
+            for j in reaction_indices
+                lb = has_lower_bound(x[j]) ? lower_bound(x[j]) : -1e6
+                ub = has_upper_bound(x[j]) ? upper_bound(x[j]) : 1e6
+                @constraint(om, w[j] - ub * t >= 0)
+                @constraint(om, lb * t - w[j] >= 0)
             end
-            return (false, nothing)
+        end
+        
+        # Objective: optimize complex c1 activity
+        c1_expr = sum(
+            c1_activity.weights[i] * w[c1_activity.idxs[i]]
+            for i in eachindex(c1_activity.idxs)
+            if c1_activity.idxs[i] in reaction_indices
+        )
+        
+        @objective(om, sense, c1_expr)
+        optimize!(om)
+        
+        if termination_status(om) == OPTIMAL
+            return objective_value(om)
+        else
+            return nothing
         end
     end
-
+    
+    # Extract results
+    min_val = results[1]
+    max_val = results[2]
+    
+    if min_val === nothing || max_val === nothing
+        return (false, nothing)
+    end
+    
     # Check concordance
-    is_concordant = isapprox(results[:min], results[:max]; atol=tolerance)
-    lambda_value = is_concordant ? results[:min] : nothing
-
-    # Clean up - use robust cleanup for model reuse
-    for cname in [:t, :c2_act]
-        if haskey(model, cname)
-            try
-                delete(model, model[cname])
-                unregister(model, cname)
-            catch
-                unregister(model, cname)
-            end
-        end
-    end
-
-    for cname in [:w, :bounds_l, :bounds_u]
-        if haskey(model, cname)
-            unregister(model, cname)
-        end
-    end
-
+    is_concordant = isapprox(min_val, max_val; atol=tolerance)
+    lambda_value = is_concordant ? min_val : nothing
+    
     return (is_concordant, lambda_value)
 end
 
@@ -2289,14 +2253,9 @@ function process_concordance_batch(
         end
     end
 
-    # Test concordance using COBREXA's optimized screening infrastructure
-    results = COBREXA.screen_optimization_model(
-        constraints,
-        expanded_pairs;
-        optimizer=optimizer,
-        settings=settings,
-        workers=workers
-    ) do om, (c1_idx, c2_idx, direction)
+    # Test concordance using the new efficient ConstraintTrees-based approach
+    results = []
+    for (c1_idx, c2_idx, direction) in expanded_pairs
         # Get pre-computed activities from ConstraintTrees
         c1_id = complexes[c1_idx].id
         c2_id = complexes[c2_idx].id
@@ -2305,10 +2264,12 @@ function process_concordance_batch(
         c2_activity = activity_lookup[c2_id]
 
         is_conc, lambda = test_concordance(
-            om, c1_activity, c2_activity, direction;
-            tolerance=tolerance
+            constraints, c1_activity, c2_activity, direction;
+            tolerance=tolerance,
+            optimizer=optimizer,
+            settings=settings
         )
-        return (c1_idx, c2_idx, direction, is_conc, lambda)
+        push!(results, (c1_idx, c2_idx, direction, is_conc, lambda))
     end
 
     # Aggregate results by pair
