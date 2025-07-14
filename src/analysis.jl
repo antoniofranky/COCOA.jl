@@ -482,6 +482,7 @@ function concordance_analysis(
     max_correlation_pairs::Int=500_000,
     seed::Union{Int,Nothing}=42,
     use_unidirectional_constraints::Bool=true,
+    sampling_quality::Symbol=:balanced,  # :conservative, :balanced, :high_quality
 )
     start_time = time()
 
@@ -493,7 +494,12 @@ function concordance_analysis(
         model
     end
 
-    @info "Starting concordance analysis" n_workers = length(workers) tolerance early_correlation_threshold correlation_threshold sample_size use_unidirectional_constraints
+    # Scale batch sizes with number of workers for better utilization
+    n_workers = length(workers)
+    effective_batch_size = max(batch_size, 50 * n_workers)  # At least 50 tasks per worker
+    effective_stage_size = max(stage_size, 200 * n_workers)  # Scale stage size accordingly
+
+    @info "Starting concordance analysis" n_workers tolerance early_correlation_threshold correlation_threshold sample_size use_unidirectional_constraints effective_batch_size effective_stage_size
 
     # Build constraints
     constraints =
@@ -541,7 +547,7 @@ function concordance_analysis(
     end
 
     # Run FVA on all complexes using optimized settings
-    ava_results = COBREXA.constraints_variability(
+    ava_time = @elapsed ava_results = COBREXA.constraints_variability(
         constraints,
         constraints.concordance_analysis.complexes;
         optimizer=optimizer,
@@ -579,7 +585,7 @@ function concordance_analysis(
         end
     end
 
-    @info "AVA processing complete" n_complex_ranges = length(complex_ranges)
+    @info "AVA processing complete" n_complex_ranges = length(complex_ranges) ava_time_sec = round(ava_time, digits=2)
 
     # Convert warmup points to a matrix with robust handling
     warmup = if isempty(warmup_points)
@@ -681,7 +687,7 @@ function concordance_analysis(
     @info "Generating candidate pairs via streaming correlation"
 
     # Pass the pre-computed warmup points directly
-    candidate_priorities = streaming_correlation_filter(
+    correlation_time = @elapsed candidate_priorities = streaming_correlation_filter(
         complexes,
         balanced_complexes,
         positive_complexes,
@@ -698,14 +704,15 @@ function concordance_analysis(
         early_correlation_threshold=early_correlation_threshold,
         workers=workers,
         seed=seed,
+        sampling_quality=sampling_quality,
     )
 
-    @info "Candidate pairs identified" n_pairs = length(candidate_priorities)
+    @info "Candidate pairs identified" n_pairs = length(candidate_priorities) correlation_time_sec = round(correlation_time, digits=2)
 
     # Step 5: Process in stages with transitivity
     @info "Processing concordance tests in stages"
 
-    stage_results = process_in_stages(
+    concordance_time = @elapsed stage_results = process_in_stages(
         constraints,
         complexes,
         candidate_priorities,
@@ -714,13 +721,13 @@ function concordance_analysis(
         optimizer=optimizer,
         settings=settings,
         workers=workers,
-        stage_size,
-        batch_size,
+        stage_size=effective_stage_size,
+        batch_size=effective_batch_size,
         tolerance,
     )
 
     # Step 6: Build concordance modules
-    @info "Building concordance modules"
+    @info "Building concordance modules" concordance_time_sec = round(concordance_time, digits=2)
 
     modules = extract_modules(concordance_tracker, balanced_complexes)
 

@@ -16,6 +16,22 @@ using JuMP
 using DocStringExtensions
 using ProgressMeter
 import ConstraintTrees as C
+using Base.Threads
+
+"""
+Check if threading is available and beneficial for correlation analysis.
+"""
+function should_use_threading()::Bool
+    n_threads = Threads.nthreads()
+    if n_threads == 1
+        @warn "Julia started with single thread. For better performance, start Julia with multiple threads: julia --threads=auto"
+        return false
+    else
+        @info "Threading enabled with $n_threads threads"
+        return true
+    end
+end
+
 """
 Streaming statistics accumulator for memory-efficient correlation calculation.
 """
@@ -85,6 +101,7 @@ end
 """
 Hierarchical correlation tracker that manages memory using scientifically principled criteria.
 Only rejects pairs based on statistical evidence or promotes them to higher confidence tiers.
+Thread-safe implementation with atomic operations for multi-threaded correlation analysis.
 """
 mutable struct CorrelationTracker
     # Tier 1: High confidence pairs (>= promotion_threshold)
@@ -93,7 +110,7 @@ mutable struct CorrelationTracker
     # Tier 2: Under evaluation with LRU eviction
     under_evaluation::Dict{Tuple{Symbol,Symbol},CorrelationEntry}
     lru_positions::Dict{Tuple{Symbol,Symbol},Int}  # O(1) LRU position lookup
-    lru_counter::Int  # Monotonic counter for LRU ordering
+    lru_counter::Threads.Atomic{Int}  # Thread-safe monotonic counter for LRU ordering
 
     # Configuration
     max_under_evaluation::Int
@@ -101,22 +118,28 @@ mutable struct CorrelationTracker
     promotion_threshold::Float64
     rejection_confidence::Float64  # Confidence level for statistical rejection
 
-    # Statistics
-    pairs_promoted::Int
-    pairs_rejected_statistically::Int
-    pairs_evicted_lru::Int
+    # Statistics (thread-safe atomic counters)
+    pairs_promoted::Threads.Atomic{Int}
+    pairs_rejected_statistically::Threads.Atomic{Int}
+    pairs_evicted_lru::Threads.Atomic{Int}
+    
+    # Thread synchronization
+    tracker_lock::ReentrantLock
 
     function CorrelationTracker(max_pairs::Int, promotion_threshold::Float64=0.8, rejection_confidence::Float64=0.95)
         new(
             Dict{Tuple{Symbol,Symbol},StreamingCorrelation}(),
             Dict{Tuple{Symbol,Symbol},CorrelationEntry}(),
             Dict{Tuple{Symbol,Symbol},Int}(),  # lru_positions
-            0,  # lru_counter
+            Threads.Atomic{Int}(0),  # lru_counter
             max_pairs,
             30,  # min_samples_for_decision
             promotion_threshold,
             rejection_confidence,
-            0, 0, 0
+            Threads.Atomic{Int}(0),  # pairs_promoted
+            Threads.Atomic{Int}(0),  # pairs_rejected_statistically
+            Threads.Atomic{Int}(0),  # pairs_evicted_lru
+            ReentrantLock()  # tracker_lock
         )
     end
 end
@@ -155,11 +178,12 @@ end
 
 """
 Update LRU order for a pair key using O(1) operations.
+Thread-safe implementation with atomic counter.
 """
 function update_lru!(tracker::CorrelationTracker, pair_key::Tuple{Symbol,Symbol})
-    # Update LRU position with O(1) counter-based approach
-    tracker.lru_counter += 1
-    tracker.lru_positions[pair_key] = tracker.lru_counter
+    # Update LRU position with O(1) counter-based approach (thread-safe)
+    new_counter = Threads.atomic_add!(tracker.lru_counter, 1) + 1
+    tracker.lru_positions[pair_key] = new_counter
 end
 
 """
@@ -193,6 +217,7 @@ end
 
 """
 Update the correlation tracker with a new correlation value using scientific criteria.
+Thread-safe implementation with proper locking for concurrent access.
 """
 function update_correlation_tracker!(
     tracker::CorrelationTracker,
@@ -203,120 +228,126 @@ function update_correlation_tracker!(
 )
     current_corr = abs(correlation(corr_acc))
 
-    # Check if already in high confidence
-    if haskey(tracker.high_confidence, pair_key)
-        # In-place update for existing high confidence entries
-        update_in_place!(tracker.high_confidence[pair_key], corr_acc)
-        return true
-    end
-
-    # Calculate confidence interval upper bound
-    upper_bound = correlation_confidence_upper_bound(corr_acc, tracker.rejection_confidence)
-
-    # Statistical rejection: upper bound significantly below final threshold
-    if corr_acc.n >= tracker.min_samples_for_decision &&
-       upper_bound < (final_threshold - 0.05)  # Conservative margin
-
-        # Remove from tracking if present
-        if haskey(tracker.under_evaluation, pair_key)
-            delete!(tracker.under_evaluation, pair_key)
-            delete!(tracker.lru_positions, pair_key)
+    # Thread-safe access to tracker data structures
+    lock(tracker.tracker_lock) do
+        # Check if already in high confidence
+        if haskey(tracker.high_confidence, pair_key)
+            # In-place update for existing high confidence entries
+            update_in_place!(tracker.high_confidence[pair_key], corr_acc)
+            return true
         end
 
-        tracker.pairs_rejected_statistically += 1
-        return false
-    end
+        # Calculate confidence interval upper bound
+        upper_bound = correlation_confidence_upper_bound(corr_acc, tracker.rejection_confidence)
 
-    # Promotion to high confidence
-    if current_corr >= tracker.promotion_threshold && corr_acc.n >= 20
-        tracker.high_confidence[pair_key] = copy(corr_acc)  # Only copy when creating new entry
+        # Statistical rejection: upper bound significantly below final threshold
+        if corr_acc.n >= tracker.min_samples_for_decision &&
+           upper_bound < (final_threshold - 0.05)  # Conservative margin
 
-        # Remove from under_evaluation if present
-        if haskey(tracker.under_evaluation, pair_key)
-            delete!(tracker.under_evaluation, pair_key)
-            delete!(tracker.lru_positions, pair_key)
+            # Remove from tracking if present
+            if haskey(tracker.under_evaluation, pair_key)
+                delete!(tracker.under_evaluation, pair_key)
+                delete!(tracker.lru_positions, pair_key)
+            end
+
+            Threads.atomic_add!(tracker.pairs_rejected_statistically, 1)
+            return false
         end
 
-        tracker.pairs_promoted += 1
-        return true
-    end
+        # Promotion to high confidence
+        if current_corr >= tracker.promotion_threshold && corr_acc.n >= 20
+            tracker.high_confidence[pair_key] = copy(corr_acc)  # Only copy when creating new entry
 
-    # Keep in under_evaluation tier
-    if haskey(tracker.under_evaluation, pair_key)
-        # In-place update for existing under_evaluation entries
-        existing_entry = tracker.under_evaluation[pair_key]
-        update_in_place!(existing_entry.correlation_acc, corr_acc)
+            # Remove from under_evaluation if present
+            if haskey(tracker.under_evaluation, pair_key)
+                delete!(tracker.under_evaluation, pair_key)
+                delete!(tracker.lru_positions, pair_key)
+            end
 
-        # Update the entry fields that changed
-        new_entry = CorrelationEntry(
-            pair_key,
-            existing_entry.correlation_acc,  # Reuse the updated accumulator
-            current_corr,
-            sample_number,
-            upper_bound
-        )
-        tracker.under_evaluation[pair_key] = new_entry
-        update_lru!(tracker, pair_key)
-    else
-        # Create new entry only when needed
-        entry = CorrelationEntry(
-            pair_key,
-            copy(corr_acc),  # Only copy when creating new entry
-            current_corr,
-            sample_number,
-            upper_bound
-        )
+            Threads.atomic_add!(tracker.pairs_promoted, 1)
+            return true
+        end
 
-        # Handle capacity limit with LRU eviction
-        if length(tracker.under_evaluation) >= tracker.max_under_evaluation
-            # Find least recently used key with O(1) lookup
-            lru_key = nothing
-            min_counter = typemax(Int)
-            for (key, position) in tracker.lru_positions
-                if position < min_counter
-                    min_counter = position
-                    lru_key = key
+        # Keep in under_evaluation tier
+        if haskey(tracker.under_evaluation, pair_key)
+            # In-place update for existing under_evaluation entries
+            existing_entry = tracker.under_evaluation[pair_key]
+            update_in_place!(existing_entry.correlation_acc, corr_acc)
+
+            # Update the entry fields that changed
+            new_entry = CorrelationEntry(
+                pair_key,
+                existing_entry.correlation_acc,  # Reuse the updated accumulator
+                current_corr,
+                sample_number,
+                upper_bound
+            )
+            tracker.under_evaluation[pair_key] = new_entry
+            update_lru!(tracker, pair_key)
+        else
+            # Create new entry only when needed
+            entry = CorrelationEntry(
+                pair_key,
+                copy(corr_acc),  # Only copy when creating new entry
+                current_corr,
+                sample_number,
+                upper_bound
+            )
+
+            # Handle capacity limit with LRU eviction
+            if length(tracker.under_evaluation) >= tracker.max_under_evaluation
+                # Find least recently used key with O(1) lookup
+                lru_key = nothing
+                min_counter = typemax(Int)
+                for (key, position) in tracker.lru_positions
+                    if position < min_counter
+                        min_counter = position
+                        lru_key = key
+                    end
+                end
+
+                if lru_key !== nothing
+                    delete!(tracker.under_evaluation, lru_key)
+                    delete!(tracker.lru_positions, lru_key)
+                    Threads.atomic_add!(tracker.pairs_evicted_lru, 1)
                 end
             end
 
-            if lru_key !== nothing
-                delete!(tracker.under_evaluation, lru_key)
-                delete!(tracker.lru_positions, lru_key)
-                tracker.pairs_evicted_lru += 1
-            end
+            tracker.under_evaluation[pair_key] = entry
+            update_lru!(tracker, pair_key)
         end
 
-        tracker.under_evaluation[pair_key] = entry
-        update_lru!(tracker, pair_key)
+        return true
     end
-
-    return true
 end
 
 """
 Get all pairs that meet the final correlation threshold from both tiers.
+Thread-safe access to tracker data structures.
 """
 function get_candidate_pairs(tracker::CorrelationTracker, final_threshold::Float64, min_valid_samples::Int)
     candidates = CorrelationEntry[]
-
-    # High confidence pairs (already meet promotion threshold)
-    for (pair_key, corr_acc) in tracker.high_confidence
-        if corr_acc.n >= min_valid_samples && abs(correlation(corr_acc)) >= final_threshold
-            push!(candidates, CorrelationEntry(
-                pair_key,
-                corr_acc,
-                abs(correlation(corr_acc)),
-                0,  # last_updated not needed
-                1.0  # confidence_upper_bound not needed
-            ))
+    
+    lock(tracker.tracker_lock) do
+        # High confidence pairs (already meet promotion threshold)
+        for (pair_key, corr_acc) in tracker.high_confidence
+            if corr_acc.n >= min_valid_samples && abs(correlation(corr_acc)) >= final_threshold
+                push!(candidates, CorrelationEntry(
+                    pair_key,
+                    corr_acc,
+                    abs(correlation(corr_acc)),
+                    0,  # last_updated not needed
+                    1.0  # confidence_upper_bound not needed
+                ))
+            end
         end
-    end
 
-    # Under evaluation pairs
-    for entry in values(tracker.under_evaluation)
-        if entry.correlation_acc.n >= min_valid_samples &&
-           abs(entry.current_correlation) >= final_threshold
-            push!(candidates, entry)
+        # Under evaluation pairs
+        for entry in values(tracker.under_evaluation)
+            if entry.correlation_acc.n >= min_valid_samples &&
+               abs(entry.current_correlation) >= final_threshold
+                push!(candidates, entry)
+            end
         end
     end
 
@@ -328,17 +359,20 @@ end
 
 """
 Get statistics about tracker performance.
+Thread-safe access to atomic counters.
 """
 function get_tracker_stats(tracker::CorrelationTracker)
-    return (
-        high_confidence_pairs=length(tracker.high_confidence),
-        under_evaluation_pairs=length(tracker.under_evaluation),
-        max_capacity=tracker.max_under_evaluation,
-        pairs_promoted=tracker.pairs_promoted,
-        pairs_rejected_statistically=tracker.pairs_rejected_statistically,
-        pairs_evicted_lru=tracker.pairs_evicted_lru,
-        total_tracked=length(tracker.high_confidence) + length(tracker.under_evaluation)
-    )
+    lock(tracker.tracker_lock) do
+        return (
+            high_confidence_pairs=length(tracker.high_confidence),
+            under_evaluation_pairs=length(tracker.under_evaluation),
+            max_capacity=tracker.max_under_evaluation,
+            pairs_promoted=tracker.pairs_promoted[],
+            pairs_rejected_statistically=tracker.pairs_rejected_statistically[],
+            pairs_evicted_lru=tracker.pairs_evicted_lru[],
+            total_tracked=length(tracker.high_confidence) + length(tracker.under_evaluation)
+        )
+    end
 end
 
 """
@@ -369,7 +403,7 @@ function streaming_correlation_filter(
     unrestricted_complexes::Set{Int},
     trivial_pairs::Set{Tuple{Int,Int}},
     warmup::Matrix{Float64},
-    constraints::ConstraintTree;
+    constraints::C.ConstraintTree;
     tolerance::Float64=1e-12,
     correlation_threshold::Float64=0.95,
     sample_size::Int=100,
@@ -378,6 +412,7 @@ function streaming_correlation_filter(
     early_correlation_threshold::Float64=0.8,
     workers=workers,
     seed::Union{Int,Nothing}=42,
+    sampling_quality::Symbol=:balanced,
 )
     # Setup simple RNG for reproducible sampling
     rng = seed === nothing ? StableRNG() : StableRNG(seed)
@@ -399,13 +434,52 @@ function streaming_correlation_filter(
     # === OPTIMIZED SAMPLING CONFIGURATION ===
     @info "Configuring optimized sampler"
 
-    # Reduce sampling overhead by using fewer chains with more samples each
-    n_chains = min(4, length(workers))  # Use fewer chains
-    n_warmup_points_per_chain = min(100, size(warmup, 1))  # Limit warmup points
-
-    # More aggressive burn-in and thinning to reduce total iterations
-    burn_in_period = 32
-    thinning_interval = 8
+    # Use more workers for better parallelization 
+    n_chains = min(12, length(workers))  # Use most available workers (was 4, now up to 12)
+    
+    # IMPROVED: Configurable sampling quality with intelligent scaling
+    n_warmup_available = size(warmup, 1)
+    n_complexes = length(complexes)
+    
+    # Configure parameters based on sampling quality preference
+    if sampling_quality == :conservative
+        # Original conservative settings (fast, lower quality)
+        base_warmup_per_chain = 100
+        burn_in_period = 32
+        thinning_interval = 8
+        quality_multiplier = 1.0
+    elseif sampling_quality == :high_quality
+        # High quality settings (slower, best quality)
+        base_warmup_per_chain = 300
+        burn_in_period = 80
+        thinning_interval = 4
+        quality_multiplier = 1.5
+    else  # :balanced (default)
+        # Balanced settings (good quality, reasonable speed)
+        base_warmup_per_chain = 200
+        burn_in_period = 50
+        thinning_interval = 6
+        quality_multiplier = 1.2
+    end
+    
+    # Scale based on model complexity and available data
+    if n_complexes > 10_000  # Large models need more diverse sampling
+        target_warmup_per_chain = round(Int, base_warmup_per_chain * 2.0 * quality_multiplier)
+    elseif n_complexes > 5_000  # Medium models
+        target_warmup_per_chain = round(Int, base_warmup_per_chain * 1.5 * quality_multiplier)
+    else  # Smaller models
+        target_warmup_per_chain = round(Int, base_warmup_per_chain * quality_multiplier)
+    end
+    
+    # Scale with available data, distribute efficiently across chains
+    max_warmup_per_chain = min(
+        600,  # Reasonable upper limit for computational efficiency
+        max(target_warmup_per_chain, div(n_warmup_available, max(1, div(n_chains, 2))))
+    )
+    
+    n_warmup_points_per_chain = min(max_warmup_per_chain, n_warmup_available)
+    
+    @info "Intelligent sampling configuration" sampling_quality n_complexes target_warmup_per_chain n_warmup_available n_warmup_points_per_chain burn_in_period thinning_interval
 
     # Calculate required collections more efficiently
     target_samples_per_chain = ceil(Int, sample_size / n_chains)
@@ -415,6 +489,11 @@ function streaming_correlation_filter(
     iters_to_collect = collect(burn_in_period:thinning_interval:(burn_in_period+(n_collections_per_chain-1)*thinning_interval))
 
     @info "Optimized sampling parameters" n_chains n_warmup_points_per_chain n_collections_per_chain iters_to_collect
+    
+    # Performance monitoring metrics
+    expected_total_samples = n_chains * n_collections_per_chain
+    warmup_efficiency = round(n_warmup_points_per_chain / max(1, n_warmup_available), digits=3)
+    @info "Sampling efficiency metrics" expected_total_samples warmup_efficiency
 
     # === MEMORY-EFFICIENT SAMPLING ===
     @info "Generating flux samples with memory optimization"
@@ -493,13 +572,13 @@ function streaming_correlation_filter(
     @info "Valid complexes with data: $n_valid"
 
     # === STREAMING CORRELATION COMPUTATION ===
-    @info "Computing streaming correlations with memory optimization"
+    @info "Computing streaming correlations with threaded optimization"
 
     n_samples = length(first(values(activity_refs)))
     @info "Total samples available: $n_samples"
 
-    # Calculate total number of pairs to process
-    total_pairs = 0
+    # Pre-compute all valid pairs to process
+    valid_pairs = Tuple{Int,Int}[]
     for i = 1:n_valid
         ci = valid_complexes[i]
         ci_original_idx = get(original_indices, ci.id, 0)
@@ -513,37 +592,63 @@ function streaming_correlation_filter(
                 continue
             end
             if (i, j) ∉ skip_pairs_set
-                total_pairs += 1
+                push!(valid_pairs, (i, j))
             end
         end
     end
+    
+    total_pairs = length(valid_pairs)
     @info "Total pairs to process: $total_pairs"
-    # Initialize progress meter
+    
+    # Initialize thread-safe progress tracking
+    processed_pairs = Threads.Atomic{Int}(0)
     progress = Progress(total_pairs, desc="Computing correlations: ", showspeed=true)
 
-    # Process correlations in batches to avoid memory explosion
-    processed_pairs = 0
-
-    for i = 1:n_valid
-        ci = valid_complexes[i]
-        ci_original_idx = get(original_indices, ci.id, 0)
-        if ci_original_idx == 0
-            continue
-        end
-
-        for j = (i+1):n_valid
+    # Process correlations in parallel using all available threads
+    n_threads = Threads.nthreads()
+    use_threading = should_use_threading()
+    
+    if use_threading
+        @info "Using $n_threads threads for correlation computation"
+        
+        # Thread-parallel correlation computation
+        Threads.@threads for pair_idx in 1:total_pairs
+            i, j = valid_pairs[pair_idx]
+            
+            ci = valid_complexes[i]
             cj = valid_complexes[j]
-            cj_original_idx = get(original_indices, cj.id, 0)
-            if cj_original_idx == 0
-                continue
+
+            # Create thread-local streaming correlation accumulator
+            corr_acc = StreamingCorrelation()
+
+            # Compute correlation using direct array access (zero-copy)
+            x_values = activity_refs[ci.id]
+            y_values = activity_refs[cj.id]
+
+            # Stream the correlation calculation
+            for k = 1:n_samples
+                update!(corr_acc, x_values[k], y_values[k])
             end
 
-            # Check if we should skip this pair
-            if (i, j) in skip_pairs_set
-                continue
-            end
+            # Update tracker with this correlation (thread-safe)
+            pair_key = (ci.id, cj.id)
+            update_correlation_tracker!(correlation_tracker, pair_key, corr_acc, n_samples, correlation_threshold)
 
-            processed_pairs += 1
+            # Update progress meter (thread-safe)
+            pairs_done = Threads.atomic_add!(processed_pairs, 1) + 1
+            if pairs_done % 1000 == 0 || pairs_done == total_pairs
+                ProgressMeter.update!(progress, pairs_done)
+            end
+        end
+    else
+        @info "Using sequential correlation computation (single thread)"
+        
+        # Sequential correlation computation (fallback)
+        for pair_idx in 1:total_pairs
+            i, j = valid_pairs[pair_idx]
+            
+            ci = valid_complexes[i]
+            cj = valid_complexes[j]
 
             # Create streaming correlation accumulator
             corr_acc = StreamingCorrelation()
@@ -562,12 +667,15 @@ function streaming_correlation_filter(
             update_correlation_tracker!(correlation_tracker, pair_key, corr_acc, n_samples, correlation_threshold)
 
             # Update progress meter
-            ProgressMeter.next!(progress)
+            pairs_done = Threads.atomic_add!(processed_pairs, 1) + 1
+            if pairs_done % 1000 == 0 || pairs_done == total_pairs
+                ProgressMeter.update!(progress, pairs_done)
+            end
         end
     end
 
     ProgressMeter.finish!(progress)
-    @info "Correlation computation complete" processed_pairs
+    @info "Threaded correlation computation complete" processed_pairs=processed_pairs[] n_threads=n_threads
 
     # === EXTRACT FINAL CANDIDATES ===
     @info "Extracting final candidates"

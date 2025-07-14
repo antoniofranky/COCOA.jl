@@ -186,6 +186,20 @@ function create_unidirectional_constraints(
     # Start with standard flux balance constraints
     constraints = COBREXA.flux_balance_constraints(model)
 
+    # DIAGNOSTIC: Track variable indices before transformations
+    initial_var_count = C.variable_count(constraints)
+    @info "Initial constraint tree" var_count = initial_var_count flux_constraints = length(constraints.fluxes)
+
+    # Sample a few constraints to see their structure
+    sample_rxn_ids = collect(keys(constraints.fluxes))[1:min(3, end)]
+    for rxn_id in sample_rxn_ids
+        flux_constraint = constraints.fluxes[rxn_id]
+        @info "Initial flux constraint" rxn_id constraint_type = typeof(flux_constraint) has_value = hasfield(typeof(flux_constraint), :value)
+        if hasfield(typeof(flux_constraint), :value) && isa(flux_constraint.value, C.LinearValue)
+            @info "Initial constraint details" rxn_id var_indices = flux_constraint.value.idxs weights = flux_constraint.value.weights
+        end
+    end
+
     # Use COBREXA's optimized sign splitting
     constraints += COBREXA.sign_split_variables(
         constraints.fluxes,
@@ -193,12 +207,20 @@ function create_unidirectional_constraints(
         negative=:fluxes_reverse
     )
 
+    # DIAGNOSTIC: Track variable indices after sign splitting
+    after_split_var_count = C.variable_count(constraints)
+    @info "After sign splitting" var_count = after_split_var_count has_forward = haskey(constraints, :fluxes_forward) has_reverse = haskey(constraints, :fluxes_reverse)
+
     # Create directional constraints using hierarchical composition
     constraints *= :directional_flux_balance^COBREXA.sign_split_constraints(
         positive=constraints.fluxes_forward,
         negative=constraints.fluxes_reverse,
         signed=constraints.fluxes,
     )
+
+    # DIAGNOSTIC: Track variable indices after directional constraints
+    after_directional_var_count = C.variable_count(constraints)
+    @info "After directional constraints" var_count = after_directional_var_count
 
     # Functional variable substitution and pruning
     subst_vals = [C.variable(; idx).value for idx = 1:C.variable_count(constraints)]
@@ -211,8 +233,43 @@ function create_unidirectional_constraints(
         C.Constraint(subst_value) # bidirectional bound is dropped
     end
 
+    # DIAGNOSTIC: Track variable indices after substitution preparation
+    after_subst_prep_var_count = C.variable_count(constraints)
+    @info "After substitution preparation" var_count = after_subst_prep_var_count
+
     # Apply optimized substitution and pruning
-    constraints = C.prune_variables(C.substitute(constraints, subst_vals))
+    @info "Applying substitution and pruning - THIS IS WHERE INDEX RENUMBERING HAPPENS"
+    constraints_before_pruning = C.substitute(constraints, subst_vals)
+    before_pruning_var_count = C.variable_count(constraints_before_pruning)
+    @info "After substitution, before pruning" var_count = before_pruning_var_count
+
+    # Sample flux constraints before pruning
+    for rxn_id in sample_rxn_ids
+        if haskey(constraints_before_pruning.fluxes, rxn_id)
+            flux_constraint = constraints_before_pruning.fluxes[rxn_id]
+            @info "Before pruning flux constraint" rxn_id constraint_type = typeof(flux_constraint)
+            if hasfield(typeof(flux_constraint), :value) && isa(flux_constraint.value, C.LinearValue)
+                @info "Before pruning constraint details" rxn_id var_indices = flux_constraint.value.idxs weights = flux_constraint.value.weights
+            end
+        end
+    end
+
+    constraints = C.prune_variables(constraints_before_pruning)
+
+    # DIAGNOSTIC: Track variable indices after pruning - INDEX RENUMBERING COMPLETE
+    final_var_count = C.variable_count(constraints)
+    @info "AFTER PRUNING (INDEX RENUMBERING COMPLETE)" var_count = final_var_count
+
+    # Sample flux constraints after pruning to see the renumbered indices
+    for rxn_id in sample_rxn_ids
+        if haskey(constraints.fluxes, rxn_id)
+            flux_constraint = constraints.fluxes[rxn_id]
+            @info "After pruning flux constraint" rxn_id constraint_type = typeof(flux_constraint)
+            if hasfield(typeof(flux_constraint), :value) && isa(flux_constraint.value, C.LinearValue)
+                @info "AFTER PRUNING constraint details" rxn_id var_indices = flux_constraint.value.idxs weights = flux_constraint.value.weights
+            end
+        end
+    end
 
     # All reactions were split since we applied splitting to all fluxes
     rxn_ids = Symbol.(AbstractFBCModels.reactions(model))
@@ -256,36 +313,44 @@ function concordance_constraints(
         use_shared_arrays, min_size_for_sharing)
 
     # Create complex activity expressions using functional patterns
-    @info "Building complex activities" n_complexes=length(complexes) n_constraint_rxns=length(constraint_rxn_ids)
-    
-    # Debug: Check the structure of the flux constraints after transformations
-    @debug "Flux constraint structure after transformations"
+    @info "Building complex activities" n_complexes = length(complexes) n_constraint_rxns = length(constraint_rxn_ids)
+
+    # DIAGNOSTIC: Check the structure of the flux constraints after transformations
+    @info "Flux constraint structure after transformations"
     sample_rxn_ids = constraint_rxn_ids[1:min(3, end)]
     for rxn_id in sample_rxn_ids
         if haskey(constraints.fluxes, rxn_id)
             flux_constraint = constraints.fluxes[rxn_id]
-            @debug "Sample flux constraint" rxn_id constraint_type=typeof(flux_constraint) has_value=hasfield(typeof(flux_constraint), :value)
+            @info "Sample flux constraint" rxn_id constraint_type = typeof(flux_constraint) has_value = hasfield(typeof(flux_constraint), :value)
             if hasfield(typeof(flux_constraint), :value)
-                @debug "Constraint value details" value_type=typeof(flux_constraint.value)
+                @info "Constraint value details" rxn_id value_type = typeof(flux_constraint.value)
+                if isa(flux_constraint.value, C.LinearValue)
+                    @info "LinearValue details" rxn_id var_indices = flux_constraint.value.idxs weights = flux_constraint.value.weights
+                end
             end
         end
     end
-    
+
+    # DIAGNOSTIC: Check variable count consistency
+    constraint_var_count = C.variable_count(constraints)
+    flux_constraint_var_count = C.variable_count(constraints.fluxes)
+    @info "Variable count consistency check" constraint_var_count flux_constraint_var_count
+
     complex_activities = build_complex_activities_functional(
         complexes, A_matrix, constraints.fluxes, constraint_rxn_ids
     )
-    @info "Complex activities built" n_complex_activities=length(complex_activities)
+    @info "Complex activities built" n_complex_activities = length(complex_activities)
 
     # Hierarchically compose the complete constraint system
     @info "Adding complex activities to constraint tree"
     constraints = constraints * (:concordance_analysis^(
         :complexes^complex_activities
     ))
-    
+
     # Verify the structure was added correctly
-    @info "Constraint tree structure after adding complexes" has_concordance_analysis=haskey(constraints, :concordance_analysis)
+    @info "Constraint tree structure after adding complexes" has_concordance_analysis = haskey(constraints, :concordance_analysis)
     if haskey(constraints, :concordance_analysis)
-        @info "Concordance analysis structure" has_complexes=haskey(constraints.concordance_analysis, :complexes) n_complexes_in_tree=length(constraints.concordance_analysis.complexes)
+        @info "Concordance analysis structure" has_complexes = haskey(constraints.concordance_analysis, :complexes) n_complexes_in_tree = length(constraints.concordance_analysis.complexes)
     end
 
     return constraints
@@ -358,7 +423,11 @@ function build_activity_expression(
     idxs = Vector{Int}()
     weights = Vector{Float64}()
 
-    @debug "Building activity for complex $complex_idx" n_reactions=length(constraint_rxn_ids)
+    @info "Building activity for complex $complex_idx" n_reactions = length(constraint_rxn_ids)
+
+    # DIAGNOSTIC: Check the total variable count in the constraint tree
+    total_var_count = C.variable_count(flux_constraints)
+    @info "Constraint tree variable count during activity building" total_vars = total_var_count
 
     # Iterate through all columns to find non-zero elements in row complex_idx
     for j_idx in eachindex(constraint_rxn_ids)
@@ -369,42 +438,71 @@ function build_activity_expression(
                 if haskey(flux_constraints, rxn_id)
                     # Get the actual variable index from the constraint tree
                     flux_constraint = flux_constraints[rxn_id]
-                    
-                    @debug "Processing reaction $rxn_id" coeff constraint_type=typeof(flux_constraint)
-                    
+
+                    @info "Processing reaction $rxn_id" coeff constraint_type = typeof(flux_constraint)
+
                     # Handle different constraint types after transformations
                     if isa(flux_constraint, C.Constraint)
                         # After substitution, constraints might be C.Constraint objects
                         value = flux_constraint.value
                         if isa(value, C.LinearValue)
+                            # DIAGNOSTIC: Check variable indices are valid
+                            @info "LinearValue found" rxn_id var_indices = value.idxs weights = value.weights
+
                             # Extract variable indices from the LinearValue
                             for (var_idx, var_coeff) in zip(value.idxs, value.weights)
+                                # CRITICAL: Validate variable index is within bounds
+                                if var_idx <= 0 || var_idx > total_var_count
+                                    @error "INVALID VARIABLE INDEX DETECTED" rxn_id var_idx total_var_count
+                                    error("Variable index $var_idx is out of bounds (total variables: $total_var_count)")
+                                end
+
                                 push!(idxs, var_idx)
                                 push!(weights, coeff * var_coeff)
                             end
-                            @debug "Added linear terms" n_new_terms=length(value.idxs)
+                            @info "Added linear terms" rxn_id n_new_terms = length(value.idxs)
                         elseif isa(value, C.Variable)
                             # Single variable constraint
-                            push!(idxs, value.idx)
+                            var_idx = value.idx
+
+                            # CRITICAL: Validate variable index is within bounds
+                            if var_idx <= 0 || var_idx > total_var_count
+                                @error "INVALID VARIABLE INDEX DETECTED" rxn_id var_idx total_var_count
+                                error("Variable index $var_idx is out of bounds (total variables: $total_var_count)")
+                            end
+
+                            push!(idxs, var_idx)
                             push!(weights, coeff)
-                            @debug "Added single variable" var_idx=value.idx
+                            @info "Added single variable" rxn_id var_idx
                         else
-                            @warn "Unsupported flux constraint value type" rxn_id value_type=typeof(value)
+                            @error "Unsupported flux constraint value type" rxn_id value_type = typeof(value)
                         end
                     else
-                        @warn "Unexpected flux constraint type" rxn_id constraint_type=typeof(flux_constraint)
+                        @error "Unexpected flux constraint type" rxn_id constraint_type = typeof(flux_constraint)
                     end
                 else
-                    @debug "Reaction $rxn_id not found in flux constraints"
+                    @warn "Reaction $rxn_id not found in flux constraints"
                 end
             end
         end
     end
 
-    @debug "Built activity expression for complex $complex_idx" n_terms=length(idxs) unique_variables=length(unique(idxs))
-    
+    @info "Built activity expression for complex $complex_idx" n_terms = length(idxs) unique_variables = length(unique(idxs))
+
     if isempty(idxs)
-        @warn "No terms found for complex $complex_idx - this may indicate a constraint building issue"
+        @error "No terms found for complex $complex_idx - this indicates a constraint building issue"
+    end
+
+    # DIAGNOSTIC: Final validation of the LinearValue about to be created
+    if !isempty(idxs)
+        max_idx = maximum(idxs)
+        min_idx = minimum(idxs)
+        @info "LinearValue validation" complex_idx min_idx max_idx total_var_count valid_range = (min_idx >= 1 && max_idx <= total_var_count)
+
+        if min_idx < 1 || max_idx > total_var_count
+            @error "CRITICAL: LinearValue contains invalid variable indices" complex_idx min_idx max_idx total_var_count
+            error("Invalid variable indices detected in LinearValue construction")
+        end
     end
 
     return C.LinearValue(idxs=idxs, weights=weights)
@@ -431,7 +529,7 @@ function test_concordance_templated(
     instantiated, c1_expr, t_key = instantiate_charnes_cooper(
         template, c1_activity, c2_activity, direction; tolerance
     )
-    
+
     # Use COBREXA's optimization with the instantiated constraint tree
     results = COBREXA.screen_optimization_model(
         instantiated,
@@ -443,26 +541,26 @@ function test_concordance_templated(
         # The objective is already built into the constraint tree
         @objective(om, sense, c1_expr)
         optimize!(om)
-        
+
         if termination_status(om) == OPTIMAL
             return objective_value(om)
         else
             return nothing
         end
     end
-    
+
     # Extract results
     min_val = results[1]
     max_val = results[2]
-    
+
     if min_val === nothing || max_val === nothing
         return (false, nothing)
     end
-    
+
     # Check concordance
     is_concordant = isapprox(min_val, max_val; atol=tolerance)
     lambda_value = is_concordant ? min_val : nothing
-    
+
     return (is_concordant, lambda_value)
 end
 
@@ -576,21 +674,21 @@ constraints for each concordance test.
 function create_charnes_cooper_template(
     base_constraints::C.ConstraintTree,
     all_reaction_indices::Set{Int};
-    default_bounds::Tuple{Float64,Float64} = (-1000.0, 1000.0)
+    default_bounds::Tuple{Float64,Float64}=(-1000.0, 1000.0)
 )
     lb, ub = default_bounds
-    
+
     # Create w variables for ALL reactions that might be involved
     # This avoids rebuilding the variable structure for each pair
     w_vars = :w_vars^C.variables(
         keys=Symbol.("w_$j" for j in all_reaction_indices),
         bounds=C.Between(-Inf, Inf)
     )
-    
+
     # Create template t variables for both directions
     t_pos = :t_pos^C.variable(bound=C.Between(1e-12, Inf))
     t_neg = :t_neg^C.variable(bound=C.Between(-Inf, -1e-12))
-    
+
     # Create bounds constraint template for positive direction
     bounds_pos = :bounds_pos^C.ConstraintTree(
         Symbol("w_$(j)_lower") => C.Constraint(
@@ -603,7 +701,7 @@ function create_charnes_cooper_template(
             C.Between(0.0, Inf)
         ) for j in all_reaction_indices
     )
-    
+
     # Create bounds constraint template for negative direction
     bounds_neg = :bounds_neg^C.ConstraintTree(
         Symbol("w_$(j)_lower") => C.Constraint(
@@ -616,10 +714,10 @@ function create_charnes_cooper_template(
             C.Between(0.0, Inf)
         ) for j in all_reaction_indices
     )
-    
+
     # Compose base template with variables and bounds
     template = base_constraints * w_vars * t_pos * t_neg * bounds_pos * bounds_neg
-    
+
     return template
 end
 
@@ -639,49 +737,49 @@ function instantiate_charnes_cooper(
 )
     # Determine which reactions are actually involved in this pair
     active_reactions = Set(union(c1_activities.idxs, c2_activities.idxs))
-    
+
     # Create c2 normalization constraint for this specific pair
     target_value = direction == :positive ? 1.0 : -1.0
-    
+
     # Select appropriate t variable
     t_key = direction == :positive ? :t_pos : :t_neg
-    
+
     # Build c2 activity expression using the template's w variables
     c2_expr = sum(
         coeff * C.value(template.w_vars.w_vars[Symbol("w_$idx")])
         for (idx, coeff) in zip(c2_activities.idxs, c2_activities.weights)
     )
-    
+
     c2_constraint = :c2_normalization^C.Constraint(
         c2_expr,
         C.EqualTo(target_value)
     )
-    
+
     # Build c1 objective expression
     c1_expr = sum(
         coeff * C.value(template.w_vars.w_vars[Symbol("w_$idx")])
         for (idx, coeff) in zip(c1_activities.idxs, c1_activities.weights)
     )
-    
+
     c1_objective = :c1_objective^C.Constraint(
         c1_expr,
         C.Between(-Inf, Inf)  # Unconstrained objective
     )
-    
+
     # Add pair-specific constraints to template
     instantiated = template * c2_constraint * c1_objective
-    
+
     # Use substitution to fix unused variables to zero and prune
     # This removes variables not involved in this specific pair
     var_count = C.variable_count(instantiated)
     substitution = zeros(var_count)
-    
+
     # Only keep variables that are actually used
     # (This is where the power of ConstraintTrees substitution comes in)
-    
+
     # Prune unused variables for efficiency
     optimized = C.prune_variables(instantiated)
-    
+
     return optimized, c1_expr, t_key
 end
 
@@ -694,7 +792,7 @@ This should be called once per analysis and reused for all concordance tests.
 function setup_concordance_testing(
     base_constraints::C.ConstraintTree,
     all_complexes::Vector{Complex};
-    default_bounds::Tuple{Float64,Float64} = (-1000.0, 1000.0)
+    default_bounds::Tuple{Float64,Float64}=(-1000.0, 1000.0)
 )
     # Extract all reaction indices that could be involved in any concordance test
     all_reaction_indices = Set{Int}()
@@ -703,12 +801,12 @@ function setup_concordance_testing(
             push!(all_reaction_indices, Int(idx))
         end
     end
-    
+
     # Create the reusable template
     template = create_charnes_cooper_template(
         base_constraints, all_reaction_indices; default_bounds
     )
-    
+
     return template
 end
 

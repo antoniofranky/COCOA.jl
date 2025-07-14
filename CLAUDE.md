@@ -125,6 +125,31 @@ settings = [
 - **Sampling**: Advanced flux sampling techniques
 - **Analysis front-end API helpers**: Utility functions for complex analyses
 
+#### Advanced Parallel Processing Functions (Critical for COCOA Optimization)
+
+**`screen_optimization_model()`**: The most important function for COCOA's concordance testing
+- **Pre-caches JuMP optimization model**: Eliminates model creation overhead
+- **Distributes across multiple worker nodes**: True parallel execution
+- **Enables efficient screening of model variants**: Perfect for batch concordance testing
+- **Supports multiple optimization problems simultaneously**: Key to utilizing all 15 workers
+
+**`screen()`**: General parallel execution function
+- **Shortcut for `Distributed.pmap`**: Simplified parallel processing
+- **Worker-based computation**: Distributes work across available workers
+- **Flexible parallel execution**: Can handle various computational tasks
+
+**Batch Processing Capabilities:**
+- **`constraints_variability()`**: Computes feasible ranges across constraints in parallel
+- **`constraints_objective_envelope()`**: Optimizes across multiple parameter combinations
+- **`sample_constraint_variables()`**: Parallelizes sampling across worker nodes
+- **Multiple simultaneous optimizations**: Core capability for batch processing
+
+**Key Patterns for COCOA:**
+- **Batch constraint modifications**: Create multiple constraint variants simultaneously
+- **Parallel optimization execution**: Process all variants across workers
+- **Model pre-caching**: Reuse compiled models for efficiency
+- **Distributed computation**: Scale across computational nodes
+
 ---
 
 ## ConstraintTrees.jl Documentation
@@ -331,13 +356,68 @@ end
 ### Computational Bottlenecks in `process_concordance_batch` (src/analysis.jl)
 
 #### Current Problem Analysis  
-- Repeated optimizations causing computational overhead
-- Model recreation for each batch
-- Inefficient constraint system rebuilding
+- **Sequential concordance testing**: Major bottleneck in lines 392-408 of analysis.jl
+- **Single worker utilization**: Each `test_concordance` call only uses 1 worker despite having 15 available
+- **Repeated optimizations**: Causing computational overhead
+- **Model recreation for each batch**: Inefficient solver warm-start usage
+- **Inefficient constraint system rebuilding**: Missing opportunities for batch processing
+
+#### Critical Bottleneck Identified
+The main CPU underutilization issue in COCOA is in `process_concordance_batch` where concordance tests are processed sequentially:
+
+```julia
+# CURRENT BOTTLENECK - Sequential processing (lines 392-408)
+for (c1_idx, c2_idx, direction) in expanded_pairs
+    is_conc, lambda = test_concordance(...)  # Only uses 1 worker!
+    push!(results, ...)
+end
+```
+
+This loop processes each concordance test individually, using only 1 of the 15 available workers at a time.
 
 #### COBREXA.jl Solutions
 
-**Model Reuse Pattern:**
+**SOLUTION 1: Batch Concordance Testing with screen_optimization_model**
+Replace the sequential loop with parallel batch processing:
+
+```julia
+# IMPROVED APPROACH - Batch all concordance tests
+# Step 1: Build all constraint modifications at once
+constraint_modifications = []
+pair_mappings = []
+
+for (c1_idx, c2_idx, direction) in expanded_pairs
+    c1_id = complexes[c1_idx].id
+    c2_id = complexes[c2_idx].id
+    c1_activity = activity_lookup[c1_id]
+    c2_activity = activity_lookup[c2_id]
+    
+    # Build constraint modification for this specific concordance test
+    modification = build_concordance_constraint_modification(
+        constraints, c1_activity, c2_activity, direction, tolerance
+    )
+    push!(constraint_modifications, modification)
+    push!(pair_mappings, (c1_idx, c2_idx, direction))
+end
+
+# Step 2: Process ALL concordance tests in parallel using ALL 15 workers!
+batch_results = COBREXA.screen_optimization_model(
+    constraints,
+    constraint_modifications;
+    optimizer=optimizer,
+    settings=settings,
+    workers=workers,  # ALL 15 workers used simultaneously!
+)
+
+# Step 3: Process results
+for (i, result) in enumerate(batch_results)
+    c1_idx, c2_idx, direction = pair_mappings[i]
+    is_conc, lambda = extract_concordance_result(result)
+    push!(results, (c1_idx, c2_idx, direction, is_conc, lambda))
+end
+```
+
+**SOLUTION 2: Model Reuse Pattern:**
 ```julia
 # Use COBREXA's screen_optimization_model for model reuse
 # Avoid repeated model creation/destruction
@@ -349,23 +429,12 @@ optimized_model = COBREXA.screen_optimization_model(
 )
 ```
 
-**Efficient Constraint Building:**
+**SOLUTION 3: Increase Batch Sizes**
+Scale batch sizes with worker count to ensure efficient utilization:
 ```julia
-# Leverage COBREXA's efficient constraint system builders
-# Use pre-computed constraint trees to avoid rebuilding
-for (c1_idx, c2_idx, direction) in expanded_pairs
-    c1_activity = activity_lookup[complexes[c1_idx].id]
-    c2_activity = activity_lookup[complexes[c2_idx].id]
-    
-    # Direct constraint testing without model recreation
-    is_conc, lambda = test_concordance(
-        constraints, c1_activity, c2_activity, direction;
-        tolerance=tolerance,
-        optimizer=optimizer,
-        workers=workers,
-        settings=settings
-    )
-end
+# Scale batch size with available workers
+optimal_batch_size = max(100, 50 * length(workers))  # At least 50 tasks per worker
+stage_size = max(500, 200 * length(workers))          # Scale stage size accordingly
 ```
 
 #### ConstraintTrees.jl Solutions
@@ -489,8 +558,9 @@ end
 
 3. **Optimize Sampling Configuration**:
 ```julia
-# Reduce total iterations and memory pressure
-n_chains = min(4, length(workers))
+# CRITICAL FIX: Increase parallelization in sampling
+# Current bottleneck: Only using 4 workers out of 15 available!
+n_chains = min(12, length(workers))  # Use most workers instead of only 4
 burn_in_period = 32
 thinning_interval = 8
 ```
