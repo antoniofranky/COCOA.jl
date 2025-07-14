@@ -131,18 +131,18 @@ function parse_commandline()
         help = "Correlation threshold for concordance"
         arg_type = Float64
         default = 0.95
-        "--batch-size", "-b"
-        help = "Batch size for concordance analysis"
-        arg_type = Int
-        default = 10
         "--stage-size"
         help = "Stage size for concordance analysis"
         arg_type = Int
-        default = 100
-        "--max-iterations"
-        help = "Maximum iterations for concordance analysis"
+        default = 500
+        "--batch-size"
+        help = "Batch size within each stage (for memory management)"
         arg_type = Int
         default = 100
+        "--early-correlation-threshold"
+        help = "Early correlation threshold for filtering"
+        arg_type = Float64
+        default = 0.95
     end
 
     return parse_args(s)
@@ -308,27 +308,26 @@ function main()
         println("\nAnalysis parameters:")
         println("  Workers: $(nworkers())")
         println("  Optimizer: $(args["optimizer"])")
-        println("  Batch size: $(args["batch-size"])")
         println("  Stage size: $(args["stage-size"])")
+        println("  Batch size: $(args["batch-size"])")
         println("  Sample size: $(args["sample-size"])")
         println("  Correlation threshold: $(args["correlation-threshold"])")
-        println("  Max iterations: $(args["max-iterations"])")
+        println("  Early correlation threshold: $(args["early-correlation-threshold"])")
+        println("  Tolerance: $(args["threshold"])")
         println("  Random seed: $(args["seed"])")
 
         println("\nRunning concordance analysis...")
-        config = COCOA.ConcordanceConfig(
-            sample_size=args["sample-size"],
-            correlation_threshold=args["correlation-threshold"],
-            concordance_batch_size=args["batch-size"],
-            stage_size=args["stage-size"],
-            seed=args["seed"]
-        )
-
         results = COCOA.concordance_analysis(
             model;
             optimizer=get_optimizer(args["optimizer"]),
             workers=workers(),
-            config=config
+            sample_size=args["sample-size"],
+            correlation_threshold=args["correlation-threshold"],
+            early_correlation_threshold=args["early-correlation-threshold"],
+            stage_size=args["stage-size"],
+            batch_size=args["batch-size"],
+            seed=args["seed"],
+            tolerance=args["threshold"]
         )
 
         # Save results
@@ -345,80 +344,107 @@ function main()
 
     elseif command == "split-and-analyze"
         println("\n=== Split and Analyze Workflow ===")
-        
+
         # Load original model
         println("Loading original model...")
         original_model = load_model_smart(args["input"])
         print_summary(original_model)
-        
+
         # Step 1: Split into elementary steps
         println("\nStep 1: Splitting reactions into elementary steps...")
-        println("  Split fraction: $(args["split-fraction"])")
-        println("  Mechanism: $(args["mechanism"])")
+        println("  Ordered fraction: $(args["split-fraction"])")
         println("  Max substrates: $(args["max-substrates"])")
         println("  Max products: $(args["max-products"])")
         println("  Random seed: $(args["seed"])")
-        
-        split_model = COCOA.split_into_elementary_steps(
+
+        println("\nTiming split step:")
+        split_time = @time split_model = COCOA.split_into_elementary_steps(
             original_model;
-            ordered_fraction=args["mechanism"] == :fixed ? args["split-fraction"] : 0.0,
-            random_fraction=args["mechanism"] == :random ? args["split-fraction"] : 0.0,
+            ordered_fraction=args["split-fraction"],
             max_substrates=args["max-substrates"],
             max_products=args["max-products"],
             seed=args["seed"]
         )
-        
         print_summary(split_model)
-        
-        # Step 2: Run concordance analysis
-        println("\nStep 2: Running concordance analysis...")
-        
-        config = COCOA.ConcordanceConfig(
-            sample_size=args["sample-size"],
-            correlation_threshold=args["correlation-threshold"],
-            concordance_batch_size=args["batch-size"],
-            stage_size=args["stage-size"],
-            seed=args["seed"]
-        )
-        
-        results = COCOA.concordance_analysis(
+
+        # Step 2: Prepare model for concordance
+        println("\nStep 2: Preparing split model for concordance analysis...")
+        println("Timing preparation step:")
+        prep_time = @time prepared_model = COCOA.prepare_model_for_concordance(
             split_model;
             optimizer=get_optimizer(args["optimizer"]),
             workers=workers(),
-            config=config
+            flux_tolerance=args["threshold"]
         )
-        
-        # Step 3: Save results
+        print_summary(prepared_model)
+
+        # Step 3: Save prepared model with parameterized filename
         output_dir = args["output"]
-        println("\nStep 3: Saving results to: $output_dir/")
-        save_results(results, output_dir)
-        
-        # Save model statistics
+        mkpath(output_dir)
+        model_filename = joinpath(output_dir, "prepared_model_split$(args["split-fraction"])_subs$(args["max-substrates"])_prods$(args["max-products"]).jld2")
+        save_model_smart(prepared_model, model_filename; key="prepared_model")
+        println("✓ Prepared model saved to: $(model_filename)")
+
+        # Step 4: Run concordance analysis
+        println("\nStep 4: Running concordance analysis...")
+        println("Timing concordance analysis:")
+        concordance_time = @time results = COCOA.concordance_analysis(
+            prepared_model;
+            optimizer=get_optimizer(args["optimizer"]),
+            workers=workers(),
+            sample_size=args["sample-size"],
+            correlation_threshold=args["correlation-threshold"],
+            early_correlation_threshold=args["early-correlation-threshold"],
+            stage_size=args["stage-size"],
+            batch_size=args["batch-size"],
+            seed=args["seed"],
+            tolerance=args["threshold"]
+        )
+
+        # Step 5: Save concordance results as JLD2
+        results_filename = joinpath(output_dir, "concordance_results_split$(args["split-fraction"])_subs$(args["max-substrates"])_prods$(args["max-products"]).jld2")
+        JLD2.save(results_filename, "results", results)
+        println("✓ Concordance results saved to: $(results_filename)")
+
+        # Step 6: Save comprehensive model and performance statistics
         model_stats = Dict(
             "original_reactions" => length(AbstractFBCModels.reactions(original_model)),
             "original_metabolites" => length(AbstractFBCModels.metabolites(original_model)),
             "split_reactions" => length(AbstractFBCModels.reactions(split_model)),
             "split_metabolites" => length(AbstractFBCModels.metabolites(split_model)),
+            "prepared_reactions" => length(AbstractFBCModels.reactions(prepared_model)),
+            "prepared_metabolites" => length(AbstractFBCModels.metabolites(prepared_model)),
             "split_fraction" => args["split-fraction"],
-            "mechanism" => string(args["mechanism"]),
             "max_substrates" => args["max-substrates"],
             "max_products" => args["max-products"],
-            "seed" => args["seed"]
+            "seed" => args["seed"],
+            "split_time_seconds" => split_time,
+            "preparation_time_seconds" => prep_time,
+            "concordance_time_seconds" => concordance_time,
+            "workers" => nworkers(),
+            "optimizer" => args["optimizer"]
         )
         
-        # Merge with concordance results
+        # Merge with concordance analysis stats
         merged_stats = merge(results.stats, model_stats)
-        
-        # Save merged statistics
-        stats_file = joinpath(output_dir, "model_stats.jld2")
+        stats_file = joinpath(output_dir, "model_stats_split$(args["split-fraction"])_subs$(args["max-substrates"])_prods$(args["max-products"]).jld2")
         JLD2.save(stats_file, "stats", merged_stats)
-        
+        println("✓ Model statistics saved to: $(stats_file)")
+
+        # Log comprehensive timing info for scaling analysis
+        total_time = split_time + prep_time + concordance_time
+        @info "Performance Analysis" split_fraction=args["split-fraction"] max_substrates=args["max-substrates"] max_products=args["max-products"] n_reactions=model_stats["prepared_reactions"] n_metabolites=model_stats["prepared_metabolites"] total_time_min=round(total_time/60, digits=2) concordance_time_min=round(concordance_time/60, digits=2) n_complexes=nrow(results.complexes) n_modules=nrow(results.modules)
+
         println("\nSplit-and-Analyze Summary:")
         println("  Original model: $(model_stats["original_reactions"]) reactions, $(model_stats["original_metabolites"]) metabolites")
         println("  Split model: $(model_stats["split_reactions"]) reactions, $(model_stats["split_metabolites"]) metabolites")
+        println("  Prepared model: $(model_stats["prepared_reactions"]) reactions, $(model_stats["prepared_metabolites"]) metabolites")
         println("  Complexes: $(nrow(results.complexes))")
         println("  Kinetic modules: $(nrow(results.modules))")
-        println("  Processing time: $(round(results.stats["elapsed_time"] / 60, digits=2)) minutes")
+        println("  Total processing time: $(round(total_time / 60, digits=2)) minutes")
+        println("    - Splitting: $(round(split_time / 60, digits=2)) minutes")
+        println("    - Preparation: $(round(prep_time / 60, digits=2)) minutes")
+        println("    - Concordance: $(round(concordance_time / 60, digits=2)) minutes")
         println("\n✓ Split-and-analyze complete!")
 
     else

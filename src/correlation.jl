@@ -12,11 +12,10 @@ using Random
 using StableRNGs
 using Distributed
 using COBREXA
-using ConstraintTrees
 using JuMP
 using DocStringExtensions
 using ProgressMeter
-
+import ConstraintTrees as C
 """
 Streaming statistics accumulator for memory-efficient correlation calculation.
 """
@@ -377,7 +376,7 @@ function streaming_correlation_filter(
     min_valid_samples::Int=30,
     max_correlation_pairs::Int=500_000,
     early_correlation_threshold::Float64=0.8,
-    workers=Distributed.workers(),
+    workers=workers,
     seed::Union{Int,Nothing}=42,
 )
     # Setup simple RNG for reproducible sampling
@@ -518,7 +517,7 @@ function streaming_correlation_filter(
             end
         end
     end
-
+    @info "Total pairs to process: $total_pairs"
     # Initialize progress meter
     progress = Progress(total_pairs, desc="Computing correlations: ", showspeed=true)
 

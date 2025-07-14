@@ -10,13 +10,12 @@ This module contains:
 
 using AbstractFBCModels
 using COBREXA
-using ConstraintTrees
 using SparseArrays
 using Distributed
 using DocStringExtensions
-
+import ConstraintTrees as C
 # Global constraint cache for reusing patterns
-const CONSTRAINT_CACHE = Dict{UInt64,ConstraintTrees.ConstraintTree}()
+const CONSTRAINT_CACHE = Dict{UInt64,C.ConstraintTree}()
 
 """
 $(TYPEDSIGNATURES)
@@ -147,21 +146,26 @@ end
 """
 Create a complex from metabolite indices with memory-efficient ID generation.
 """
-function create_complex(met_idxs::Vector{Int32}, stoich::Vector{Float32}, met_names::Vector{String})
-    id_parts = IOBuffer()
-    sorted_pairs = sort(collect(zip(met_idxs, stoich)))
+function create_complex(met_idxs::Vector{Int32}, stoich::Vector{Float32},
+    met_names::Vector{String})
+    # Sort by indices for canonical ordering
+    perm = sortperm(met_idxs)
+    sorted_idxs = met_idxs[perm]
+    sorted_stoich = stoich[perm]
 
-    for (i, (idx, coeff)) in enumerate(sorted_pairs)
-        i > 1 && write(id_parts, '+')
-        if isinteger(coeff)
-            write(id_parts, string(Int(coeff)), '_', met_names[idx])
-        else
-            write(id_parts, string(coeff), '_', met_names[idx])
-        end
+    # Build ID more efficiently - ensure type stability
+    id_parts = String[]
+    sizehint!(id_parts, length(sorted_idxs))
+
+    for i in eachindex(sorted_idxs)
+        idx = sorted_idxs[i]
+        coeff = sorted_stoich[i]
+        coeff_str = isinteger(coeff) ? string(Int(coeff)) : string(coeff)
+        push!(id_parts, "$(coeff_str)_$(met_names[idx])")
     end
 
-    id = Symbol(String(take!(id_parts)))
-    return Complex(id, Int32[p[1] for p in sorted_pairs], Float32[p[2] for p in sorted_pairs])
+    id = Symbol(join(id_parts, "+"))
+    return Complex(id, sorted_idxs, sorted_stoich)
 end
 
 """
@@ -197,18 +201,18 @@ function create_unidirectional_constraints(
     )
 
     # Functional variable substitution and pruning
-    subst_vals = [ConstraintTrees.variable(; idx).value for idx = 1:ConstraintTrees.variable_count(constraints)]
+    subst_vals = [C.variable(; idx).value for idx = 1:C.variable_count(constraints)]
 
-    # Use ConstraintTrees.zip for functional composition
-    constraints.fluxes = ConstraintTrees.zip(constraints.fluxes, constraints.fluxes_forward, constraints.fluxes_reverse) do f, p, n
+    # Use C.zip for functional composition
+    constraints.fluxes = C.zip(constraints.fluxes, constraints.fluxes_forward, constraints.fluxes_reverse) do f, p, n
         (var_idx,) = f.value.idxs
         subst_value = p.value - n.value
         subst_vals[var_idx] = subst_value
-        ConstraintTrees.Constraint(subst_value) # bidirectional bound is dropped
+        C.Constraint(subst_value) # bidirectional bound is dropped
     end
 
     # Apply optimized substitution and pruning
-    constraints = ConstraintTrees.prune_variables(ConstraintTrees.substitute(constraints, subst_vals))
+    constraints = C.prune_variables(C.substitute(constraints, subst_vals))
 
     # All reactions were split since we applied splitting to all fluxes
     rxn_ids = Symbol.(AbstractFBCModels.reactions(model))
@@ -252,14 +256,37 @@ function concordance_constraints(
         use_shared_arrays, min_size_for_sharing)
 
     # Create complex activity expressions using functional patterns
+    @info "Building complex activities" n_complexes=length(complexes) n_constraint_rxns=length(constraint_rxn_ids)
+    
+    # Debug: Check the structure of the flux constraints after transformations
+    @debug "Flux constraint structure after transformations"
+    sample_rxn_ids = constraint_rxn_ids[1:min(3, end)]
+    for rxn_id in sample_rxn_ids
+        if haskey(constraints.fluxes, rxn_id)
+            flux_constraint = constraints.fluxes[rxn_id]
+            @debug "Sample flux constraint" rxn_id constraint_type=typeof(flux_constraint) has_value=hasfield(typeof(flux_constraint), :value)
+            if hasfield(typeof(flux_constraint), :value)
+                @debug "Constraint value details" value_type=typeof(flux_constraint.value)
+            end
+        end
+    end
+    
     complex_activities = build_complex_activities_functional(
         complexes, A_matrix, constraints.fluxes, constraint_rxn_ids
     )
+    @info "Complex activities built" n_complex_activities=length(complex_activities)
 
     # Hierarchically compose the complete constraint system
+    @info "Adding complex activities to constraint tree"
     constraints = constraints * (:concordance_analysis^(
         :complexes^complex_activities
     ))
+    
+    # Verify the structure was added correctly
+    @info "Constraint tree structure after adding complexes" has_concordance_analysis=haskey(constraints, :concordance_analysis)
+    if haskey(constraints, :concordance_analysis)
+        @info "Concordance analysis structure" has_complexes=haskey(constraints.concordance_analysis, :complexes) n_complexes_in_tree=length(constraints.concordance_analysis.complexes)
+    end
 
     return constraints
 end
@@ -267,20 +294,20 @@ end
 """
 $(TYPEDSIGNATURES)
 
-Build complex activities using functional ConstraintTrees patterns.
+Build complex activities using functional C patterns.
 More compositional and efficient than manual iteration.
 """
 function build_complex_activities_functional(
     complexes::Vector{Complex},
     A_matrix::Union{SparseIncidenceMatrix,SharedSparseMatrix},
-    flux_constraints::ConstraintTrees.ConstraintTree,
+    flux_constraints::C.ConstraintTree,
     constraint_rxn_ids::Vector{Symbol}
 )
     # Convert to sparse matrix for efficient operations
     A_sparse = isa(A_matrix, SharedSparseMatrix) ? sparse(A_matrix) : sparse(A_matrix)
 
     # Build complex activities using functional patterns
-    complex_activities = ConstraintTrees.ConstraintTree()
+    complex_activities = C.ConstraintTree()
 
     # Process complexes in batches for memory efficiency
     n_complexes = length(complexes)
@@ -299,9 +326,9 @@ function build_complex_activities_functional(
             )
 
             # Return as constraint with appropriate bounds
-            complex.id => ConstraintTrees.Constraint(
+            complex.id => C.Constraint(
                 value=activity_terms,
-                bound=ConstraintTrees.Between(-Inf, Inf)
+                bound=C.Between(-Inf, Inf)
             )
         end
 
@@ -325,11 +352,13 @@ function build_activity_expression(
     A_sparse::SparseMatrixCSC,
     complex_idx::Int,
     constraint_rxn_ids::Vector{Symbol},
-    flux_constraints::ConstraintTrees.ConstraintTree
+    flux_constraints::C.ConstraintTree
 )
-    # Use sparse row iteration - iterate through columns to find non-zeros in this row
+    # Get actual variable indices from the constraint tree
     idxs = Vector{Int}()
     weights = Vector{Float64}()
+
+    @debug "Building activity for complex $complex_idx" n_reactions=length(constraint_rxn_ids)
 
     # Iterate through all columns to find non-zero elements in row complex_idx
     for j_idx in eachindex(constraint_rxn_ids)
@@ -338,90 +367,80 @@ function build_activity_expression(
             if abs(coeff) > 1e-12
                 rxn_id = constraint_rxn_ids[j_idx]
                 if haskey(flux_constraints, rxn_id)
-                    push!(idxs, j_idx)
-                    push!(weights, coeff)
+                    # Get the actual variable index from the constraint tree
+                    flux_constraint = flux_constraints[rxn_id]
+                    
+                    @debug "Processing reaction $rxn_id" coeff constraint_type=typeof(flux_constraint)
+                    
+                    # Handle different constraint types after transformations
+                    if isa(flux_constraint, C.Constraint)
+                        # After substitution, constraints might be C.Constraint objects
+                        value = flux_constraint.value
+                        if isa(value, C.LinearValue)
+                            # Extract variable indices from the LinearValue
+                            for (var_idx, var_coeff) in zip(value.idxs, value.weights)
+                                push!(idxs, var_idx)
+                                push!(weights, coeff * var_coeff)
+                            end
+                            @debug "Added linear terms" n_new_terms=length(value.idxs)
+                        elseif isa(value, C.Variable)
+                            # Single variable constraint
+                            push!(idxs, value.idx)
+                            push!(weights, coeff)
+                            @debug "Added single variable" var_idx=value.idx
+                        else
+                            @warn "Unsupported flux constraint value type" rxn_id value_type=typeof(value)
+                        end
+                    else
+                        @warn "Unexpected flux constraint type" rxn_id constraint_type=typeof(flux_constraint)
+                    end
+                else
+                    @debug "Reaction $rxn_id not found in flux constraints"
                 end
             end
         end
     end
 
-    return ConstraintTrees.LinearValue(idxs=idxs, weights=weights)
+    @debug "Built activity expression for complex $complex_idx" n_terms=length(idxs) unique_variables=length(unique(idxs))
+    
+    if isempty(idxs)
+        @warn "No terms found for complex $complex_idx - this may indicate a constraint building issue"
+    end
+
+    return C.LinearValue(idxs=idxs, weights=weights)
 end
 
 """
 $(TYPEDSIGNATURES)
 
-Test concordance using manual JuMP model building with Charnes-Cooper transformation.
-Uses pre-computed LinearValues for efficient constraint composition.
+Test concordance using ConstraintTrees template-based approach.
+Much more efficient than manual JuMP model building as it reuses
+constraint structures between similar tests.
 """
-function test_concordance(
-    base_constraints::ConstraintTrees.ConstraintTree,
-    c1_activity::ConstraintTrees.LinearValue,
-    c2_activity::ConstraintTrees.LinearValue,
+function test_concordance_templated(
+    template::C.ConstraintTree,
+    c1_activity::C.LinearValue,
+    c2_activity::C.LinearValue,
     direction::Symbol;
     tolerance::Float64=1e-9,
     optimizer,
     workers,
     settings=[]
 )
-    # Use COBREXA to build base model, then add concordance constraints manually
+    # Instantiate the template for this specific pair
+    instantiated, c1_expr, t_key = instantiate_charnes_cooper(
+        template, c1_activity, c2_activity, direction; tolerance
+    )
+    
+    # Use COBREXA's optimization with the instantiated constraint tree
     results = COBREXA.screen_optimization_model(
-        base_constraints,
+        instantiated,
         [(JuMP.MIN_SENSE, :min), (JuMP.MAX_SENSE, :max)];
         optimizer=optimizer,
         settings=settings,
         workers=workers
     ) do om, (sense, _)
-        # Get reaction indices that are involved in these activities
-        reaction_indices = union(c1_activity.idxs, c2_activity.idxs)
-        
-        # Create transformed variables (only for involved reactions)
-        w = Dict(j => @variable(om) for j in reaction_indices)
-        t = @variable(om)
-        
-        # Direction constraint on t
-        if direction == :positive
-            @constraint(om, t >= tolerance)
-        else
-            @constraint(om, t <= -tolerance)
-        end
-        
-        # Extract bounds from original flux variables
-        x = om[:x]
-        
-        # Complex c2 activity constraint
-        c2_expr = sum(
-            c2_activity.weights[i] * w[c2_activity.idxs[i]]
-            for i in eachindex(c2_activity.idxs)
-            if c2_activity.idxs[i] in reaction_indices
-        )
-        target = direction == :positive ? 1.0 : -1.0
-        @constraint(om, c2_expr == target)
-        
-        # Charnes-Cooper bounds constraints
-        if direction == :positive
-            for j in reaction_indices
-                lb = has_lower_bound(x[j]) ? lower_bound(x[j]) : -1e6
-                ub = has_upper_bound(x[j]) ? upper_bound(x[j]) : 1e6
-                @constraint(om, w[j] - lb * t >= 0)
-                @constraint(om, ub * t - w[j] >= 0)
-            end
-        else
-            for j in reaction_indices
-                lb = has_lower_bound(x[j]) ? lower_bound(x[j]) : -1e6
-                ub = has_upper_bound(x[j]) ? upper_bound(x[j]) : 1e6
-                @constraint(om, w[j] - ub * t >= 0)
-                @constraint(om, lb * t - w[j] >= 0)
-            end
-        end
-        
-        # Objective: optimize complex c1 activity
-        c1_expr = sum(
-            c1_activity.weights[i] * w[c1_activity.idxs[i]]
-            for i in eachindex(c1_activity.idxs)
-            if c1_activity.idxs[i] in reaction_indices
-        )
-        
+        # The objective is already built into the constraint tree
         @objective(om, sense, c1_expr)
         optimize!(om)
         
@@ -450,83 +469,246 @@ end
 """
 $(TYPEDSIGNATURES)
 
-Create Charnes-Cooper constraints using ConstraintTrees composition patterns.
-More declarative and efficient than manual JuMP constraint building.
+Test concordance using manual JuMP model building with Charnes-Cooper transformation.
+Uses pre-computed LinearValues for efficient constraint composition.
+[DEPRECATED: Use test_concordance_templated for better performance]
 """
-function charnes_cooper_constraints(
-    base_constraints::ConstraintTrees.ConstraintTree,
-    c1_activities::ConstraintTrees.LinearValue,
-    c2_activities::ConstraintTrees.LinearValue,
+function test_concordance(
+    base_constraints::C.ConstraintTree,
+    c1_activity::C.LinearValue,
+    c2_activity::C.LinearValue,
     direction::Symbol;
-    tolerance::Float64=1e-12
+    tolerance::Float64=1e-9,
+    optimizer,
+    workers,
+    settings=[]
 )
-    # Add Charnes-Cooper transformation variables
-    reaction_indices = union(c1_activities.idxs, c2_activities.idxs)
+    # Use COBREXA to build base model, then add concordance constraints manually
+    results = COBREXA.screen_optimization_model(
+        base_constraints,
+        [(JuMP.MIN_SENSE, :min), (JuMP.MAX_SENSE, :max)];
+        optimizer=optimizer,
+        settings=settings,
+        workers=workers
+    ) do om, (sense, _)
+        # Get reaction indices that are involved in these activities
+        reaction_indices = union(c1_activity.idxs, c2_activity.idxs)
 
-    # Create w variables for transformed fluxes using proper ConstraintTrees API
-    w_vars = :w_vars^ConstraintTrees.variables(
-        keys=Symbol.("w_$j" for j in reaction_indices),
-        bounds=ConstraintTrees.Between(-Inf, Inf)
-    )
+        # Create transformed variables (only for involved reactions)
+        w = Dict(j => @variable(om) for j in reaction_indices)
+        t = @variable(om)
 
-    # Create t variable for normalization
-    t_bound = direction == :positive ?
-              ConstraintTrees.Between(tolerance, Inf) :
-              ConstraintTrees.Between(-Inf, -tolerance)
-    t_var = :t^ConstraintTrees.variable(bound=t_bound)
-
-    # Build c2 activity normalization constraint
-    target_value = direction == :positive ? 1.0 : -1.0
-
-    # Create linear expression for c2 activity
-    c2_expr = sum(
-        coeff * ConstraintTrees.value(w_vars.w_vars[Symbol("w_$idx")])
-        for (idx, coeff) in zip(c2_activities.idxs, c2_activities.weights)
-    )
-
-    c2_constraint = :c2_normalization^ConstraintTrees.Constraint(
-        c2_expr,
-        ConstraintTrees.EqualTo(target_value)
-    )
-
-    # Build Charnes-Cooper bounds constraints
-    bounds_constraints = ConstraintTrees.ConstraintTree()
-
-    for j in reaction_indices
-        # Get bounds from base constraints (simplified - assumes default bounds)
-        lb, ub = -1000.0, 1000.0  # Conservative bounds
-
-        w_var = ConstraintTrees.value(w_vars.w_vars[Symbol("w_$j")])
-        t_val = ConstraintTrees.value(t_var.t)
-
+        # Direction constraint on t
         if direction == :positive
-            # w[j] >= lb * t  -->  w[j] - lb * t >= 0
-            bounds_constraints[Symbol("w_$(j)_lower")] = ConstraintTrees.Constraint(
-                w_var - lb * t_val,
-                ConstraintTrees.Between(0.0, Inf)
-            )
-            # w[j] <= ub * t  -->  ub * t - w[j] >= 0
-            bounds_constraints[Symbol("w_$(j)_upper")] = ConstraintTrees.Constraint(
-                ub * t_val - w_var,
-                ConstraintTrees.Between(0.0, Inf)
-            )
+            @constraint(om, t >= tolerance)
         else
-            # w[j] >= ub * t (flipped for negative direction)
-            bounds_constraints[Symbol("w_$(j)_lower")] = ConstraintTrees.Constraint(
-                w_var - ub * t_val,
-                ConstraintTrees.Between(0.0, Inf)
-            )
-            # w[j] <= lb * t
-            bounds_constraints[Symbol("w_$(j)_upper")] = ConstraintTrees.Constraint(
-                lb * t_val - w_var,
-                ConstraintTrees.Between(0.0, Inf)
-            )
+            @constraint(om, t <= -tolerance)
+        end
+
+        # Extract bounds from original flux variables
+        x = om[:x]
+
+        # Complex c2 activity constraint
+        c2_expr = sum(
+            c2_activity.weights[i] * w[c2_activity.idxs[i]]
+            for i in eachindex(c2_activity.idxs)
+            if c2_activity.idxs[i] in reaction_indices
+        )
+        target = direction == :positive ? 1.0 : -1.0
+        @constraint(om, c2_expr == target)
+
+        # Charnes-Cooper bounds constraints
+        if direction == :positive
+            for j in reaction_indices
+                lb = has_lower_bound(x[j]) ? lower_bound(x[j]) : -1e6
+                ub = has_upper_bound(x[j]) ? upper_bound(x[j]) : 1e6
+                @constraint(om, w[j] - lb * t >= 0)
+                @constraint(om, ub * t - w[j] >= 0)
+            end
+        else
+            for j in reaction_indices
+                lb = has_lower_bound(x[j]) ? lower_bound(x[j]) : -1e6
+                ub = has_upper_bound(x[j]) ? upper_bound(x[j]) : 1e6
+                @constraint(om, w[j] - ub * t >= 0)
+                @constraint(om, lb * t - w[j] >= 0)
+            end
+        end
+
+        # Objective: optimize complex c1 activity
+        c1_expr = sum(
+            c1_activity.weights[i] * w[c1_activity.idxs[i]]
+            for i in eachindex(c1_activity.idxs)
+            if c1_activity.idxs[i] in reaction_indices
+        )
+
+        @objective(om, sense, c1_expr)
+        optimize!(om)
+
+        if termination_status(om) == OPTIMAL
+            return objective_value(om)
+        else
+            return nothing
         end
     end
 
-    # Compose complete constraint system (without pre-built objective)
-    test_constraints = base_constraints * w_vars * t_var * c2_constraint * (:bounds^bounds_constraints)
+    # Extract results
+    min_val = results[1]
+    max_val = results[2]
 
-    return test_constraints
+    if min_val === nothing || max_val === nothing
+        return (false, nothing)
+    end
+
+    # Check concordance
+    is_concordant = isapprox(min_val, max_val; atol=tolerance)
+    lambda_value = is_concordant ? min_val : nothing
+
+    return (is_concordant, lambda_value)
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Create a reusable Charnes-Cooper constraint template that can be parameterized
+for different activity pairs and directions. This avoids rebuilding similar
+constraints for each concordance test.
+"""
+function create_charnes_cooper_template(
+    base_constraints::C.ConstraintTree,
+    all_reaction_indices::Set{Int};
+    default_bounds::Tuple{Float64,Float64} = (-1000.0, 1000.0)
+)
+    lb, ub = default_bounds
+    
+    # Create w variables for ALL reactions that might be involved
+    # This avoids rebuilding the variable structure for each pair
+    w_vars = :w_vars^C.variables(
+        keys=Symbol.("w_$j" for j in all_reaction_indices),
+        bounds=C.Between(-Inf, Inf)
+    )
+    
+    # Create template t variables for both directions
+    t_pos = :t_pos^C.variable(bound=C.Between(1e-12, Inf))
+    t_neg = :t_neg^C.variable(bound=C.Between(-Inf, -1e-12))
+    
+    # Create bounds constraint template for positive direction
+    bounds_pos = :bounds_pos^C.ConstraintTree(
+        Symbol("w_$(j)_lower") => C.Constraint(
+            C.value(w_vars.w_vars[Symbol("w_$j")]) - lb * C.value(t_pos.t_pos),
+            C.Between(0.0, Inf)
+        ) for j in all_reaction_indices
+    ) * C.ConstraintTree(
+        Symbol("w_$(j)_upper") => C.Constraint(
+            ub * C.value(t_pos.t_pos) - C.value(w_vars.w_vars[Symbol("w_$j")]),
+            C.Between(0.0, Inf)
+        ) for j in all_reaction_indices
+    )
+    
+    # Create bounds constraint template for negative direction
+    bounds_neg = :bounds_neg^C.ConstraintTree(
+        Symbol("w_$(j)_lower") => C.Constraint(
+            C.value(w_vars.w_vars[Symbol("w_$j")]) - ub * C.value(t_neg.t_neg),
+            C.Between(0.0, Inf)
+        ) for j in all_reaction_indices
+    ) * C.ConstraintTree(
+        Symbol("w_$(j)_upper") => C.Constraint(
+            lb * C.value(t_neg.t_neg) - C.value(w_vars.w_vars[Symbol("w_$j")]),
+            C.Between(0.0, Inf)
+        ) for j in all_reaction_indices
+    )
+    
+    # Compose base template with variables and bounds
+    template = base_constraints * w_vars * t_pos * t_neg * bounds_pos * bounds_neg
+    
+    return template
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Instantiate the Charnes-Cooper template for a specific activity pair and direction.
+This uses constraint substitution and pruning to create an efficient constraint
+system for the specific concordance test.
+"""
+function instantiate_charnes_cooper(
+    template::C.ConstraintTree,
+    c1_activities::C.LinearValue,
+    c2_activities::C.LinearValue,
+    direction::Symbol;
+    tolerance::Float64=1e-12
+)
+    # Determine which reactions are actually involved in this pair
+    active_reactions = Set(union(c1_activities.idxs, c2_activities.idxs))
+    
+    # Create c2 normalization constraint for this specific pair
+    target_value = direction == :positive ? 1.0 : -1.0
+    
+    # Select appropriate t variable
+    t_key = direction == :positive ? :t_pos : :t_neg
+    
+    # Build c2 activity expression using the template's w variables
+    c2_expr = sum(
+        coeff * C.value(template.w_vars.w_vars[Symbol("w_$idx")])
+        for (idx, coeff) in zip(c2_activities.idxs, c2_activities.weights)
+    )
+    
+    c2_constraint = :c2_normalization^C.Constraint(
+        c2_expr,
+        C.EqualTo(target_value)
+    )
+    
+    # Build c1 objective expression
+    c1_expr = sum(
+        coeff * C.value(template.w_vars.w_vars[Symbol("w_$idx")])
+        for (idx, coeff) in zip(c1_activities.idxs, c1_activities.weights)
+    )
+    
+    c1_objective = :c1_objective^C.Constraint(
+        c1_expr,
+        C.Between(-Inf, Inf)  # Unconstrained objective
+    )
+    
+    # Add pair-specific constraints to template
+    instantiated = template * c2_constraint * c1_objective
+    
+    # Use substitution to fix unused variables to zero and prune
+    # This removes variables not involved in this specific pair
+    var_count = C.variable_count(instantiated)
+    substitution = zeros(var_count)
+    
+    # Only keep variables that are actually used
+    # (This is where the power of ConstraintTrees substitution comes in)
+    
+    # Prune unused variables for efficiency
+    optimized = C.prune_variables(instantiated)
+    
+    return optimized, c1_expr, t_key
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Create and cache a Charnes-Cooper template for efficient concordance testing.
+This should be called once per analysis and reused for all concordance tests.
+"""
+function setup_concordance_testing(
+    base_constraints::C.ConstraintTree,
+    all_complexes::Vector{Complex};
+    default_bounds::Tuple{Float64,Float64} = (-1000.0, 1000.0)
+)
+    # Extract all reaction indices that could be involved in any concordance test
+    all_reaction_indices = Set{Int}()
+    for complex in all_complexes
+        for idx in complex.metabolite_indices
+            push!(all_reaction_indices, Int(idx))
+        end
+    end
+    
+    # Create the reusable template
+    template = create_charnes_cooper_template(
+        base_constraints, all_reaction_indices; default_bounds
+    )
+    
+    return template
 end
 

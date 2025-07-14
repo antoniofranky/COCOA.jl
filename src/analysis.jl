@@ -10,7 +10,6 @@ This module contains:
 
 using AbstractFBCModels
 using COBREXA
-using ConstraintTrees
 using DataFrames
 using Distributed
 using Statistics
@@ -19,6 +18,10 @@ using StableRNGs
 using JuMP
 using DocStringExtensions
 using ProgressMeter
+using LinearAlgebra
+
+import ConstraintTrees as C
+import Base.Iterators
 
 """
 $(TYPEDSIGNATURES)
@@ -35,8 +38,9 @@ function process_in_stages(
     concordance_tracker::Union{ConcordanceTracker,SharedConcordanceTracker};
     optimizer,
     settings=[],
-    workers=Distributed.workers(),
+    workers=workers,
     stage_size::Int=500,
+    batch_size::Int=100,
     tolerance::Float64=1e-12
 )
     stage_results = Dict{String,Any}(
@@ -103,16 +107,37 @@ function process_in_stages(
         stage_pairs = filtered_pairs[1:stage_size_actual]
         remaining_pairs = filtered_pairs[(stage_size_actual+1):end]
 
-        @info "Processing stage $stage_count" pairs = length(stage_pairs)
+        @info "Processing stage $stage_count" pairs = length(stage_pairs) batch_size
 
-        # Process pairs
-        batch_results = process_concordance_batch(
-            constraints, complexes, stage_pairs, A_matrix;
-            optimizer=optimizer,
-            settings=settings,
-            workers=workers,
-            tolerance=tolerance
-        )
+        # Split stage into batches for memory management
+        all_batch_results = []
+        n_batches = ceil(Int, length(stage_pairs) / batch_size)
+
+        for batch_idx in 1:n_batches
+            start_idx = (batch_idx - 1) * batch_size + 1
+            end_idx = min(batch_idx * batch_size, length(stage_pairs))
+            batch_pairs = stage_pairs[start_idx:end_idx]
+
+            @debug "Processing batch $batch_idx/$n_batches" batch_pairs = length(batch_pairs)
+
+            # Process batch
+            batch_results = process_concordance_batch(
+                constraints, complexes, batch_pairs, A_matrix;
+                optimizer=optimizer,
+                settings=settings,
+                workers=workers,
+                tolerance=tolerance
+            )
+
+            append!(all_batch_results, batch_results)
+
+            # Optional: force GC between batches for large models
+            if batch_idx < n_batches
+                GC.gc()
+            end
+        end
+
+        batch_results = all_batch_results
 
         processed_pairs += length(stage_pairs)
         ProgressMeter.update!(prog, processed_pairs)
@@ -344,11 +369,11 @@ function process_concordance_batch(
     A_matrix::Union{SparseIncidenceMatrix,SharedSparseMatrix};
     optimizer,
     settings=[],
-    workers=Distributed.workers(),
+    workers=workers,
     tolerance::Float64=1e-12
 )
     # Extract activity lookup from pre-computed ConstraintTrees
-    activity_lookup = Dict{Symbol,ConstraintTrees.LinearValue}()
+    activity_lookup = Dict{Symbol,C.LinearValue}()
 
     for (complex_id, constraint) in constraints.concordance_analysis.complexes
         activity_lookup[complex_id] = constraint.value
@@ -423,15 +448,16 @@ Main concordance analysis function optimized for large models and HPC execution.
 - `modifications=Function[]`: Model modifications to apply
 - `settings=[]`: Solver settings
 - `workers=workers()`: Worker processes for parallel computation
-- `tolerance=1e-9`: Numerical tolerance for concordance testing
-- `correlation_threshold=0.95`: Minimum correlation for candidate pairs
+- `tolerance=1e-12`: Numerical tolerance for concordance testing
+- `correlation_threshold=0.99`: Minimum correlation for candidate pairs
+- `early_correlation_threshold=0.95`: Early correlation threshold for filtering
 - `sample_size=100`: Number of flux samples for correlation analysis
-- `sample_batch_size=100`: Batch size for sampling
 - `stage_size=500`: Number of pairs to process per stage
-- `max_memory_per_worker=2e9`: Maximum memory usage per worker (bytes)
+- `batch_size=100`: Number of pairs to process per batch (within each stage)
 - `use_shared_arrays=true`: Enable SharedArrays for parallel processing
 - `min_size_for_sharing=1_000_000`: Minimum array size for shared memory
-- `min_valid_samples=10`: Minimum samples required for correlation
+- `min_valid_samples=30`: Minimum samples required for correlation
+- `max_correlation_pairs=500_000`: Maximum correlation pairs to evaluate
 - `seed=42`: Master random seed for hierarchical reproducible RNG. Uses StableRNGs for cross-platform reproducibility and generates deterministic seeds for different analysis components (warmup generation, batch coordination, etc.)
 - `use_unidirectional_constraints=true`: Split reversible reactions
 
@@ -446,13 +472,14 @@ function concordance_analysis(
     workers=Distributed.workers(),
     tolerance::Float64=1e-12,
     correlation_threshold::Float64=0.99,
+    early_correlation_threshold::Float64=0.95,
     sample_size::Int=100,
     stage_size::Int=500,
+    batch_size::Int=100,
     use_shared_arrays::Bool=true,
     min_size_for_sharing::Int=1_000_000,
     min_valid_samples::Int=30,
     max_correlation_pairs::Int=500_000,
-    early_correlation_threshold::Float64=0.95,
     seed::Union{Int,Nothing}=42,
     use_unidirectional_constraints::Bool=true,
 )
@@ -499,6 +526,20 @@ function concordance_analysis(
     # Step 3: Perform Activity Variability Analysis (AVA) and generate warmup points simultaneously
     @info "Performing Activity Variability Analysis and generating warmup points"
 
+    # Add validation before AVA
+    @debug "Validating constraint structure before AVA" n_complex_constraints = length(constraints.concordance_analysis.complexes)
+
+    # Sample a few complexes to check their structure
+    if haskey(constraints, :concordance_analysis) && haskey(constraints.concordance_analysis, :complexes)
+        sample_count = min(3, length(constraints.concordance_analysis.complexes))
+        sample_complexes = collect(Iterators.take(constraints.concordance_analysis.complexes, sample_count))
+        for (cid, constraint) in sample_complexes
+            @debug "Sample complex constraint" complex_id = cid constraint_type = typeof(constraint.value) n_terms = length(constraint.value.idxs)
+        end
+    else
+        @warn "Complex activities not found in constraint tree" has_concordance_analysis = haskey(constraints, :concordance_analysis)
+    end
+
     # Run FVA on all complexes using optimized settings
     ava_results = COBREXA.constraints_variability(
         constraints,
@@ -515,11 +556,17 @@ function concordance_analysis(
     warmup_points = Vector{Float64}[]
 
     # Process FVA results correctly - iterate directly over the Tree
+    @info "Processing AVA results" n_ava_results = length(ava_results)
+
     for (cid, (min_result, max_result)) in ava_results
+        @debug "Processing AVA result for complex $cid" min_result max_result
+
         # Only process complexes that are not balanced
         if min_result !== nothing && max_result !== nothing
             min_activity, min_flux = min_result
             max_activity, max_flux = max_result
+
+            @debug "AVA result for $cid" min_activity max_activity
 
             # Store the activity range
             complex_ranges[cid] = (min_activity, max_activity)
@@ -527,8 +574,12 @@ function concordance_analysis(
             # Store warmup points  
             push!(warmup_points, min_flux)
             push!(warmup_points, max_flux)
+        else
+            @warn "AVA result is nothing for complex $cid" min_result max_result
         end
     end
+
+    @info "AVA processing complete" n_complex_ranges = length(complex_ranges)
 
     # Convert warmup points to a matrix with robust handling
     warmup = if isempty(warmup_points)
@@ -548,36 +599,66 @@ function concordance_analysis(
     negative_complexes = Set{Int}()
     unrestricted_complexes = Set{Int}()
 
-    # Start with trivially balanced complexes
-    union!(balanced_complexes, trivially_balanced)
+    # Note: Don't automatically include trivially balanced - verify through AVA first
 
     # Robust classification with proper error handling
+    n_ava_balanced = 0
+    n_trivial_ava_confirmed = 0
+    n_trivial_ava_rejected = 0
+
     for (i, c) in enumerate(complexes)
         cid = c.id
-
-        # Skip if already identified as trivially balanced
-        if cid in trivially_balanced
-            continue
-        end
 
         if haskey(complex_ranges, cid)
             min_val, max_val = complex_ranges[cid]
 
-            # Robust numerical comparison
+            @debug "Classifying complex $cid" min_val max_val tolerance is_trivially_balanced = (cid in trivially_balanced)
+
+            # Robust numerical comparison - treat all complexes the same way
             if abs(min_val) < tolerance && abs(max_val) < tolerance
                 push!(balanced_complexes, cid)
+                n_ava_balanced += 1
+
+                if cid in trivially_balanced
+                    n_trivial_ava_confirmed += 1
+                    @debug "Complex $cid: trivially balanced confirmed by AVA"
+                else
+                    @debug "Complex $cid: classified as balanced by AVA (not trivially balanced)"
+                end
             elseif min_val >= -tolerance  # Can only be positive
                 push!(positive_complexes, i)
+                if cid in trivially_balanced
+                    n_trivial_ava_rejected += 1
+                    @warn "Trivially balanced complex $cid has positive-only activity" min_val max_val
+                end
+                @debug "Complex $cid classified as positive-only"
             elseif max_val <= tolerance  # Can only be negative
                 push!(negative_complexes, i)
+                if cid in trivially_balanced
+                    n_trivial_ava_rejected += 1
+                    @warn "Trivially balanced complex $cid has negative-only activity" min_val max_val
+                end
+                @debug "Complex $cid classified as negative-only"
             else
                 push!(unrestricted_complexes, i)
+                if cid in trivially_balanced
+                    n_trivial_ava_rejected += 1
+                    @warn "Trivially balanced complex $cid has unrestricted activity" min_val max_val
+                end
+                @debug "Complex $cid classified as unrestricted"
             end
         else
             # If no FVA range available, classify as unrestricted
             push!(unrestricted_complexes, i)
+            if cid in trivially_balanced
+                n_trivial_ava_rejected += 1
+                @warn "No AVA result for trivially balanced complex $cid"
+            end
+            @debug "Complex $cid has no AVA result, classified as unrestricted"
         end
     end
+
+    @info "Complex classification complete" n_ava_balanced tolerance n_trivial_ava_confirmed n_trivial_ava_rejected
 
     @info "Complex classification" balanced = length(balanced_complexes) trivially_balanced = length(trivially_balanced) positive = length(positive_complexes) negative = length(negative_complexes) unrestricted = length(unrestricted_complexes)
 
@@ -634,6 +715,7 @@ function concordance_analysis(
         settings=settings,
         workers=workers,
         stage_size,
+        batch_size,
         tolerance,
     )
 
@@ -651,12 +733,56 @@ function concordance_analysis(
         :module => [get_module_id(c.id, modules) for c in complexes],
     )
 
-    # Add activity ranges
-    if !isempty(complex_ranges)
-        complexes_df.min_activity =
-            [get(complex_ranges, c.id, (NaN, NaN))[1] for c in complexes]
-        complexes_df.max_activity =
-            [get(complex_ranges, c.id, (NaN, NaN))[2] for c in complexes]
+    # Add activity ranges - verify trivially balanced complexes through AVA
+    if !isempty(complex_ranges) || !isempty(trivially_balanced)
+        # Pre-allocate vectors with the correct length
+        min_activities = Vector{Float64}(undef, length(complexes))
+        max_activities = Vector{Float64}(undef, length(complexes))
+        ava_confirms = Vector{Bool}(undef, length(complexes))
+
+        n_trivial_confirmed = 0
+        n_trivial_contradicted = 0
+
+        for (i, c) in enumerate(complexes)
+            if haskey(complex_ranges, c.id)
+                min_act, max_act = complex_ranges[c.id]
+                min_activities[i] = min_act
+                max_activities[i] = max_act
+
+                # Check if AVA confirms trivially balanced classification
+                if c.id in trivially_balanced
+                    is_ava_balanced = abs(min_act) < tolerance && abs(max_act) < tolerance
+                    ava_confirms[i] = is_ava_balanced
+                    if is_ava_balanced
+                        n_trivial_confirmed += 1
+                    else
+                        n_trivial_contradicted += 1
+                        @warn "Trivially balanced complex has non-zero AVA range" complex_id = c.id min_activity = min_act max_activity = max_act
+                    end
+                else
+                    ava_confirms[i] = true  # Not claimed to be trivially balanced
+                end
+            elseif c.id in trivially_balanced
+                # Trivially balanced but no AVA result - this might indicate an issue
+                @warn "No AVA result for trivially balanced complex" complex_id = c.id
+                min_activities[i] = NaN
+                max_activities[i] = NaN
+                ava_confirms[i] = false
+                n_trivial_contradicted += 1
+            else
+                # No AVA result available and not trivially balanced
+                min_activities[i] = NaN
+                max_activities[i] = NaN
+                ava_confirms[i] = true
+            end
+        end
+
+        # Add all columns at once
+        complexes_df.min_activity = min_activities
+        complexes_df.max_activity = max_activities
+        complexes_df.ava_confirms_balanced = ava_confirms
+
+        @info "Trivially balanced verification" n_trivial_confirmed n_trivial_contradicted n_total_trivial = length(trivially_balanced)
     end
 
     modules_df = DataFrame(
@@ -700,10 +826,18 @@ function concordance_analysis(
 end
 # Define a custom output function to capture both activity and flux vectors
 function ava_output_with_warmup(dir, om)
+    if JuMP.termination_status(om) != JuMP.OPTIMAL
+        @debug "AVA optimization not optimal" status = JuMP.termination_status(om)
+        return nothing
+    end
+
     objective_val = JuMP.objective_value(om)
     flux_vector = JuMP.value.(om[:x])
     # Correct for direction: dir=-1 for minimization, dir=1 for maximization
     activity = dir * objective_val
+
+    @debug "AVA result" direction = dir objective_val activity flux_norm = norm(flux_vector)
+
     return (activity, flux_vector)
 end
 """
