@@ -512,7 +512,7 @@ function concordance_analysis(
     # Step 1: Find trivially balanced complexes
     @info "Finding trivially balanced complexes"
     trivially_balanced = find_trivially_balanced_complexes(complexes)
-    @info "Found trivially balanced complexes" n_balanced = length(trivially_balanced)
+    @info "Found trivially balanced complexes" n_trivivally_balanced = length(trivially_balanced)
 
     # Initialize balanced_complexes with trivially balanced
     balanced_complexes = Set{Symbol}()
@@ -521,7 +521,7 @@ function concordance_analysis(
     # Step 2: Find trivially concordant pairs
     @info "Finding trivially concordant pairs"
     trivial_pairs = find_trivially_concordant_pairs(complexes)
-    @info "Found trivially concordant pairs" n_pairs = length(trivial_pairs)
+    @info "Found trivially concordant pairs" n_trivially_concordant = length(trivial_pairs)
 
     # Step 3: Perform Activity Variability Analysis (AVA) and generate warmup points simultaneously
     @info "Performing Activity Variability Analysis and generating warmup points"
