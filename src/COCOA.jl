@@ -71,7 +71,7 @@ using .ModelPreparation
 
 # Include main modules
 include("data_structures.jl")
-include("correlation.jl")
+include("filter.jl")
 include("constraints.jl")
 include("analysis.jl")
 

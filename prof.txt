@@ -1,0 +1,1366 @@
+Overhead ╎ [+additional indent] Count File:Line; Function
+=========================================================
+     ╎314237 @Base/asyncmap.jl:228; (::Base.var"#1176#1177"{Base.var"#1160#1165"{COBREXA.var"#40#42"{COCOA.var"#59#65"{Float64, ConstraintTrees.LinearValue, ConstraintTrees.LinearValue, Symbol}, COBREXA.worker_local_data}}, Channel{Any}, Nothing})()
+     ╎ 314237 @Base/asyncmap.jl:94; (::Base.var"#1160#1165"{COBREXA.var"#40#42"{COCOA.var"#59#65"{Float64, ConstraintTrees.LinearValue, ConstraintTrees.LinearValue, Symbol}, COBREXA.worker_local_data}})(r::Base.RefValue{Any}, args::Tuple{Tuple{MathOptInterface.OptimizationSense, Symbol}})
+     ╎  41240  @COBREXA/src/analysis/sample.jl:177; #25
+     ╎   41240  @COBREXA/src/analysis/sample.jl:29; kwcall(::@NamedTuple{variable_lower_bounds::Vector{Float64}, variable_upper_bounds::Vector{Float64}, coupling::SparseArrays.SparseMatrixCSC{Float64, Int64}, lower_bounds::Vector{Float64}, upper_bounds::Vector{Float64}, generator::StableRNGs.LehmerRNG, collect_iterations::Vector{Int64}}, ::typeof(sample_chain_achr), sample_c::Matrix{Float64})
+     ╎    192    @COBREXA/src/analysis/sample.jl:72; sample_chain_achr(sample_c::Matrix{Float64}; variable_lower_bounds::Vector{Float64}, variable_upper_bounds::Vector{Float64}, coupling::SparseArrays.SparseMatrixCSC{Float64, Int64}, lower_bounds::Vector{Float64}, upper_bounds::Vector{Float64}, epsilon::Float64, collect_iterations::Vector{Int64}, generator::StableRNGs.LehmerRNG)
+     ╎     24     @Base/abstractarray.jl:1312; getindex
+     ╎    ╎ 24     @Base/multidimensional.jl:915; _getindex
+     ╎    ╎  24     @Base/multidimensional.jl:927; _unsafe_getindex
+     ╎    ╎   24     @Base/abstractarray.jl:822; similar
+     ╎    ╎    24     @Base/array.jl:372; similar
+     ╎    ╎     24     @Base/boot.jl:591; Array
+     ╎    ╎    ╎ 24     @Base/boot.jl:578; Array
+   24╎    ╎    ╎  24     @Base/boot.jl:516; GenericMemory
+     ╎     168    @Base/broadcast.jl:872; materialize
+     ╎    ╎ 168    @Base/broadcast.jl:897; copy
+     ╎    ╎  168    @Base/broadcast.jl:223; similar
+     ╎    ╎   168    @Base/broadcast.jl:224; similar
+     ╎    ╎    168    @Base/abstractarray.jl:867; similar
+     ╎    ╎     168    @Base/abstractarray.jl:868; similar
+     ╎    ╎    ╎ 168    @Base/boot.jl:599; Array
+     ╎    ╎    ╎  168    @Base/boot.jl:591; Array
+     ╎    ╎    ╎   72     @Base/boot.jl:578; Array
+   72╎    ╎    ╎    72     @Base/boot.jl:516; GenericMemory
+   96╎    ╎    ╎   96     @Base/boot.jl:579; Array
+     ╎    20464  @COBREXA/src/analysis/sample.jl:89; sample_chain_achr(sample_c::Matrix{Float64}; variable_lower_bounds::Vector{Float64}, variable_upper_bounds::Vector{Float64}, coupling::SparseArrays.SparseMatrixCSC{Float64, Int64}, lower_bounds::Vector{Float64}, upper_bounds::Vector{Float64}, epsilon::Float64, collect_iterations::Vector{Int64}, generator::StableRNGs.LehmerRNG)
+     ╎     20464  @LinearAlgebra/src/matmul.jl:60; *
+     ╎    ╎ 20464  @Base/abstractarray.jl:824; similar
+     ╎    ╎  20464  @Base/array.jl:372; similar
+     ╎    ╎   20464  @Base/boot.jl:591; Array
+     ╎    ╎    20464  @Base/boot.jl:578; Array
+20464╎    ╎     20464  @Base/boot.jl:516; GenericMemory
+     ╎    20472  @COBREXA/src/analysis/sample.jl:90; sample_chain_achr(sample_c::Matrix{Float64}; variable_lower_bounds::Vector{Float64}, variable_upper_bounds::Vector{Float64}, coupling::SparseArrays.SparseMatrixCSC{Float64, Int64}, lower_bounds::Vector{Float64}, upper_bounds::Vector{Float64}, epsilon::Float64, collect_iterations::Vector{Int64}, generator::StableRNGs.LehmerRNG)
+     ╎     32     @Base/abstractarray.jl:1312; getindex
+     ╎    ╎ 32     @Base/multidimensional.jl:915; _getindex
+     ╎    ╎  32     @Base/multidimensional.jl:927; _unsafe_getindex
+     ╎    ╎   32     @Base/abstractarray.jl:822; similar
+     ╎    ╎    32     @Base/array.jl:372; similar
+     ╎    ╎     32     @Base/boot.jl:591; Array
+   32╎    ╎    ╎ 32     @Base/boot.jl:579; Array
+     ╎     20440  @LinearAlgebra/src/matmul.jl:60; *
+     ╎    ╎ 20440  @Base/abstractarray.jl:824; similar
+     ╎    ╎  20440  @Base/array.jl:372; similar
+     ╎    ╎   20440  @Base/boot.jl:591; Array
+     ╎    ╎    20440  @Base/boot.jl:578; Array
+20440╎    ╎     20440  @Base/boot.jl:516; GenericMemory
+     ╎    112    @COBREXA/src/analysis/sample.jl:105; sample_chain_achr(sample_c::Matrix{Float64}; variable_lower_bounds::Vector{Float64}, variable_upper_bounds::Vector{Float64}, coupling::SparseArrays.SparseMatrixCSC{Float64, Int64}, lower_bounds::Vector{Float64}, upper_bounds::Vector{Float64}, epsilon::Float64, collect_iterations::Vector{Int64}, generator::StableRNGs.LehmerRNG)
+     ╎     112    @Base/abstractarray.jl:1312; getindex
+     ╎    ╎ 112    @Base/multidimensional.jl:915; _getindex
+     ╎    ╎  112    @Base/multidimensional.jl:927; _unsafe_getindex
+     ╎    ╎   112    @Base/abstractarray.jl:822; similar
+     ╎    ╎    112    @Base/array.jl:372; similar
+     ╎    ╎     112    @Base/boot.jl:591; Array
+     ╎    ╎    ╎ 48     @Base/boot.jl:578; Array
+   48╎    ╎    ╎  48     @Base/boot.jl:516; GenericMemory
+   64╎    ╎    ╎ 64     @Base/boot.jl:579; Array
+     ╎  272997 @COBREXA/src/analysis/screen.jl:71; (::COBREXA.var"#40#42"{COCOA.var"#59#65"{Float64, ConstraintTrees.LinearValue, ConstraintTrees.LinearValue, Symbol}, COBREXA.worker_local_data})(as::Tuple{MathOptInterface.OptimizationSense, Symbol})
+     ╎   128    @COBREXA/src/analysis/variability.jl:73; (::COBREXA.var"#48#52"{typeof(COCOA.ava_output_with_warmup)})(om::JuMP.Model, ::Tuple{Int64, ConstraintTrees.LinearValue})
+     ╎    128    @JuMP/src/macros.jl:419; macro expansion
+     ╎     128    @JuMP/src/macros/@objective.jl:103; macro expansion
+     ╎    ╎ 128    @JuMP/src/macros.jl:264; macro expansion
+     ╎    ╎  128    @MutableArithmetics/src/rewrite.jl:371; macro expansion
+     ╎    ╎   128    @ConstraintTrees/src/linear_value.jl:144; substitute(x::ConstraintTrees.LinearValue, y::Vector{JuMP.VariableRef})
+     ╎    ╎    128    @ConstraintTrees/src/value.jl:101; sum
+     ╎    ╎     128    @ConstraintTrees/src/value.jl:101; #sum#2
+     ╎    ╎    ╎ 128    @ConstraintTrees/src/value.jl:61; preduce
+     ╎    ╎    ╎  128    @ConstraintTrees/src/value.jl:82; preduce(op::typeof(+), xs::Base.Generator{Base.Iterators.Enumerate{Vector{Int64}}, ConstraintTrees.var"#5#6"{ConstraintTrees.LinearValue, Vector{JuMP.VariableRef}}}; init::Float64, stack_type::Type)
+     ╎    ╎    ╎   128    @Base/generator.jl:48; iterate
+     ╎    ╎    ╎    128    none:0; #5
+     ╎    ╎    ╎     128    @JuMP/src/operators.jl:58; *
+     ╎    ╎    ╎    ╎ 128    @JuMP/src/aff_expr.jl:82; _build_aff_expr(constant::Float64, coef::Float64, var::JuMP.VariableRef)
+     ╎    ╎    ╎    ╎  128    @OrderedCollections/src/ordered_dict.jl:23; OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}()
+  128╎    ╎    ╎    ╎   128    @OrderedCollections/src/ordered_dict.jl:14; OrderedDict
+     ╎   144    @COBREXA/src/analysis/variability.jl:74; (::COBREXA.var"#48#52"{typeof(COCOA.ava_output_with_warmup)})(om::JuMP.Model, ::Tuple{Int64, ConstraintTrees.LinearValue})
+     ╎    144    @JuMP/src/optimizer_interface.jl:560; optimize!
+     ╎     144    @JuMP/src/optimizer_interface.jl:609; optimize!(model::JuMP.Model; ignore_optimize_hook::Bool, _differentiation_backend::MathOptInterface.Nonlinear.SparseReverseMode, kwargs::Base.Pairs{Symbol, Union{}, Tuple{}, @NamedTuple{}})
+     ╎    ╎ 32     @MathOptInterface/src/Utilities/cachingoptimizer.jl:370; optimize!(m::MathOptInterface.Utilities.CachingOptimizer{MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}})
+     ╎    ╎  32     @MathOptInterface/src/MathOptInterface.jl:121; optimize!
+     ╎    ╎   32     @MathOptInterface/src/Bridges/bridge_optimizer.jl:443; copy_to
+     ╎    ╎    32     @MathOptInterface/src/Utilities/copy.jl:393; default_copy_to(dest::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, src::MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}})
+     ╎    ╎     32     @MathOptInterface/src/Utilities/copy.jl:251; _pass_constraints(dest::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, src::MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}, index_map::MathOptInterface.Utilities.IndexMap, variable_constraints_not_added::Vector{Any})
+     ╎    ╎    ╎ 32     @MathOptInterface/src/Bridges/bridge_optimizer.jl:427; pass_nonvariable_constraints(dest::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, src::MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}, idxmap::MathOptInterface.Utilities.IndexMap, constraint_types::Vector{Tuple{Type, Type}})
+     ╎    ╎    ╎  32     @MathOptInterface/src/Utilities/copy.jl:229; pass_nonvariable_constraints
+     ╎    ╎    ╎   32     @MathOptInterface/src/Utilities/copy.jl:203; pass_nonvariable_constraints_fallback(dest::HiGHS.Optimizer, src::MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}, index_map::MathOptInterface.Utilities.IndexMap, constraint_types::Vector{Tuple{Type, Type}})
+     ╎    ╎    ╎    32     @MathOptInterface/src/Utilities/copy.jl:192; _copy_constraints(dest::HiGHS.Optimizer, src::MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}, index_map::MathOptInterface.Utilities.IndexMap, cis_src::Vector{MathOptInterface.ConstraintIndex{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.EqualTo{Float64}}})
+     ╎    ╎    ╎     32     @MathOptInterface/src/Utilities/copy.jl:180; _copy_constraints(dest::HiGHS.Optimizer, src::MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}, index_map::MathOptInterface.Utilities.IndexMap, index_map_FS::MathOptInterface.Utilities.DoubleDicts.IndexDoubleDictInner{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.EqualTo{Float64}}, cis_src::Vector{MathOptInterface.ConstraintIndex{MathOptInterface.ScalarAffineFunctio…
+     ╎    ╎    ╎    ╎ 32     @HiGHS/src/MOI_wrapper.jl:1771; add_constraint(model::HiGHS.Optimizer, f::MathOptInterface.ScalarAffineFunction{Float64}, s::MathOptInterface.EqualTo{Float64})
+     ╎    ╎    ╎    ╎  32     @HiGHS/src/MOI_wrapper.jl:1749; _indices_and_coefficients(model::HiGHS.Optimizer, f::MathOptInterface.ScalarAffineFunction{Float64})
+     ╎    ╎    ╎    ╎   32     @MathOptInterface/src/Utilities/functions.jl:1050; canonical
+     ╎    ╎    ╎    ╎    32     @MathOptInterface/src/functions.jl:147; copy
+   32╎    ╎    ╎    ╎     32     @MathOptInterface/src/functions.jl:140; ScalarAffineFunction
+     ╎    ╎ 112    @MathOptInterface/src/Utilities/cachingoptimizer.jl:379; optimize!(m::MathOptInterface.Utilities.CachingOptimizer{MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}})
+     ╎    ╎  112    @MathOptInterface/src/Bridges/bridge_optimizer.jl:367; optimize!
+     ╎    ╎   112    @HiGHS/src/MOI_wrapper.jl:2223; optimize!(model::HiGHS.Optimizer)
+     ╎    ╎    112    @Base/c.jl:167; disable_sigint
+     ╎    ╎     112    @HiGHS/src/MOI_wrapper.jl:2223; #42
+   64╎    ╎    ╎ 112    @HiGHS/src/gen/libhighs.jl:328; Highs_run
+     ╎    ╎    ╎  48     @HiGHS/src/MOI_wrapper.jl:3235; _cfn_user_callback(callback_type::Int32, message::Ptr{Int8}, p_data_out::Ptr{HiGHS.HighsCallbackDataOut}, p_data_in::Ptr{HiGHS.HighsCallbackDataIn}, p_user_data::Ptr{Nothing})
+     ╎    ╎    ╎   48     @Base/c.jl:181; reenable_sigint
+   48╎    ╎    ╎    48     @HiGHS/src/MOI_wrapper.jl:3237; (::HiGHS.var"#71#72"{Int32, Ptr{Int8}, Ptr{HiGHS.HighsCallbackDataIn}, HiGHS.HighsCallbackDataOut, HiGHS._CallbackData})()
+     ╎   11280  @COBREXA/src/analysis/variability.jl:75; (::COBREXA.var"#48#52"{typeof(COCOA.ava_output_with_warmup)})(om::JuMP.Model, ::Tuple{Int64, ConstraintTrees.LinearValue})
+     ╎    11280  @COCOA/src/analysis.jl:856; ava_output_with_warmup(dir::Int64, om::JuMP.Model)
+     ╎     11280  @Base/broadcast.jl:872; materialize(bc::Base.Broadcast.Broadcasted{Base.Broadcast.DefaultArrayStyle{1}, Nothing, typeof(JuMP.value), Tuple{Vector{JuMP.VariableRef}}})
+     ╎    ╎ 11280  @Base/broadcast.jl:897; copy
+     ╎    ╎  11280  @Base/broadcast.jl:925; copyto!
+     ╎    ╎   11280  @Base/broadcast.jl:972; copyto!
+     ╎    ╎    11280  @Base/simdloop.jl:77; macro expansion
+     ╎    ╎     11280  @Base/broadcast.jl:973; macro expansion
+     ╎    ╎    ╎ 11280  @Base/broadcast.jl:610; getindex
+     ╎    ╎    ╎  11280  @Base/broadcast.jl:651; _broadcast_getindex
+     ╎    ╎    ╎   11280  @Base/broadcast.jl:678; _broadcast_getindex_evalf
+     ╎    ╎    ╎    11280  @JuMP/src/variables.jl:2091; value
+     ╎    ╎    ╎     11280  @JuMP/src/variables.jl:2092; value(v::JuMP.VariableRef; result::Int64)
+ 1424╎    ╎    ╎    ╎ 11280  @JuMP/src/optimizer_interface.jl:1239; get(model::JuMP.Model, attr::MathOptInterface.VariablePrimal, v::JuMP.VariableRef)
+  672╎    ╎    ╎    ╎  672    @JuMP/src/optimizer_interface.jl:1193; _moi_get_result(::MathOptInterface.Utilities.CachingOptimizer{MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}}, ::MathOptInterface.VariablePrimal, ::Vararg{Any})
+ 1136╎    ╎    ╎    ╎  9184   @JuMP/src/optimizer_interface.jl:1199; _moi_get_result(::MathOptInterface.Utilities.CachingOptimizer{MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}}, ::MathOptInterface.VariablePrimal, ::Vararg{Any})
+     ╎    ╎    ╎    ╎   5440   @MathOptInterface/src/Utilities/cachingoptimizer.jl:947; get(model::MathOptInterface.Utilities.CachingOptimizer{MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}}, attr::MathOptInterface.VariablePrimal, index::MathOptInterface.VariableIndex)
+     ╎    ╎    ╎    ╎    5440   @MathOptInterface/src/Utilities/cachingoptimizer.jl:886; _throw_if_get_attribute_not_allowed
+     ╎    ╎    ╎    ╎     5440   @MathOptInterface/src/Utilities/cachingoptimizer.jl:895; _throw_if_get_attribute_not_allowed(model::MathOptInterface.Utilities.CachingOptimizer{MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}}, attr::MathOptInterface.VariablePrimal; needs_optimizer_map::Bool)
+     ╎    ╎    ╎    ╎    ╎ 5440   @Base/essentials.jl:1121; isempty
+     ╎    ╎    ╎    ╎    ╎  5440   @MathOptInterface/src/Utilities/copy/index_map.jl:105; iterate(::MathOptInterface.Utilities.IndexMap)
+     ╎    ╎    ╎    ╎    ╎   5440   @Base/iterators.jl:1247; iterate
+     ╎    ╎    ╎    ╎    ╎    1856   @Base/iterators.jl:1253; iterate
+     ╎    ╎    ╎    ╎    ╎     1856   @MathOptInterface/src/Utilities/CleverDicts.jl:258; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎ 1856   @Base/array.jl:902; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎  1856   @Base/array.jl:902; iterate
+ 1856╎    ╎    ╎    ╎    ╎    ╎   1856   @Base/essentials.jl:916; getindex
+ 3584╎    ╎    ╎    ╎    ╎    3584   @Base/iterators.jl:1259; iterate
+     ╎    ╎    ╎    ╎   688    @MathOptInterface/src/Utilities/cachingoptimizer.jl:951; get(model::MathOptInterface.Utilities.CachingOptimizer{MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}}, attr::MathOptInterface.VariablePrimal, index::MathOptInterface.VariableIndex)
+  688╎    ╎    ╎    ╎    688    @MathOptInterface/src/Bridges/bridge_optimizer.jl:1315; get(b::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, attr::MathOptInterface.VariablePrimal, index::MathOptInterface.VariableIndex)
+ 1920╎    ╎    ╎    ╎   1920   @MathOptInterface/src/Utilities/cachingoptimizer.jl:956; get(model::MathOptInterface.Utilities.CachingOptimizer{MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}}, attr::MathOptInterface.VariablePrimal, index::MathOptInterface.VariableIndex)
+     ╎   167885 @COBREXA/src/worker_data.jl:59; get_worker_local_data(x::COBREXA.worker_local_data)
+     ╎    167885 @COBREXA/src/analysis/screen.jl:63; (::COBREXA.var"#39#41"{Nothing, MathOptInterface.OptimizationSense, DataType, Vector{Any}})(c::ConstraintTrees.ConstraintTree)
+     ╎     167885 @COBREXA/src/solver.jl:129; optimization_model
+     ╎    ╎ 800    @COBREXA/src/solver.jl:135; optimization_model(cs::ConstraintTrees.ConstraintTree; objective::Nothing, optimizer::Type, sense::MathOptInterface.OptimizationSense)
+     ╎    ╎  800    @JuMP/src/JuMP.jl:196; GenericModel
+     ╎    ╎   80     @JuMP/src/JuMP.jl:200; #_#1
+     ╎    ╎    80     @MathOptInterface/src/Utilities/model.jl:36; MathOptInterface.Utilities.Model{Float64}()
+   80╎    ╎     80     @Base/dict.jl:80; Dict
+     ╎    ╎   720    @JuMP/src/JuMP.jl:204; #_#1
+     ╎    ╎    720    @JuMP/src/optimizer_interface.jl:495; set_optimizer
+     ╎    ╎     640    @JuMP/src/optimizer_interface.jl:503; set_optimizer(model::JuMP.Model, optimizer_constructor::Any; add_bridges::Bool, kwargs::Base.Pairs{Symbol, Union{}, Tuple{}, @NamedTuple{}})
+     ╎    ╎    ╎ 640    @MathOptInterface/src/instantiate.jl:162; kwcall(::@NamedTuple{with_bridge_type::DataType}, ::typeof(MathOptInterface.instantiate), optimizer_constructor::Any)
+     ╎    ╎    ╎  640    @MathOptInterface/src/instantiate.jl:190; instantiate(optimizer_constructor::Any; with_bridge_type::Type{Float64}, with_cache_type::Nothing)
+     ╎    ╎    ╎   80     @MathOptInterface/src/Bridges/Bridges.jl:66; full_bridge_optimizer(model::HiGHS.Optimizer, ::Type{Float64})
+     ╎    ╎    ╎    80     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:68; MathOptInterface.Bridges.LazyBridgeOptimizer(model::HiGHS.Optimizer)
+     ╎    ╎    ╎     80     @MathOptInterface/src/Bridges/Variable/map.jl:52; MathOptInterface.Bridges.Variable.Map()
+     ╎    ╎    ╎    ╎ 80     @MathOptInterface/src/Bridges/Variable/map.jl:20; Map
+     ╎    ╎    ╎    ╎  80     @Base/some.jl:37; convert
+     ╎    ╎    ╎    ╎   80     @Base/abstractdict.jl:574; convert
+     ╎    ╎    ╎    ╎    80     @Base/dict.jl:91; Dict{MathOptInterface.VariableIndex, Tuple{Int64, MathOptInterface.AbstractScalarFunction}}(kv::Dict{MathOptInterface.VariableIndex, MathOptInterface.AbstractScalarFunction})
+   80╎    ╎    ╎    ╎     80     @Base/dict.jl:80; Dict
+     ╎    ╎    ╎   16     @MathOptInterface/src/Bridges/Bridges.jl:70; full_bridge_optimizer(model::HiGHS.Optimizer, ::Type{Float64})
+     ╎    ╎    ╎    16     @MathOptInterface/src/Bridges/Variable/Variable.jl:33; add_all_bridges(model::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, ::Type{Float64})
+     ╎    ╎    ╎     16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:399; add_bridge
+     ╎    ╎    ╎    ╎ 16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:431; has_bridge
+     ╎    ╎    ╎    ╎  16     @Base/array.jl:2404; findfirst
+   16╎    ╎    ╎    ╎   16     @Base/array.jl:2353; findnext(testf::Base.Fix2{typeof(isequal), Type{MathOptInterface.Bridges.Variable.ParameterToEqualToBridge{Float64}}}, A::Vector{Any}, start::Int64)
+     ╎    ╎    ╎   544    @MathOptInterface/src/Bridges/Bridges.jl:71; full_bridge_optimizer(model::HiGHS.Optimizer, ::Type{Float64})
+     ╎    ╎    ╎    16     @MathOptInterface/src/Bridges/Constraint/Constraint.jl:38; add_all_bridges(model::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, ::Type{Float64})
+     ╎    ╎    ╎     16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:399; add_bridge
+     ╎    ╎    ╎    ╎ 16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:431; has_bridge
+     ╎    ╎    ╎    ╎  16     @Base/array.jl:2404; findfirst
+   16╎    ╎    ╎    ╎   16     @Base/array.jl:2353; findnext(testf::Base.Fix2{typeof(isequal), Type{MathOptInterface.Bridges.Constraint.CountAtLeastToCountBelongsBridge{Float64, F} where F<:Union{MathOptInterface.VectorAffineFunction{Float64}, MathOptInterface.VectorOfVariables}}}, A::Vector{Any}, start::Int64)
+     ╎    ╎    ╎    32     @MathOptInterface/src/Bridges/Constraint/Constraint.jl:67; add_all_bridges(model::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, ::Type{Float64})
+     ╎    ╎    ╎     32     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:399; add_bridge
+     ╎    ╎    ╎    ╎ 32     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:431; has_bridge
+     ╎    ╎    ╎    ╎  32     @Base/array.jl:2404; findfirst
+   32╎    ╎    ╎    ╎   32     @Base/array.jl:2353; findnext(testf::Base.Fix2{typeof(isequal), Type{MathOptInterface.Bridges.Constraint.IndicatorSOS1Bridge{Float64}}}, A::Vector{Any}, start::Int64)
+     ╎    ╎    ╎    16     @MathOptInterface/src/Bridges/Constraint/Constraint.jl:75; add_all_bridges(model::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, ::Type{Float64})
+     ╎    ╎    ╎     16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:399; add_bridge
+     ╎    ╎    ╎    ╎ 16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:431; has_bridge
+     ╎    ╎    ╎    ╎  16     @Base/array.jl:2404; findfirst
+   16╎    ╎    ╎    ╎   16     @Base/array.jl:2353; findnext(testf::Base.Fix2{typeof(isequal), Type{MathOptInterface.Bridges.Constraint.LessToGreaterBridge{Float64}}}, A::Vector{Any}, start::Int64)
+     ╎    ╎    ╎    16     @MathOptInterface/src/Bridges/Constraint/Constraint.jl:77; add_all_bridges(model::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, ::Type{Float64})
+     ╎    ╎    ╎     16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:399; add_bridge
+     ╎    ╎    ╎    ╎ 16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:431; has_bridge
+     ╎    ╎    ╎    ╎  16     @Base/array.jl:2404; findfirst
+   16╎    ╎    ╎    ╎   16     @Base/array.jl:2353; findnext(testf::Base.Fix2{typeof(isequal), Type{MathOptInterface.Bridges.Constraint.LessToIntervalBridge{Float64}}}, A::Vector{Any}, start::Int64)
+     ╎    ╎    ╎    16     @MathOptInterface/src/Bridges/Constraint/Constraint.jl:80; add_all_bridges(model::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, ::Type{Float64})
+     ╎    ╎    ╎     16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:399; add_bridge
+     ╎    ╎    ╎    ╎ 16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:431; has_bridge
+     ╎    ╎    ╎    ╎  16     @Base/array.jl:2404; findfirst
+   16╎    ╎    ╎    ╎   16     @Base/array.jl:2353; findnext(testf::Base.Fix2{typeof(isequal), Type{MathOptInterface.Bridges.Constraint.NonnegToNonposBridge{Float64}}}, A::Vector{Any}, start::Int64)
+     ╎    ╎    ╎    16     @MathOptInterface/src/Bridges/Constraint/Constraint.jl:82; add_all_bridges(model::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, ::Type{Float64})
+     ╎    ╎    ╎     16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:399; add_bridge
+     ╎    ╎    ╎    ╎ 16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:431; has_bridge
+     ╎    ╎    ╎    ╎  16     @Base/array.jl:2404; findfirst
+   16╎    ╎    ╎    ╎   16     @Base/array.jl:2353; findnext(testf::Base.Fix2{typeof(isequal), Type{MathOptInterface.Bridges.Constraint.NormInfinityBridge{Float64}}}, A::Vector{Any}, start::Int64)
+     ╎    ╎    ╎    32     @MathOptInterface/src/Bridges/Constraint/Constraint.jl:84; add_all_bridges(model::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, ::Type{Float64})
+     ╎    ╎    ╎     32     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:399; add_bridge
+     ╎    ╎    ╎    ╎ 32     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:431; has_bridge
+     ╎    ╎    ╎    ╎  32     @Base/array.jl:2404; findfirst
+   32╎    ╎    ╎    ╎   32     @Base/array.jl:2353; findnext(testf::Base.Fix2{typeof(isequal), Type{MathOptInterface.Bridges.Constraint.NormNuclearBridge{Float64}}}, A::Vector{Any}, start::Int64)
+     ╎    ╎    ╎    16     @MathOptInterface/src/Bridges/Constraint/Constraint.jl:85; add_all_bridges(model::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, ::Type{Float64})
+     ╎    ╎    ╎     16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:399; add_bridge
+     ╎    ╎    ╎    ╎ 16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:431; has_bridge
+     ╎    ╎    ╎    ╎  16     @Base/array.jl:2404; findfirst
+   16╎    ╎    ╎    ╎   16     @Base/array.jl:2353; findnext(testf::Base.Fix2{typeof(isequal), Type{MathOptInterface.Bridges.Constraint.NormOneBridge{Float64}}}, A::Vector{Any}, start::Int64)
+     ╎    ╎    ╎    16     @MathOptInterface/src/Bridges/Constraint/Constraint.jl:91; add_all_bridges(model::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, ::Type{Float64})
+     ╎    ╎    ╎     16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:399; add_bridge
+     ╎    ╎    ╎    ╎ 16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:431; has_bridge
+     ╎    ╎    ╎    ╎  16     @Base/array.jl:2404; findfirst
+   16╎    ╎    ╎    ╎   16     @Base/array.jl:2353; findnext(testf::Base.Fix2{typeof(isequal), Type{MathOptInterface.Bridges.Constraint.NormSpectralBridge{Float64}}}, A::Vector{Any}, start::Int64)
+     ╎    ╎    ╎    16     @MathOptInterface/src/Bridges/Constraint/Constraint.jl:97; add_all_bridges(model::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, ::Type{Float64})
+     ╎    ╎    ╎     16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:399; add_bridge
+     ╎    ╎    ╎    ╎ 16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:431; has_bridge
+     ╎    ╎    ╎    ╎  16     @Base/array.jl:2404; findfirst
+   16╎    ╎    ╎    ╎   16     @Base/array.jl:2353; findnext(testf::Base.Fix2{typeof(isequal), Type{MathOptInterface.Bridges.Constraint.QuadtoSOCBridge{Float64}}}, A::Vector{Any}, start::Int64)
+     ╎    ╎    ╎    64     @MathOptInterface/src/Bridges/Constraint/Constraint.jl:98; add_all_bridges(model::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, ::Type{Float64})
+     ╎    ╎    ╎     64     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:399; add_bridge
+     ╎    ╎    ╎    ╎ 64     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:431; has_bridge
+     ╎    ╎    ╎    ╎  64     @Base/array.jl:2404; findfirst
+   64╎    ╎    ╎    ╎   64     @Base/array.jl:2353; findnext(testf::Base.Fix2{typeof(isequal), Type{MathOptInterface.Bridges.Constraint.ReifiedAllDifferentToCountDistinctBridge{Float64, F} where F<:Union{MathOptInterface.VectorAffineFunction{Float64}, MathOptInterface.VectorOfVariables}}}, A::Vector{Any}, start::Int64)
+     ╎    ╎    ╎    16     @MathOptInterface/src/Bridges/Constraint/Constraint.jl:100; add_all_bridges(model::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, ::Type{Float64})
+     ╎    ╎    ╎     16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:399; add_bridge
+     ╎    ╎    ╎    ╎ 16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:431; has_bridge
+     ╎    ╎    ╎    ╎  16     @Base/array.jl:2404; findfirst
+   16╎    ╎    ╎    ╎   16     @Base/array.jl:2353; findnext(testf::Base.Fix2{typeof(isequal), Type{MathOptInterface.Bridges.Constraint.RelativeEntropyBridge{Float64}}}, A::Vector{Any}, start::Int64)
+     ╎    ╎    ╎    16     @MathOptInterface/src/Bridges/Constraint/Constraint.jl:101; add_all_bridges(model::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, ::Type{Float64})
+     ╎    ╎    ╎     16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:399; add_bridge
+     ╎    ╎    ╎    ╎ 16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:431; has_bridge
+     ╎    ╎    ╎    ╎  16     @Base/array.jl:2404; findfirst
+   16╎    ╎    ╎    ╎   16     @Base/array.jl:2353; findnext(testf::Base.Fix2{typeof(isequal), Type{MathOptInterface.Bridges.Constraint.RootDetBridge{Float64}}}, A::Vector{Any}, start::Int64)
+     ╎    ╎    ╎    16     @MathOptInterface/src/Bridges/Constraint/Constraint.jl:112; add_all_bridges(model::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, ::Type{Float64})
+     ╎    ╎    ╎     16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:399; add_bridge
+     ╎    ╎    ╎    ╎ 16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:431; has_bridge
+     ╎    ╎    ╎    ╎  16     @Base/array.jl:2404; findfirst
+   16╎    ╎    ╎    ╎   16     @Base/array.jl:2353; findnext(testf::Base.Fix2{typeof(isequal), Type{MathOptInterface.Bridges.Constraint.SemiToBinaryBridge{Float64, S} where S<:Union{MathOptInterface.Semicontinuous{Float64}, MathOptInterface.Semiinteger{Float64}}}}, A::Vector{Any}, start::Int64)
+     ╎    ╎    ╎    16     @MathOptInterface/src/Bridges/Constraint/Constraint.jl:116; add_all_bridges(model::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, ::Type{Float64})
+     ╎    ╎    ╎     16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:399; add_bridge
+     ╎    ╎    ╎    ╎ 16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:431; has_bridge
+     ╎    ╎    ╎    ╎  16     @Base/array.jl:2404; findfirst
+   16╎    ╎    ╎    ╎   16     @Base/array.jl:2353; findnext(testf::Base.Fix2{typeof(isequal), Type{MathOptInterface.Bridges.Constraint.SetDotInverseScalingBridge{Float64}}}, A::Vector{Any}, start::Int64)
+     ╎    ╎    ╎    16     @MathOptInterface/src/Bridges/Constraint/Constraint.jl:117; add_all_bridges(model::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, ::Type{Float64})
+     ╎    ╎    ╎     16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:399; add_bridge
+     ╎    ╎    ╎    ╎ 16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:431; has_bridge
+     ╎    ╎    ╎    ╎  16     @Base/array.jl:2404; findfirst
+   16╎    ╎    ╎    ╎   16     @Base/array.jl:2353; findnext(testf::Base.Fix2{typeof(isequal), Type{MathOptInterface.Bridges.Constraint.SetDotScalingBridge{Float64}}}, A::Vector{Any}, start::Int64)
+     ╎    ╎    ╎    16     @MathOptInterface/src/Bridges/Constraint/Constraint.jl:127; add_all_bridges(model::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, ::Type{Float64})
+     ╎    ╎    ╎     16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:399; add_bridge
+     ╎    ╎    ╎    ╎ 16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:431; has_bridge
+     ╎    ╎    ╎    ╎  16     @Base/array.jl:2404; findfirst
+   16╎    ╎    ╎    ╎   16     @Base/array.jl:2353; findnext(testf::Base.Fix2{typeof(isequal), Type{MathOptInterface.Bridges.Constraint.SOS1ToMILPBridge{Float64, F} where F<:Union{MathOptInterface.VectorAffineFunction{Float64}, MathOptInterface.VectorOfVariables}}}, A::Vector{Any}, start::Int64)
+     ╎    ╎    ╎    32     @MathOptInterface/src/Bridges/Constraint/Constraint.jl:128; add_all_bridges(model::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, ::Type{Float64})
+     ╎    ╎    ╎     32     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:399; add_bridge
+     ╎    ╎    ╎    ╎ 32     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:431; has_bridge
+     ╎    ╎    ╎    ╎  32     @Base/array.jl:2404; findfirst
+   32╎    ╎    ╎    ╎   32     @Base/array.jl:2353; findnext(testf::Base.Fix2{typeof(isequal), Type{MathOptInterface.Bridges.Constraint.SOS2ToMILPBridge{Float64, F} where F<:Union{MathOptInterface.VectorAffineFunction{Float64}, MathOptInterface.VectorOfVariables}}}, A::Vector{Any}, start::Int64)
+     ╎    ╎    ╎    16     @MathOptInterface/src/Bridges/Constraint/Constraint.jl:130; add_all_bridges(model::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, ::Type{Float64})
+     ╎    ╎    ╎     16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:399; add_bridge
+     ╎    ╎    ╎    ╎ 16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:431; has_bridge
+     ╎    ╎    ╎    ╎  16     @Base/array.jl:2404; findfirst
+   16╎    ╎    ╎    ╎   16     @Base/array.jl:2353; findnext(testf::Base.Fix2{typeof(isequal), Type{MathOptInterface.Bridges.Constraint.SplitComplexZerosBridge{Float64, F, G} where {F<:Union{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.ScalarQuadraticFunction{Float64}, MathOptInterface.VectorAffineFunction{Float64}, MathOptInterface.VectorQuadraticFunction{Float64}}, G<:Union{MathOptInterface.ScalarAffineFunction{ComplexF64}, MathOptInterface.ScalarQuadraticFunction{ComplexF…
+     ╎    ╎    ╎    48     @MathOptInterface/src/Bridges/Constraint/Constraint.jl:131; add_all_bridges(model::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, ::Type{Float64})
+     ╎    ╎    ╎     48     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:399; add_bridge
+     ╎    ╎    ╎    ╎ 48     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:431; has_bridge
+     ╎    ╎    ╎    ╎  48     @Base/array.jl:2404; findfirst
+   48╎    ╎    ╎    ╎   48     @Base/array.jl:2353; findnext(testf::Base.Fix2{typeof(isequal), Type{MathOptInterface.Bridges.Constraint.SplitHyperRectangleBridge{Float64}}}, A::Vector{Any}, start::Int64)
+     ╎    ╎    ╎    16     @MathOptInterface/src/Bridges/Constraint/Constraint.jl:132; add_all_bridges(model::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, ::Type{Float64})
+     ╎    ╎    ╎     16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:399; add_bridge
+     ╎    ╎    ╎    ╎ 16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:431; has_bridge
+     ╎    ╎    ╎    ╎  16     @Base/array.jl:2404; findfirst
+   16╎    ╎    ╎    ╎   16     @Base/array.jl:2353; findnext(testf::Base.Fix2{typeof(isequal), Type{MathOptInterface.Bridges.Constraint.SplitIntervalBridge{Float64}}}, A::Vector{Any}, start::Int64)
+     ╎    ╎    ╎    16     @MathOptInterface/src/Bridges/Constraint/Constraint.jl:134; add_all_bridges(model::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, ::Type{Float64})
+     ╎    ╎    ╎     16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:399; add_bridge
+     ╎    ╎    ╎    ╎ 16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:431; has_bridge
+     ╎    ╎    ╎    ╎  16     @Base/array.jl:2404; findfirst
+   16╎    ╎    ╎    ╎   16     @Base/array.jl:2353; findnext(testf::Base.Fix2{typeof(isequal), Type{MathOptInterface.Bridges.Constraint.TableToMILPBridge{Float64}}}, A::Vector{Any}, start::Int64)
+     ╎    ╎    ╎    16     @MathOptInterface/src/Bridges/Constraint/Constraint.jl:136; add_all_bridges(model::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, ::Type{Float64})
+     ╎    ╎    ╎     16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:399; add_bridge
+     ╎    ╎    ╎    ╎ 16     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:431; has_bridge
+     ╎    ╎    ╎    ╎  16     @Base/array.jl:2404; findfirst
+   16╎    ╎    ╎    ╎   16     @Base/array.jl:2353; findnext(testf::Base.Fix2{typeof(isequal), Type{MathOptInterface.Bridges.Constraint.FunctionConversionBridge{Float64, MathOptInterface.ScalarQuadraticFunction{Float64}}}}, A::Vector{Any}, start::Int64)
+     ╎    ╎    ╎    48     @MathOptInterface/src/Bridges/Constraint/Constraint.jl:137; add_all_bridges(model::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, ::Type{Float64})
+     ╎    ╎    ╎     48     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:399; add_bridge
+     ╎    ╎    ╎    ╎ 48     @MathOptInterface/src/Bridges/lazy_bridge_optimizer.jl:431; has_bridge
+     ╎    ╎    ╎    ╎  48     @Base/array.jl:2404; findfirst
+   48╎    ╎    ╎    ╎   48     @Base/array.jl:2353; findnext(testf::Base.Fix2{typeof(isequal), Type{MathOptInterface.Bridges.Constraint.FunctionConversionBridge{Float64, MathOptInterface.VectorQuadraticFunction{Float64}}}}, A::Vector{Any}, start::Int64)
+     ╎    ╎     80     @JuMP/src/optimizer_interface.jl:516; set_optimizer(model::JuMP.Model, optimizer_constructor::Any; add_bridges::Bool, kwargs::Base.Pairs{Symbol, Union{}, Tuple{}, @NamedTuple{}})
+     ╎    ╎    ╎ 80     @MathOptInterface/src/Utilities/cachingoptimizer.jl:140; MathOptInterface.Utilities.CachingOptimizer(cache::MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}, optimizer::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer})
+     ╎    ╎    ╎  80     @MathOptInterface/src/Utilities/copy/index_map.jl:32; IndexMap
+     ╎    ╎    ╎   80     @MathOptInterface/src/Utilities/DoubleDicts.jl:85; IndexDoubleDict
+   80╎    ╎    ╎    80     @Base/dict.jl:80; Dict
+     ╎    ╎ 14285  @COBREXA/src/solver.jl:137; optimization_model(cs::ConstraintTrees.ConstraintTree; objective::Nothing, optimizer::Type, sense::MathOptInterface.OptimizationSense)
+     ╎    ╎  14285  @JuMP/src/macros.jl:402; macro expansion
+     ╎    ╎   6805   @JuMP/src/Containers/container.jl:75; container
+     ╎    ╎    6805   @JuMP/src/Containers/container.jl:71; container
+     ╎    ╎     6805   @JuMP/src/Containers/container.jl:85; container
+     ╎    ╎    ╎ 6805   @Base/abstractarray.jl:3399; map
+     ╎    ╎    ╎  6805   @Base/array.jl:801; collect(itr::Base.Generator{JuMP.Containers.VectorizedProductIterator{Tuple{Base.OneTo{Int64}}}, JuMP.Containers.var"#84#85"{COBREXA.var"#4#6"{JuMP.Model}}})
+     ╎    ╎    ╎   6805   @Base/array.jl:827; collect_to_with_first!
+     ╎    ╎    ╎    6805   @Base/array.jl:849; collect_to!(dest::Vector{JuMP.VariableRef}, itr::Base.Generator{JuMP.Containers.VectorizedProductIterator{Tuple{Base.OneTo{Int64}}}, JuMP.Containers.var"#84#85"{COBREXA.var"#4#6"{JuMP.Model}}}, offs::Int64, st::Tuple{Tuple{Int64, Int64}})
+     ╎    ╎    ╎     6805   @Base/generator.jl:48; iterate
+     ╎    ╎    ╎    ╎ 6805   @JuMP/src/Containers/container.jl:85; #84
+     ╎    ╎    ╎    ╎  6805   @JuMP/src/Containers/macro.jl:559; #4
+     ╎    ╎    ╎    ╎   6805   @JuMP/src/macros/@variable.jl:278; macro expansion
+     ╎    ╎    ╎    ╎    1280   @Base/intfuncs.jl:921; string
+     ╎    ╎    ╎    ╎     1280   @Base/intfuncs.jl:931; string(n::Int64; base::Int64, pad::Int64)
+     ╎    ╎    ╎    ╎    ╎ 1280   @Base/intfuncs.jl:849; dec(x::UInt64, pad::Int64, neg::Bool)
+     ╎    ╎    ╎    ╎    ╎  1280   @Base/iobuffer.jl:44; StringMemory
+  152╎    ╎    ╎    ╎    ╎   152    @Base/strings/string.jl:109; _string_n
+ 1128╎    ╎    ╎    ╎    ╎   1128   @Base/strings/string.jl:119; unsafe_wrap
+     ╎    ╎    ╎    ╎    277    @Base/strings/substring.jl:236; string
+     ╎    ╎    ╎    ╎     277    @Base/strings/substring.jl:255; _string(::String, ::Vararg{String})
+  277╎    ╎    ╎    ╎    ╎ 277    @Base/strings/string.jl:109; _string_n
+ 5248╎    ╎    ╎    ╎    5248   @JuMP/src/variables.jl:2151; add_variable(model::JuMP.Model, v::JuMP.ScalarVariable{Float64, Float64, Float64, Float64}, name::String)
+     ╎    ╎   7480   @JuMP/src/Containers/macro.jl:96; macro expansion
+     ╎    ╎    7480   @ConstraintTrees/src/constraint_tree.jl:101; variable_count(x::ConstraintTrees.ConstraintTree)
+     ╎    ╎     7480   @Base/broadcast.jl:872; materialize(bc::Base.Broadcast.Broadcasted{Base.Broadcast.DefaultArrayStyle{1}, Nothing, typeof(ConstraintTrees.variable_count), Tuple{Vector{Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}}}})
+     ╎    ╎    ╎ 7480   @Base/broadcast.jl:897; copy(bc::Base.Broadcast.Broadcasted{Base.Broadcast.DefaultArrayStyle{1}, Tuple{Base.OneTo{Int64}}, typeof(ConstraintTrees.variable_count), Tuple{Vector{Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}}}})
+     ╎    ╎    ╎  7480   @Base/broadcast.jl:925; copyto!(dest::Vector{Int64}, bc::Base.Broadcast.Broadcasted{Base.Broadcast.DefaultArrayStyle{1}, Tuple{Base.OneTo{Int64}}, typeof(ConstraintTrees.variable_count), Tuple{Vector{Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}}}})
+     ╎    ╎    ╎   7480   @Base/broadcast.jl:972; copyto!(dest::Vector{Int64}, bc::Base.Broadcast.Broadcasted{Nothing, Tuple{Base.OneTo{Int64}}, typeof(ConstraintTrees.variable_count), Tuple{Vector{Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}}}})
+     ╎    ╎    ╎    7480   @Base/simdloop.jl:77; macro expansion
+     ╎    ╎    ╎     7480   @Base/broadcast.jl:973; macro expansion
+     ╎    ╎    ╎    ╎ 7480   @Base/broadcast.jl:610; getindex(bc::Base.Broadcast.Broadcasted{Nothing, Tuple{Base.OneTo{Int64}}, typeof(ConstraintTrees.variable_count), Tuple{Base.Broadcast.Extruded{Vector{Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}}, Tuple{Bool}, Tuple{Int64}}}}, Is::Int64)
+     ╎    ╎    ╎    ╎  7480   @Base/broadcast.jl:651; _broadcast_getindex
+     ╎    ╎    ╎    ╎   7480   @Base/broadcast.jl:678; _broadcast_getindex_evalf
+     ╎    ╎    ╎    ╎    7480   @ConstraintTrees/src/constraint_tree.jl:101; variable_count(x::ConstraintTrees.ConstraintTree)
+     ╎    ╎    ╎    ╎     7480   @Base/broadcast.jl:872; materialize(bc::Base.Broadcast.Broadcasted{Base.Broadcast.DefaultArrayStyle{1}, Nothing, typeof(ConstraintTrees.variable_count), Tuple{Vector{Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}}}})
+     ╎    ╎    ╎    ╎    ╎ 248    @Base/broadcast.jl:894; copy(bc::Base.Broadcast.Broadcasted{Base.Broadcast.DefaultArrayStyle{1}, Tuple{Base.OneTo{Int64}}, typeof(ConstraintTrees.variable_count), Tuple{Vector{Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}}}})
+     ╎    ╎    ╎    ╎    ╎  248    @Base/broadcast.jl:729; combine_eltypes(f::Function, args::Tuple{Vector{Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}}})
+   56╎    ╎    ╎    ╎    ╎   200    @Base/compiler/typeinfer.jl:1160; return_type(f::Any, t::DataType)
+  144╎    ╎    ╎    ╎    ╎    144    @Base/array.jl:415; getindex
+     ╎    ╎    ╎    ╎    ╎   48     @Base/compiler/typeinfer.jl:1161; return_type(f::Any, t::DataType)
+     ╎    ╎    ╎    ╎    ╎    48     @Base/compiler/typeinfer.jl:1187; return_type(interp::Core.Compiler.NativeInterpreter, t::DataType)
+     ╎    ╎    ╎    ╎    ╎     48     @Base/reflection.jl:1176; _methods_by_ftype
+     ╎    ╎    ╎    ╎    ╎    ╎ 48     @Base/reflection.jl:1179; _methods_by_ftype
+   48╎    ╎    ╎    ╎    ╎    ╎  48     @Base/reflection.jl:1182; _methods_by_ftype(t::Any, mt::Nothing, lim::Int64, world::UInt64, ambig::Bool, min::Core.Compiler.RefValue{UInt64}, max::Core.Compiler.RefValue{UInt64}, has_ambig::Ptr{Int32})
+     ╎    ╎    ╎    ╎    ╎ 7232   @Base/broadcast.jl:897; copy(bc::Base.Broadcast.Broadcasted{Base.Broadcast.DefaultArrayStyle{1}, Tuple{Base.OneTo{Int64}}, typeof(ConstraintTrees.variable_count), Tuple{Vector{Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}}}})
+     ╎    ╎    ╎    ╎    ╎  7200   @Base/broadcast.jl:925; copyto!(dest::Vector{Int64}, bc::Base.Broadcast.Broadcasted{Base.Broadcast.DefaultArrayStyle{1}, Tuple{Base.OneTo{Int64}}, typeof(ConstraintTrees.variable_count), Tuple{Vector{Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}}}})
+     ╎    ╎    ╎    ╎    ╎   7200   @Base/broadcast.jl:972; copyto!(dest::Vector{Int64}, bc::Base.Broadcast.Broadcasted{Nothing, Tuple{Base.OneTo{Int64}}, typeof(ConstraintTrees.variable_count), Tuple{Vector{Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}}}})
+     ╎    ╎    ╎    ╎    ╎    7200   @Base/simdloop.jl:77; macro expansion
+ 5896╎    ╎    ╎    ╎    ╎     7200   @Base/broadcast.jl:973; macro expansion
+     ╎    ╎    ╎    ╎    ╎    ╎ 1304   @Base/broadcast.jl:610; getindex(bc::Base.Broadcast.Broadcasted{Nothing, Tuple{Base.OneTo{Int64}}, typeof(ConstraintTrees.variable_count), Tuple{Base.Broadcast.Extruded{Vector{Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}}, Tuple{Bool}, Tuple{Int64}}}}, Is::Int64)
+     ╎    ╎    ╎    ╎    ╎    ╎  1304   @Base/broadcast.jl:651; _broadcast_getindex
+     ╎    ╎    ╎    ╎    ╎    ╎   1304   @Base/broadcast.jl:678; _broadcast_getindex_evalf
+     ╎    ╎    ╎    ╎    ╎    ╎    1304   @ConstraintTrees/src/constraint_tree.jl:101; variable_count(x::ConstraintTrees.ConstraintTree)
+     ╎    ╎    ╎    ╎    ╎    ╎     1304   @Base/broadcast.jl:872; materialize(bc::Base.Broadcast.Broadcasted{Base.Broadcast.DefaultArrayStyle{1}, Nothing, typeof(ConstraintTrees.variable_count), Tuple{Vector{Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎ 1304   @Base/broadcast.jl:897; copy(bc::Base.Broadcast.Broadcasted{Base.Broadcast.DefaultArrayStyle{1}, Tuple{Base.OneTo{Int64}}, typeof(ConstraintTrees.variable_count), Tuple{Vector{Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎  1304   @Base/broadcast.jl:925; copyto!(dest::Vector{Int64}, bc::Base.Broadcast.Broadcasted{Base.Broadcast.DefaultArrayStyle{1}, Tuple{Base.OneTo{Int64}}, typeof(ConstraintTrees.variable_count), Tuple{Vector{Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎   1304   @Base/broadcast.jl:972; copyto!(dest::Vector{Int64}, bc::Base.Broadcast.Broadcasted{Nothing, Tuple{Base.OneTo{Int64}}, typeof(ConstraintTrees.variable_count), Tuple{Vector{Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    1304   @Base/simdloop.jl:77; macro expansion
+ 1304╎    ╎    ╎    ╎    ╎    ╎    ╎     1304   @Base/broadcast.jl:973; macro expansion
+     ╎    ╎    ╎    ╎    ╎  32     @Base/broadcast.jl:223; similar
+     ╎    ╎    ╎    ╎    ╎   32     @Base/broadcast.jl:224; similar
+     ╎    ╎    ╎    ╎    ╎    32     @Base/abstractarray.jl:867; similar
+     ╎    ╎    ╎    ╎    ╎     32     @Base/abstractarray.jl:868; similar
+     ╎    ╎    ╎    ╎    ╎    ╎ 32     @Base/boot.jl:599; Array
+     ╎    ╎    ╎    ╎    ╎    ╎  32     @Base/boot.jl:591; Array
+   32╎    ╎    ╎    ╎    ╎    ╎   32     @Base/boot.jl:579; Array
+     ╎    ╎ 152800 @COBREXA/src/solver.jl:140; optimization_model(cs::ConstraintTrees.ConstraintTree; objective::Nothing, optimizer::Type, sense::MathOptInterface.OptimizationSense)
+     ╎    ╎  152800 @ConstraintTrees/src/tree.jl:288; traverse(f::COBREXA.var"#5#7"{Vector{JuMP.VariableRef}, JuMP.Model}, x::ConstraintTrees.ConstraintTree)
+     ╎    ╎   152800 @ConstraintTrees/src/tree.jl:281; (::ConstraintTrees.var"#go#81"{COBREXA.var"#5#7"{Vector{JuMP.VariableRef}, JuMP.Model}})(x::ConstraintTrees.ConstraintTree)
+ 3296╎    ╎    3328   @ConstraintTrees/src/tree.jl:279; (::ConstraintTrees.var"#go#81"{COBREXA.var"#5#7"{Vector{JuMP.VariableRef}, JuMP.Model}})(x::ConstraintTrees.ConstraintTree)
+     ╎    ╎     32     @ConstraintTrees/src/tree.jl:57; iterate(x::ConstraintTrees.ConstraintTree)
+   32╎    ╎    ╎ 32     @DataStructures/src/container_loops.jl:296; iterate(s::DataStructures.SortedDict{Symbol, Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}, Base.Order.ForwardOrdering})
+     ╎    ╎    136192 @ConstraintTrees/src/tree.jl:281; (::ConstraintTrees.var"#go#81"{COBREXA.var"#5#7"{Vector{JuMP.VariableRef}, JuMP.Model}})(x::ConstraintTrees.ConstraintTree)
+  512╎    ╎     512    @ConstraintTrees/src/tree.jl:279; (::ConstraintTrees.var"#go#81"{COBREXA.var"#5#7"{Vector{JuMP.VariableRef}, JuMP.Model}})(x::ConstraintTrees.ConstraintTree)
+     ╎    ╎     8816   @ConstraintTrees/src/tree.jl:281; (::ConstraintTrees.var"#go#81"{COBREXA.var"#5#7"{Vector{JuMP.VariableRef}, JuMP.Model}})(x::ConstraintTrees.ConstraintTree)
+     ╎    ╎    ╎ 8816   @ConstraintTrees/src/tree.jl:284; (::ConstraintTrees.var"#go#81"{COBREXA.var"#5#7"{Vector{JuMP.VariableRef}, JuMP.Model}})(x::ConstraintTrees.Constraint)
+     ╎    ╎    ╎  8816   @COBREXA/src/solver.jl:141; (::COBREXA.var"#5#7"{Vector{JuMP.VariableRef}, JuMP.Model})(c::ConstraintTrees.Constraint)
+     ╎    ╎    ╎   5488   @COBREXA/src/solver.jl:58; substitute_jump(val::ConstraintTrees.LinearValue, vars::Vector{JuMP.VariableRef})
+     ╎    ╎    ╎    5488   @JuMP/src/aff_expr.jl:330; GenericAffExpr
+     ╎    ╎    ╎     5488   @JuMP/src/aff_expr.jl:219; zero
+  544╎    ╎    ╎    ╎ 544    @JuMP/src/aff_expr.jl:140; GenericAffExpr
+     ╎    ╎    ╎    ╎ 4944   @OrderedCollections/src/ordered_dict.jl:23; OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}()
+     ╎    ╎    ╎    ╎  2160   @Base/array.jl:585; zeros
+     ╎    ╎    ╎    ╎   2160   @Base/array.jl:589; zeros
+     ╎    ╎    ╎    ╎    2160   @Base/boot.jl:591; Array
+     ╎    ╎    ╎    ╎     1520   @Base/boot.jl:578; Array
+ 1520╎    ╎    ╎    ╎    ╎ 1520   @Base/boot.jl:516; GenericMemory
+  640╎    ╎    ╎    ╎     640    @Base/boot.jl:579; Array
+     ╎    ╎    ╎    ╎  1184   @Base/boot.jl:601; Array
+ 1184╎    ╎    ╎    ╎   1184   @Base/boot.jl:579; Array
+ 1600╎    ╎    ╎    ╎  1600   @OrderedCollections/src/ordered_dict.jl:14; OrderedDict
+     ╎    ╎    ╎   3328   @COBREXA/src/solver.jl:63; substitute_jump(val::ConstraintTrees.LinearValue, vars::Vector{JuMP.VariableRef})
+     ╎    ╎    ╎    3328   @JuMP/src/aff_expr.jl:590; add_to_expression!
+     ╎    ╎    ╎     3328   @JuMP/src/aff_expr.jl:26; _add_or_set!(dict::OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}, k::JuMP.VariableRef, v::Float64)
+     ╎    ╎    ╎    ╎ 3328   @OrderedCollections/src/ordered_dict.jl:340; setindex!
+     ╎    ╎    ╎    ╎  2448   @OrderedCollections/src/ordered_dict.jl:312; _setindex!(h::OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}, v::Float64, key::JuMP.VariableRef, index::Int64)
+     ╎    ╎    ╎    ╎   2448   @Base/array.jl:1261; push!
+     ╎    ╎    ╎    ╎    2448   @Base/array.jl:1116; _growend!
+     ╎    ╎    ╎    ╎     2448   @Base/array.jl:1129; (::Base.var"#133#134"{Vector{JuMP.VariableRef}, Int64, Int64, Int64, Int64, Int64, Memory{JuMP.VariableRef}, MemoryRef{JuMP.VariableRef}})()
+     ╎    ╎    ╎    ╎    ╎ 2448   @Base/array.jl:1058; array_new_memory
+ 2448╎    ╎    ╎    ╎    ╎  2448   @Base/boot.jl:516; GenericMemory
+     ╎    ╎    ╎    ╎  880    @OrderedCollections/src/ordered_dict.jl:313; _setindex!(h::OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}, v::Float64, key::JuMP.VariableRef, index::Int64)
+     ╎    ╎    ╎    ╎   880    @Base/array.jl:1261; push!
+     ╎    ╎    ╎    ╎    880    @Base/array.jl:1116; _growend!
+     ╎    ╎    ╎    ╎     880    @Base/array.jl:1129; (::Base.var"#133#134"{Vector{Float64}, Int64, Int64, Int64, Int64, Int64, Memory{Float64}, MemoryRef{Float64}})()
+     ╎    ╎    ╎    ╎    ╎ 880    @Base/array.jl:1058; array_new_memory
+  880╎    ╎    ╎    ╎    ╎  880    @Base/boot.jl:516; GenericMemory
+     ╎    ╎     2944   @ConstraintTrees/src/tree.jl:282; (::ConstraintTrees.var"#go#81"{COBREXA.var"#5#7"{Vector{JuMP.VariableRef}, JuMP.Model}})(x::ConstraintTrees.ConstraintTree)
+  672╎    ╎    ╎ 2944   @ConstraintTrees/src/tree.jl:58; iterate(x::ConstraintTrees.ConstraintTree, st::DataStructures.SAIterationState)
+  832╎    ╎    ╎  832    @DataStructures/src/container_loops.jl:296; iterate(s::DataStructures.SortedDict{Symbol, Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}, Base.Order.ForwardOrdering}, state::DataStructures.SAIterationState)
+ 1440╎    ╎    ╎  1440   @DataStructures/src/container_loops.jl:302; iterate(s::DataStructures.SortedDict{Symbol, Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}, Base.Order.ForwardOrdering}, state::DataStructures.SAIterationState)
+     ╎    ╎     123920 @ConstraintTrees/src/tree.jl:284; (::ConstraintTrees.var"#go#81"{COBREXA.var"#5#7"{Vector{JuMP.VariableRef}, JuMP.Model}})(x::ConstraintTrees.Constraint)
+ 1856╎    ╎    ╎ 123920 @COBREXA/src/solver.jl:141; (::COBREXA.var"#5#7"{Vector{JuMP.VariableRef}, JuMP.Model})(c::ConstraintTrees.Constraint)
+     ╎    ╎    ╎  46512  @COBREXA/src/solver.jl:95; constraint_jump!(model::JuMP.Model, expr::JuMP.AffExpr, b::ConstraintTrees.EqualTo)
+     ╎    ╎    ╎   46512  @JuMP/src/macros.jl:402; macro expansion
+     ╎    ╎    ╎    33232  @JuMP/src/macros/@constraint.jl:171; macro expansion
+     ╎    ╎    ╎     33232  @JuMP/src/macros.jl:264; macro expansion
+     ╎    ╎    ╎    ╎ 33232  @MutableArithmetics/src/rewrite.jl:371; macro expansion
+     ╎    ╎    ╎    ╎  33232  @MutableArithmetics/src/interface.jl:347; copy_if_mutable
+     ╎    ╎    ╎    ╎   33232  @MutableArithmetics/src/interface.jl:336; copy_if_mutable_fallback
+     ╎    ╎    ╎    ╎    33232  @JuMP/src/mutable_arithmetics.jl:167; mutable_copy
+     ╎    ╎    ╎    ╎     33232  @JuMP/src/aff_expr.jl:395; map_coefficients
+     ╎    ╎    ╎    ╎    ╎ 16048  @JuMP/src/aff_expr.jl:399; _map_aff(f::typeof(MutableArithmetics.copy_if_mutable), constant::Float64, a::JuMP.AffExpr)
+     ╎    ╎    ╎    ╎    ╎  16048  @OrderedCollections/src/ordered_dict.jl:23; OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}()
+     ╎    ╎    ╎    ╎    ╎   8240   @Base/array.jl:585; zeros
+     ╎    ╎    ╎    ╎    ╎    8240   @Base/array.jl:589; zeros
+     ╎    ╎    ╎    ╎    ╎     8240   @Base/boot.jl:591; Array
+     ╎    ╎    ╎    ╎    ╎    ╎ 6160   @Base/boot.jl:578; Array
+ 6160╎    ╎    ╎    ╎    ╎    ╎  6160   @Base/boot.jl:516; GenericMemory
+ 2080╎    ╎    ╎    ╎    ╎    ╎ 2080   @Base/boot.jl:579; Array
+     ╎    ╎    ╎    ╎    ╎   3840   @Base/boot.jl:601; Array
+ 3840╎    ╎    ╎    ╎    ╎    3840   @Base/boot.jl:579; Array
+ 3968╎    ╎    ╎    ╎    ╎   3968   @OrderedCollections/src/ordered_dict.jl:14; OrderedDict
+     ╎    ╎    ╎    ╎    ╎ 15232  @JuMP/src/aff_expr.jl:401; _map_aff(f::typeof(MutableArithmetics.copy_if_mutable), constant::Float64, a::JuMP.AffExpr)
+     ╎    ╎    ╎    ╎    ╎  15232  @OrderedCollections/src/ordered_dict.jl:340; setindex!
+     ╎    ╎    ╎    ╎    ╎   5136   @OrderedCollections/src/ordered_dict.jl:312; _setindex!(h::OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}, v::Float64, key::JuMP.VariableRef, index::Int64)
+     ╎    ╎    ╎    ╎    ╎    5136   @Base/array.jl:1261; push!
+     ╎    ╎    ╎    ╎    ╎     5136   @Base/array.jl:1116; _growend!
+     ╎    ╎    ╎    ╎    ╎    ╎ 5136   @Base/array.jl:1129; (::Base.var"#133#134"{Vector{JuMP.VariableRef}, Int64, Int64, Int64, Int64, Int64, Memory{JuMP.VariableRef}, MemoryRef{JuMP.VariableRef}})()
+     ╎    ╎    ╎    ╎    ╎    ╎  5136   @Base/array.jl:1058; array_new_memory
+ 5136╎    ╎    ╎    ╎    ╎    ╎   5136   @Base/boot.jl:516; GenericMemory
+     ╎    ╎    ╎    ╎    ╎   6944   @OrderedCollections/src/ordered_dict.jl:313; _setindex!(h::OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}, v::Float64, key::JuMP.VariableRef, index::Int64)
+     ╎    ╎    ╎    ╎    ╎    6944   @Base/array.jl:1261; push!
+     ╎    ╎    ╎    ╎    ╎     6944   @Base/array.jl:1116; _growend!
+     ╎    ╎    ╎    ╎    ╎    ╎ 6944   @Base/array.jl:1129; (::Base.var"#133#134"{Vector{Float64}, Int64, Int64, Int64, Int64, Int64, Memory{Float64}, MemoryRef{Float64}})()
+     ╎    ╎    ╎    ╎    ╎    ╎  6944   @Base/array.jl:1058; array_new_memory
+ 6944╎    ╎    ╎    ╎    ╎    ╎   6944   @Base/boot.jl:516; GenericMemory
+     ╎    ╎    ╎    ╎    ╎   3152   @OrderedCollections/src/ordered_dict.jl:323; _setindex!(h::OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}, v::Float64, key::JuMP.VariableRef, index::Int64)
+     ╎    ╎    ╎    ╎    ╎    3152   @OrderedCollections/src/ordered_dict.jl:142; rehash!(h::OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}, newsz::Int64)
+     ╎    ╎    ╎    ╎    ╎     3152   @Base/array.jl:585; zeros
+     ╎    ╎    ╎    ╎    ╎    ╎ 3152   @Base/array.jl:589; zeros
+     ╎    ╎    ╎    ╎    ╎    ╎  3152   @Base/boot.jl:591; Array
+     ╎    ╎    ╎    ╎    ╎    ╎   3120   @Base/boot.jl:578; Array
+ 3120╎    ╎    ╎    ╎    ╎    ╎    3120   @Base/boot.jl:516; GenericMemory
+   32╎    ╎    ╎    ╎    ╎    ╎   32     @Base/boot.jl:579; Array
+     ╎    ╎    ╎    ╎    ╎ 1952   @JuMP/src/aff_expr.jl:403; _map_aff(f::typeof(MutableArithmetics.copy_if_mutable), constant::Float64, a::JuMP.AffExpr)
+ 1952╎    ╎    ╎    ╎    ╎  1952   @JuMP/src/aff_expr.jl:140; GenericAffExpr
+     ╎    ╎    ╎    13280  @JuMP/src/macros/@constraint.jl:173; macro expansion
+     ╎    ╎    ╎     5312   @JuMP/src/constraints.jl:1038; add_constraint(model::JuMP.Model, con::JuMP.ScalarConstraint{JuMP.AffExpr, MathOptInterface.EqualTo{Float64}}, name::String)
+     ╎    ╎    ╎    ╎ 5312   @JuMP/src/constraints.jl:760; moi_function
+     ╎    ╎    ╎    ╎  5312   @JuMP/src/aff_expr.jl:861; moi_function
+     ╎    ╎    ╎    ╎   3296   @JuMP/src/aff_expr.jl:753; MathOptInterface.ScalarAffineFunction(a::JuMP.AffExpr)
+     ╎    ╎    ╎    ╎    3296   @Base/array.jl:679; _array_for
+     ╎    ╎    ╎    ╎     3296   @Base/array.jl:675; _array_for
+     ╎    ╎    ╎    ╎    ╎ 1536   @Base/boot.jl:578; Array
+ 1536╎    ╎    ╎    ╎    ╎  1536   @Base/boot.jl:516; GenericMemory
+ 1760╎    ╎    ╎    ╎    ╎ 1760   @Base/boot.jl:579; Array
+     ╎    ╎    ╎    ╎   2016   @JuMP/src/aff_expr.jl:756; MathOptInterface.ScalarAffineFunction(a::JuMP.AffExpr)
+ 2016╎    ╎    ╎    ╎    2016   @MathOptInterface/src/functions.jl:140; ScalarAffineFunction
+ 2224╎    ╎    ╎     7968   @JuMP/src/constraints.jl:1039; add_constraint(model::JuMP.Model, con::JuMP.ScalarConstraint{JuMP.AffExpr, MathOptInterface.EqualTo{Float64}}, name::String)
+     ╎    ╎    ╎    ╎ 5744   @JuMP/src/constraints.jl:1016; _moi_add_constraint(model::MathOptInterface.Utilities.CachingOptimizer{MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}}, f::MathOptInterface.ScalarAffineFunction{Float64}, s::MathOptInterface.EqualTo{Float64})
+     ╎    ╎    ╎    ╎  5744   @MathOptInterface/src/Utilities/cachingoptimizer.jl:586; add_constraint(m::MathOptInterface.Utilities.CachingOptimizer{MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}}, func::MathOptInterface.ScalarAffineFunction{Float64}, set::MathOptInterface.EqualTo{Float64})
+     ╎    ╎    ╎    ╎   5744   @MathOptInterface/src/Utilities/universalfallback.jl:851; add_constraint(uf::MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}, func::MathOptInterface.ScalarAffineFunction{Float64}, set::MathOptInterface.EqualTo{Float64})
+     ╎    ╎    ╎    ╎    5744   @MathOptInterface/src/Utilities/model.jl:325; add_constraint(model::MathOptInterface.Utilities.Model{Float64}, func::MathOptInterface.ScalarAffineFunction{Float64}, set::MathOptInterface.EqualTo{Float64})
+     ╎    ╎    ╎    ╎     5744   @MathOptInterface/src/Utilities/struct_of_constraints.jl:67; add_constraint(model::MathOptInterface.Utilities.ModelFunctionConstraints{Float64}, func::MathOptInterface.ScalarAffineFunction{Float64}, set::MathOptInterface.EqualTo{Float64})
+     ╎    ╎    ╎    ╎    ╎ 5744   @MathOptInterface/src/Utilities/struct_of_constraints.jl:67; add_constraint(model::MathOptInterface.Utilities.ModelScalarConstraints{Float64, MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.ZeroOne}, MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.Integer}, MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFun…
+     ╎    ╎    ╎    ╎    ╎  5744   @MathOptInterface/src/Utilities/vector_of_constraints.jl:80; add_constraint(v::MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.EqualTo{Float64}}, func::MathOptInterface.ScalarAffineFunction{Float64}, set::MathOptInterface.EqualTo{Float64})
+     ╎    ╎    ╎    ╎    ╎   5744   @MathOptInterface/src/Utilities/functions.jl:1050; canonical
+     ╎    ╎    ╎    ╎    ╎    5744   @MathOptInterface/src/functions.jl:147; copy
+ 2704╎    ╎    ╎    ╎    ╎     2704   @Base/array.jl:350; copy
+ 1536╎    ╎    ╎    ╎    ╎     1536   @Base/array.jl:351; copy
+ 1504╎    ╎    ╎    ╎    ╎     1504   @MathOptInterface/src/functions.jl:140; ScalarAffineFunction
+     ╎    ╎    ╎  16368  @COBREXA/src/solver.jl:104; constraint_jump!(model::JuMP.Model, expr::JuMP.AffExpr, b::ConstraintTrees.Between)
+     ╎    ╎    ╎   16368  @JuMP/src/macros.jl:402; macro expansion
+     ╎    ╎    ╎    11392  @JuMP/src/macros/@constraint.jl:171; macro expansion
+     ╎    ╎    ╎     11392  @JuMP/src/macros.jl:264; macro expansion
+     ╎    ╎    ╎    ╎ 11392  @MutableArithmetics/src/rewrite.jl:371; macro expansion
+     ╎    ╎    ╎    ╎  11392  @MutableArithmetics/src/interface.jl:347; copy_if_mutable
+     ╎    ╎    ╎    ╎   11392  @MutableArithmetics/src/interface.jl:336; copy_if_mutable_fallback
+     ╎    ╎    ╎    ╎    11392  @JuMP/src/mutable_arithmetics.jl:167; mutable_copy
+     ╎    ╎    ╎    ╎     11392  @JuMP/src/aff_expr.jl:395; map_coefficients
+     ╎    ╎    ╎    ╎    ╎ 5664   @JuMP/src/aff_expr.jl:399; _map_aff(f::typeof(MutableArithmetics.copy_if_mutable), constant::Float64, a::JuMP.AffExpr)
+     ╎    ╎    ╎    ╎    ╎  5664   @OrderedCollections/src/ordered_dict.jl:23; OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}()
+     ╎    ╎    ╎    ╎    ╎   2784   @Base/array.jl:585; zeros
+     ╎    ╎    ╎    ╎    ╎    2784   @Base/array.jl:589; zeros
+     ╎    ╎    ╎    ╎    ╎     2784   @Base/boot.jl:591; Array
+     ╎    ╎    ╎    ╎    ╎    ╎ 2080   @Base/boot.jl:578; Array
+ 2080╎    ╎    ╎    ╎    ╎    ╎  2080   @Base/boot.jl:516; GenericMemory
+  704╎    ╎    ╎    ╎    ╎    ╎ 704    @Base/boot.jl:579; Array
+     ╎    ╎    ╎    ╎    ╎   1536   @Base/boot.jl:601; Array
+ 1536╎    ╎    ╎    ╎    ╎    1536   @Base/boot.jl:579; Array
+ 1344╎    ╎    ╎    ╎    ╎   1344   @OrderedCollections/src/ordered_dict.jl:14; OrderedDict
+     ╎    ╎    ╎    ╎    ╎ 5248   @JuMP/src/aff_expr.jl:401; _map_aff(f::typeof(MutableArithmetics.copy_if_mutable), constant::Float64, a::JuMP.AffExpr)
+     ╎    ╎    ╎    ╎    ╎  5248   @OrderedCollections/src/ordered_dict.jl:340; setindex!
+     ╎    ╎    ╎    ╎    ╎   3168   @OrderedCollections/src/ordered_dict.jl:312; _setindex!(h::OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}, v::Float64, key::JuMP.VariableRef, index::Int64)
+     ╎    ╎    ╎    ╎    ╎    3168   @Base/array.jl:1261; push!
+     ╎    ╎    ╎    ╎    ╎     3168   @Base/array.jl:1116; _growend!
+     ╎    ╎    ╎    ╎    ╎    ╎ 3168   @Base/array.jl:1129; (::Base.var"#133#134"{Vector{JuMP.VariableRef}, Int64, Int64, Int64, Int64, Int64, Memory{JuMP.VariableRef}, MemoryRef{JuMP.VariableRef}})()
+     ╎    ╎    ╎    ╎    ╎    ╎  3168   @Base/array.jl:1058; array_new_memory
+ 3168╎    ╎    ╎    ╎    ╎    ╎   3168   @Base/boot.jl:516; GenericMemory
+     ╎    ╎    ╎    ╎    ╎   2080   @OrderedCollections/src/ordered_dict.jl:313; _setindex!(h::OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}, v::Float64, key::JuMP.VariableRef, index::Int64)
+     ╎    ╎    ╎    ╎    ╎    2080   @Base/array.jl:1261; push!
+     ╎    ╎    ╎    ╎    ╎     2080   @Base/array.jl:1116; _growend!
+     ╎    ╎    ╎    ╎    ╎    ╎ 2080   @Base/array.jl:1129; (::Base.var"#133#134"{Vector{Float64}, Int64, Int64, Int64, Int64, Int64, Memory{Float64}, MemoryRef{Float64}})()
+     ╎    ╎    ╎    ╎    ╎    ╎  2080   @Base/array.jl:1058; array_new_memory
+ 2080╎    ╎    ╎    ╎    ╎    ╎   2080   @Base/boot.jl:516; GenericMemory
+     ╎    ╎    ╎    ╎    ╎ 480    @JuMP/src/aff_expr.jl:403; _map_aff(f::typeof(MutableArithmetics.copy_if_mutable), constant::Float64, a::JuMP.AffExpr)
+  480╎    ╎    ╎    ╎    ╎  480    @JuMP/src/aff_expr.jl:140; GenericAffExpr
+     ╎    ╎    ╎    4976   @JuMP/src/macros/@constraint.jl:173; macro expansion
+     ╎    ╎    ╎     2080   @JuMP/src/constraints.jl:1038; add_constraint(model::JuMP.Model, con::JuMP.ScalarConstraint{JuMP.AffExpr, MathOptInterface.GreaterThan{Float64}}, name::String)
+     ╎    ╎    ╎    ╎ 2080   @JuMP/src/constraints.jl:760; moi_function
+     ╎    ╎    ╎    ╎  2080   @JuMP/src/aff_expr.jl:861; moi_function
+     ╎    ╎    ╎    ╎   1280   @JuMP/src/aff_expr.jl:753; MathOptInterface.ScalarAffineFunction(a::JuMP.AffExpr)
+     ╎    ╎    ╎    ╎    1280   @Base/array.jl:679; _array_for
+     ╎    ╎    ╎    ╎     1280   @Base/array.jl:675; _array_for
+     ╎    ╎    ╎    ╎    ╎ 608    @Base/boot.jl:578; Array
+  608╎    ╎    ╎    ╎    ╎  608    @Base/boot.jl:516; GenericMemory
+  672╎    ╎    ╎    ╎    ╎ 672    @Base/boot.jl:579; Array
+     ╎    ╎    ╎    ╎   800    @JuMP/src/aff_expr.jl:756; MathOptInterface.ScalarAffineFunction(a::JuMP.AffExpr)
+  800╎    ╎    ╎    ╎    800    @MathOptInterface/src/functions.jl:140; ScalarAffineFunction
+  720╎    ╎    ╎     2896   @JuMP/src/constraints.jl:1039; add_constraint(model::JuMP.Model, con::JuMP.ScalarConstraint{JuMP.AffExpr, MathOptInterface.GreaterThan{Float64}}, name::String)
+     ╎    ╎    ╎    ╎ 2176   @JuMP/src/constraints.jl:1016; _moi_add_constraint(model::MathOptInterface.Utilities.CachingOptimizer{MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}}, f::MathOptInterface.ScalarAffineFunction{Float64}, s::MathOptInterface.GreaterThan{Float64})
+     ╎    ╎    ╎    ╎  2176   @MathOptInterface/src/Utilities/cachingoptimizer.jl:586; add_constraint(m::MathOptInterface.Utilities.CachingOptimizer{MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}}, func::MathOptInterface.ScalarAffineFunction{Float64}, set::MathOptInterface.GreaterThan{Float64})
+     ╎    ╎    ╎    ╎   2176   @MathOptInterface/src/Utilities/universalfallback.jl:851; add_constraint(uf::MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}, func::MathOptInterface.ScalarAffineFunction{Float64}, set::MathOptInterface.GreaterThan{Float64})
+     ╎    ╎    ╎    ╎    2176   @MathOptInterface/src/Utilities/model.jl:325; add_constraint(model::MathOptInterface.Utilities.Model{Float64}, func::MathOptInterface.ScalarAffineFunction{Float64}, set::MathOptInterface.GreaterThan{Float64})
+     ╎    ╎    ╎    ╎     2176   @MathOptInterface/src/Utilities/struct_of_constraints.jl:67; add_constraint(model::MathOptInterface.Utilities.ModelFunctionConstraints{Float64}, func::MathOptInterface.ScalarAffineFunction{Float64}, set::MathOptInterface.GreaterThan{Float64})
+     ╎    ╎    ╎    ╎    ╎ 2176   @MathOptInterface/src/Utilities/struct_of_constraints.jl:67; add_constraint(model::MathOptInterface.Utilities.ModelScalarConstraints{Float64, MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.ZeroOne}, MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.Integer}, MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFun…
+     ╎    ╎    ╎    ╎    ╎  2176   @MathOptInterface/src/Utilities/vector_of_constraints.jl:80; add_constraint(v::MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.GreaterThan{Float64}}, func::MathOptInterface.ScalarAffineFunction{Float64}, set::MathOptInterface.GreaterThan{Float64})
+     ╎    ╎    ╎    ╎    ╎   2176   @MathOptInterface/src/Utilities/functions.jl:1050; canonical
+     ╎    ╎    ╎    ╎    ╎    2176   @MathOptInterface/src/functions.jl:147; copy
+  608╎    ╎    ╎    ╎    ╎     608    @Base/array.jl:350; copy
+  800╎    ╎    ╎    ╎    ╎     800    @Base/array.jl:351; copy
+  768╎    ╎    ╎    ╎    ╎     768    @MathOptInterface/src/functions.jl:140; ScalarAffineFunction
+     ╎    ╎    ╎  16912  @COBREXA/src/solver.jl:105; constraint_jump!(model::JuMP.Model, expr::JuMP.AffExpr, b::ConstraintTrees.Between)
+     ╎    ╎    ╎   16048  @JuMP/src/macros.jl:402; macro expansion
+     ╎    ╎    ╎    11216  @JuMP/src/macros/@constraint.jl:171; macro expansion
+     ╎    ╎    ╎     11216  @JuMP/src/macros.jl:264; macro expansion
+     ╎    ╎    ╎    ╎ 11216  @MutableArithmetics/src/rewrite.jl:371; macro expansion
+     ╎    ╎    ╎    ╎  11216  @MutableArithmetics/src/interface.jl:347; copy_if_mutable
+     ╎    ╎    ╎    ╎   11216  @MutableArithmetics/src/interface.jl:336; copy_if_mutable_fallback
+     ╎    ╎    ╎    ╎    11216  @JuMP/src/mutable_arithmetics.jl:167; mutable_copy
+     ╎    ╎    ╎    ╎     11216  @JuMP/src/aff_expr.jl:395; map_coefficients
+     ╎    ╎    ╎    ╎    ╎ 5216   @JuMP/src/aff_expr.jl:399; _map_aff(f::typeof(MutableArithmetics.copy_if_mutable), constant::Float64, a::JuMP.AffExpr)
+     ╎    ╎    ╎    ╎    ╎  5216   @OrderedCollections/src/ordered_dict.jl:23; OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}()
+     ╎    ╎    ╎    ╎    ╎   1952   @Base/array.jl:585; zeros
+     ╎    ╎    ╎    ╎    ╎    1952   @Base/array.jl:589; zeros
+     ╎    ╎    ╎    ╎    ╎     1952   @Base/boot.jl:591; Array
+     ╎    ╎    ╎    ╎    ╎    ╎ 1440   @Base/boot.jl:578; Array
+ 1440╎    ╎    ╎    ╎    ╎    ╎  1440   @Base/boot.jl:516; GenericMemory
+  512╎    ╎    ╎    ╎    ╎    ╎ 512    @Base/boot.jl:579; Array
+     ╎    ╎    ╎    ╎    ╎   1664   @Base/boot.jl:601; Array
+ 1664╎    ╎    ╎    ╎    ╎    1664   @Base/boot.jl:579; Array
+ 1600╎    ╎    ╎    ╎    ╎   1600   @OrderedCollections/src/ordered_dict.jl:14; OrderedDict
+     ╎    ╎    ╎    ╎    ╎ 5360   @JuMP/src/aff_expr.jl:401; _map_aff(f::typeof(MutableArithmetics.copy_if_mutable), constant::Float64, a::JuMP.AffExpr)
+     ╎    ╎    ╎    ╎    ╎  5360   @OrderedCollections/src/ordered_dict.jl:340; setindex!
+     ╎    ╎    ╎    ╎    ╎   3600   @OrderedCollections/src/ordered_dict.jl:312; _setindex!(h::OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}, v::Float64, key::JuMP.VariableRef, index::Int64)
+     ╎    ╎    ╎    ╎    ╎    3600   @Base/array.jl:1261; push!
+     ╎    ╎    ╎    ╎    ╎     3600   @Base/array.jl:1116; _growend!
+     ╎    ╎    ╎    ╎    ╎    ╎ 3600   @Base/array.jl:1129; (::Base.var"#133#134"{Vector{JuMP.VariableRef}, Int64, Int64, Int64, Int64, Int64, Memory{JuMP.VariableRef}, MemoryRef{JuMP.VariableRef}})()
+     ╎    ╎    ╎    ╎    ╎    ╎  3600   @Base/array.jl:1058; array_new_memory
+ 3600╎    ╎    ╎    ╎    ╎    ╎   3600   @Base/boot.jl:516; GenericMemory
+     ╎    ╎    ╎    ╎    ╎   1760   @OrderedCollections/src/ordered_dict.jl:313; _setindex!(h::OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}, v::Float64, key::JuMP.VariableRef, index::Int64)
+     ╎    ╎    ╎    ╎    ╎    1760   @Base/array.jl:1261; push!
+     ╎    ╎    ╎    ╎    ╎     1760   @Base/array.jl:1116; _growend!
+     ╎    ╎    ╎    ╎    ╎    ╎ 1760   @Base/array.jl:1129; (::Base.var"#133#134"{Vector{Float64}, Int64, Int64, Int64, Int64, Int64, Memory{Float64}, MemoryRef{Float64}})()
+     ╎    ╎    ╎    ╎    ╎    ╎  1760   @Base/array.jl:1058; array_new_memory
+ 1760╎    ╎    ╎    ╎    ╎    ╎   1760   @Base/boot.jl:516; GenericMemory
+     ╎    ╎    ╎    ╎    ╎ 640    @JuMP/src/aff_expr.jl:403; _map_aff(f::typeof(MutableArithmetics.copy_if_mutable), constant::Float64, a::JuMP.AffExpr)
+  640╎    ╎    ╎    ╎    ╎  640    @JuMP/src/aff_expr.jl:140; GenericAffExpr
+     ╎    ╎    ╎    4832   @JuMP/src/macros/@constraint.jl:173; macro expansion
+     ╎    ╎    ╎     2080   @JuMP/src/constraints.jl:1038; add_constraint(model::JuMP.Model, con::JuMP.ScalarConstraint{JuMP.AffExpr, MathOptInterface.LessThan{Float64}}, name::String)
+     ╎    ╎    ╎    ╎ 2080   @JuMP/src/constraints.jl:760; moi_function
+     ╎    ╎    ╎    ╎  2080   @JuMP/src/aff_expr.jl:861; moi_function
+     ╎    ╎    ╎    ╎   1280   @JuMP/src/aff_expr.jl:753; MathOptInterface.ScalarAffineFunction(a::JuMP.AffExpr)
+     ╎    ╎    ╎    ╎    1280   @Base/array.jl:679; _array_for
+     ╎    ╎    ╎    ╎     1280   @Base/array.jl:675; _array_for
+     ╎    ╎    ╎    ╎    ╎ 640    @Base/boot.jl:578; Array
+  640╎    ╎    ╎    ╎    ╎  640    @Base/boot.jl:516; GenericMemory
+  640╎    ╎    ╎    ╎    ╎ 640    @Base/boot.jl:579; Array
+     ╎    ╎    ╎    ╎   800    @JuMP/src/aff_expr.jl:756; MathOptInterface.ScalarAffineFunction(a::JuMP.AffExpr)
+  800╎    ╎    ╎    ╎    800    @MathOptInterface/src/functions.jl:140; ScalarAffineFunction
+  800╎    ╎    ╎     2752   @JuMP/src/constraints.jl:1039; add_constraint(model::JuMP.Model, con::JuMP.ScalarConstraint{JuMP.AffExpr, MathOptInterface.LessThan{Float64}}, name::String)
+     ╎    ╎    ╎    ╎ 1952   @JuMP/src/constraints.jl:1016; _moi_add_constraint(model::MathOptInterface.Utilities.CachingOptimizer{MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}}, f::MathOptInterface.ScalarAffineFunction{Float64}, s::MathOptInterface.LessThan{Float64})
+     ╎    ╎    ╎    ╎  1952   @MathOptInterface/src/Utilities/cachingoptimizer.jl:586; add_constraint(m::MathOptInterface.Utilities.CachingOptimizer{MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}}, func::MathOptInterface.ScalarAffineFunction{Float64}, set::MathOptInterface.LessThan{Float64})
+     ╎    ╎    ╎    ╎   1952   @MathOptInterface/src/Utilities/universalfallback.jl:851; add_constraint(uf::MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}, func::MathOptInterface.ScalarAffineFunction{Float64}, set::MathOptInterface.LessThan{Float64})
+     ╎    ╎    ╎    ╎    1920   @MathOptInterface/src/Utilities/model.jl:325; add_constraint(model::MathOptInterface.Utilities.Model{Float64}, func::MathOptInterface.ScalarAffineFunction{Float64}, set::MathOptInterface.LessThan{Float64})
+     ╎    ╎    ╎    ╎     1920   @MathOptInterface/src/Utilities/struct_of_constraints.jl:67; add_constraint(model::MathOptInterface.Utilities.ModelFunctionConstraints{Float64}, func::MathOptInterface.ScalarAffineFunction{Float64}, set::MathOptInterface.LessThan{Float64})
+     ╎    ╎    ╎    ╎    ╎ 1920   @MathOptInterface/src/Utilities/struct_of_constraints.jl:67; add_constraint(model::MathOptInterface.Utilities.ModelScalarConstraints{Float64, MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.ZeroOne}, MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.Integer}, MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFun…
+     ╎    ╎    ╎    ╎    ╎  1920   @MathOptInterface/src/Utilities/vector_of_constraints.jl:80; add_constraint(v::MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.LessThan{Float64}}, func::MathOptInterface.ScalarAffineFunction{Float64}, set::MathOptInterface.LessThan{Float64})
+     ╎    ╎    ╎    ╎    ╎   1920   @MathOptInterface/src/Utilities/functions.jl:1050; canonical
+     ╎    ╎    ╎    ╎    ╎    1920   @MathOptInterface/src/functions.jl:147; copy
+  608╎    ╎    ╎    ╎    ╎     608    @Base/array.jl:350; copy
+  640╎    ╎    ╎    ╎    ╎     640    @Base/array.jl:351; copy
+  672╎    ╎    ╎    ╎    ╎     672    @MathOptInterface/src/functions.jl:140; ScalarAffineFunction
+     ╎    ╎    ╎    ╎    32     @MathOptInterface/src/Utilities/universalfallback.jl:809; constraints
+     ╎    ╎    ╎    ╎     32     @MathOptInterface/src/Utilities/model.jl:310; supports_constraint
+     ╎    ╎    ╎    ╎    ╎ 32     @MathOptInterface/src/Utilities/struct_of_constraints.jl:364; supports_constraint
+     ╎    ╎    ╎    ╎    ╎  32     @MathOptInterface/src/Utilities/struct_of_constraints.jl:364; supports_constraint
+     ╎    ╎    ╎    ╎    ╎   32     @MathOptInterface/src/Utilities/struct_of_constraints.jl:324; constraints
+     ╎    ╎    ╎    ╎    ╎    32     @MathOptInterface/src/Utilities/vector_of_constraints.jl:52; VectorOfConstraints
+     ╎    ╎    ╎    ╎    ╎     32     @MathOptInterface/src/Utilities/CleverDicts.jl:91; CleverDict
+     ╎    ╎    ╎    ╎    ╎    ╎ 32     @MathOptInterface/src/Utilities/CleverDicts.jl:91; CleverDict
+     ╎    ╎    ╎    ╎    ╎    ╎  32     @OrderedCollections/src/ordered_dict.jl:23; OrderedCollections.OrderedDict{MathOptInterface.ConstraintIndex{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.LessThan{Float64}}, Tuple{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.LessThan{Float64}}}()
+     ╎    ╎    ╎    ╎    ╎    ╎   32     @Base/array.jl:585; zeros
+     ╎    ╎    ╎    ╎    ╎    ╎    32     @Base/array.jl:589; zeros
+     ╎    ╎    ╎    ╎    ╎    ╎     32     @Base/boot.jl:591; Array
+   32╎    ╎    ╎    ╎    ╎    ╎    ╎ 32     @Base/boot.jl:579; Array
+     ╎    ╎    ╎   864    @JuMP/src/macros.jl:420; macro expansion
+  864╎    ╎    ╎    864    @JuMP/src/macros.jl:438; _add_or_set_macro_time
+     ╎    ╎    ╎  22976  @COBREXA/src/solver.jl:58; substitute_jump(val::ConstraintTrees.LinearValue, vars::Vector{JuMP.VariableRef})
+     ╎    ╎    ╎   22976  @JuMP/src/aff_expr.jl:330; GenericAffExpr
+     ╎    ╎    ╎    22976  @JuMP/src/aff_expr.jl:219; zero
+ 3232╎    ╎    ╎     3232   @JuMP/src/aff_expr.jl:140; GenericAffExpr
+     ╎    ╎    ╎     19744  @OrderedCollections/src/ordered_dict.jl:23; OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}()
+     ╎    ╎    ╎    ╎ 8192   @Base/array.jl:585; zeros
+     ╎    ╎    ╎    ╎  8192   @Base/array.jl:589; zeros
+     ╎    ╎    ╎    ╎   8192   @Base/boot.jl:591; Array
+     ╎    ╎    ╎    ╎    5440   @Base/boot.jl:578; Array
+ 5440╎    ╎    ╎    ╎     5440   @Base/boot.jl:516; GenericMemory
+ 2752╎    ╎    ╎    ╎    2752   @Base/boot.jl:579; Array
+     ╎    ╎    ╎    ╎ 5344   @Base/boot.jl:601; Array
+ 5344╎    ╎    ╎    ╎  5344   @Base/boot.jl:579; Array
+ 6208╎    ╎    ╎    ╎ 6208   @OrderedCollections/src/ordered_dict.jl:14; OrderedDict
+     ╎    ╎    ╎  19296  @COBREXA/src/solver.jl:63; substitute_jump(val::ConstraintTrees.LinearValue, vars::Vector{JuMP.VariableRef})
+     ╎    ╎    ╎   19296  @JuMP/src/aff_expr.jl:590; add_to_expression!
+     ╎    ╎    ╎    19296  @JuMP/src/aff_expr.jl:26; _add_or_set!(dict::OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}, k::JuMP.VariableRef, v::Float64)
+     ╎    ╎    ╎     19296  @OrderedCollections/src/ordered_dict.jl:340; setindex!
+     ╎    ╎    ╎    ╎ 8640   @OrderedCollections/src/ordered_dict.jl:312; _setindex!(h::OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}, v::Float64, key::JuMP.VariableRef, index::Int64)
+     ╎    ╎    ╎    ╎  8640   @Base/array.jl:1261; push!
+     ╎    ╎    ╎    ╎   8640   @Base/array.jl:1116; _growend!
+     ╎    ╎    ╎    ╎    8640   @Base/array.jl:1129; (::Base.var"#133#134"{Vector{JuMP.VariableRef}, Int64, Int64, Int64, Int64, Int64, Memory{JuMP.VariableRef}, MemoryRef{JuMP.VariableRef}})()
+     ╎    ╎    ╎    ╎     8640   @Base/array.jl:1058; array_new_memory
+ 8640╎    ╎    ╎    ╎    ╎ 8640   @Base/boot.jl:516; GenericMemory
+     ╎    ╎    ╎    ╎ 6288   @OrderedCollections/src/ordered_dict.jl:313; _setindex!(h::OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}, v::Float64, key::JuMP.VariableRef, index::Int64)
+     ╎    ╎    ╎    ╎  6288   @Base/array.jl:1261; push!
+     ╎    ╎    ╎    ╎   6288   @Base/array.jl:1116; _growend!
+     ╎    ╎    ╎    ╎    6288   @Base/array.jl:1129; (::Base.var"#133#134"{Vector{Float64}, Int64, Int64, Int64, Int64, Int64, Memory{Float64}, MemoryRef{Float64}})()
+     ╎    ╎    ╎    ╎     6288   @Base/array.jl:1058; array_new_memory
+ 6288╎    ╎    ╎    ╎    ╎ 6288   @Base/boot.jl:516; GenericMemory
+     ╎    ╎    ╎    ╎ 4368   @OrderedCollections/src/ordered_dict.jl:323; _setindex!(h::OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}, v::Float64, key::JuMP.VariableRef, index::Int64)
+     ╎    ╎    ╎    ╎  4368   @OrderedCollections/src/ordered_dict.jl:142; rehash!(h::OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}, newsz::Int64)
+     ╎    ╎    ╎    ╎   4368   @Base/array.jl:585; zeros
+     ╎    ╎    ╎    ╎    4368   @Base/array.jl:589; zeros
+     ╎    ╎    ╎    ╎     4368   @Base/boot.jl:591; Array
+     ╎    ╎    ╎    ╎    ╎ 4368   @Base/boot.jl:578; Array
+ 4368╎    ╎    ╎    ╎    ╎  4368   @Base/boot.jl:516; GenericMemory
+     ╎    ╎    13280  @ConstraintTrees/src/tree.jl:282; (::ConstraintTrees.var"#go#81"{COBREXA.var"#5#7"{Vector{JuMP.VariableRef}, JuMP.Model}})(x::ConstraintTrees.ConstraintTree)
+ 2688╎    ╎     13280  @ConstraintTrees/src/tree.jl:58; iterate(x::ConstraintTrees.ConstraintTree, st::DataStructures.SAIterationState)
+ 3456╎    ╎    ╎ 3456   @DataStructures/src/container_loops.jl:296; iterate(s::DataStructures.SortedDict{Symbol, Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}, Base.Order.ForwardOrdering}, state::DataStructures.SAIterationState)
+ 7136╎    ╎    ╎ 7136   @DataStructures/src/container_loops.jl:302; iterate(s::DataStructures.SortedDict{Symbol, Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}, Base.Order.ForwardOrdering}, state::DataStructures.SAIterationState)
+     ╎   160    @COCOA/src/constraints.jl:603; (::COCOA.var"#59#65"{Float64, ConstraintTrees.LinearValue, ConstraintTrees.LinearValue, Symbol})(om::JuMP.Model, ::Tuple{MathOptInterface.OptimizationSense, Symbol})
+     ╎    160    @JuMP/src/macros.jl:402; macro expansion
+     ╎     160    @JuMP/src/macros/@constraint.jl:171; macro expansion
+     ╎    ╎ 160    @JuMP/src/macros.jl:264; macro expansion
+     ╎    ╎  160    @MutableArithmetics/src/rewrite.jl:371; macro expansion
+     ╎    ╎   160    @MutableArithmetics/src/rewrite.jl:112; operate!!
+     ╎    ╎    160    @MutableArithmetics/src/interface.jl:624; operate_fallback!!
+     ╎    ╎     160    @MutableArithmetics/src/interface.jl:210; operate
+     ╎    ╎    ╎ 160    @MutableArithmetics/src/MutableArithmetics.jl:38; sub_mul
+     ╎    ╎    ╎  160    @JuMP/src/operators.jl:117; -
+     ╎    ╎    ╎   160    @JuMP/src/operators.jl:45; +
+     ╎    ╎    ╎    80     @JuMP/src/aff_expr.jl:82; _build_aff_expr(constant::Float64, coef::Float64, var::JuMP.VariableRef)
+     ╎    ╎    ╎     80     @OrderedCollections/src/ordered_dict.jl:23; OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}()
+     ╎    ╎    ╎    ╎ 80     @Base/array.jl:585; zeros
+     ╎    ╎    ╎    ╎  80     @Base/array.jl:589; zeros
+     ╎    ╎    ╎    ╎   80     @Base/boot.jl:591; Array
+     ╎    ╎    ╎    ╎    80     @Base/boot.jl:578; Array
+   80╎    ╎    ╎    ╎     80     @Base/boot.jl:516; GenericMemory
+     ╎    ╎    ╎    80     @JuMP/src/aff_expr.jl:83; _build_aff_expr(constant::Float64, coef::Float64, var::JuMP.VariableRef)
+     ╎    ╎    ╎     80     @OrderedCollections/src/ordered_dict.jl:340; setindex!
+     ╎    ╎    ╎    ╎ 80     @OrderedCollections/src/ordered_dict.jl:313; _setindex!(h::OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}, v::Float64, key::JuMP.VariableRef, index::Int64)
+     ╎    ╎    ╎    ╎  80     @Base/array.jl:1261; push!
+     ╎    ╎    ╎    ╎   80     @Base/array.jl:1116; _growend!
+     ╎    ╎    ╎    ╎    80     @Base/array.jl:1129; (::Base.var"#133#134"{Vector{Float64}, Int64, Int64, Int64, Int64, Int64, Memory{Float64}, MemoryRef{Float64}})()
+     ╎    ╎    ╎    ╎     80     @Base/array.jl:1058; array_new_memory
+   80╎    ╎    ╎    ╎    ╎ 80     @Base/boot.jl:516; GenericMemory
+     ╎   96     @COCOA/src/constraints.jl:610; (::COCOA.var"#59#65"{Float64, ConstraintTrees.LinearValue, ConstraintTrees.LinearValue, Symbol})(om::JuMP.Model, ::Tuple{MathOptInterface.OptimizationSense, Symbol})
+     ╎    96     @Base/reduce.jl:561; sum
+     ╎     96     @Base/reduce.jl:561; #sum#345
+     ╎    ╎ 96     @Base/reduce.jl:532; sum
+     ╎    ╎  96     @Base/reduce.jl:532; #sum#344
+     ╎    ╎   96     @Base/reduce.jl:307; mapreduce
+     ╎    ╎    96     @Base/reduce.jl:307; #mapreduce#341
+     ╎    ╎     96     @Base/reduce.jl:175; mapfoldl
+     ╎    ╎    ╎ 96     @Base/reduce.jl:175; #mapfoldl#337
+     ╎    ╎    ╎  96     @Base/reduce.jl:44; mapfoldl_impl
+     ╎    ╎    ╎   96     @Base/reduce.jl:48; foldl_impl
+     ╎    ╎    ╎    32     @Base/reduce.jl:58; _foldl_impl(op::Base.FilteringRF{COCOA.var"#62#68"{Vector{Int64}, ConstraintTrees.LinearValue}, Base.MappingRF{COCOA.var"#61#67"{Dict{Int64, JuMP.VariableRef}, ConstraintTrees.LinearValue}, Base.BottomRF{typeof(Base.add_sum)}}}, init::Base._InitialValue, itr::Base.OneTo{Int64})
+     ╎    ╎    ╎     32     @Base/reduce.jl:112; FilteringRF
+     ╎    ╎    ╎    ╎ 32     @Base/reduce.jl:100; MappingRF
+     ╎    ╎    ╎    ╎  32     none:0; #61
+     ╎    ╎    ╎    ╎   32     @JuMP/src/operators.jl:58; *
+     ╎    ╎    ╎    ╎    32     @JuMP/src/aff_expr.jl:82; _build_aff_expr(constant::Float64, coef::Float64, var::JuMP.VariableRef)
+     ╎    ╎    ╎    ╎     32     @OrderedCollections/src/ordered_dict.jl:23; OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}()
+     ╎    ╎    ╎    ╎    ╎ 32     @Base/boot.jl:601; Array
+   32╎    ╎    ╎    ╎    ╎  32     @Base/boot.jl:579; Array
+     ╎    ╎    ╎    64     @Base/reduce.jl:62; _foldl_impl(op::Base.FilteringRF{COCOA.var"#62#68"{Vector{Int64}, ConstraintTrees.LinearValue}, Base.MappingRF{COCOA.var"#61#67"{Dict{Int64, JuMP.VariableRef}, ConstraintTrees.LinearValue}, Base.BottomRF{typeof(Base.add_sum)}}}, init::Base._InitialValue, itr::Base.OneTo{Int64})
+     ╎    ╎    ╎     64     @Base/reduce.jl:112; FilteringRF
+     ╎    ╎    ╎    ╎ 64     @Base/reduce.jl:100; MappingRF
+     ╎    ╎    ╎    ╎  64     @Base/reduce.jl:86; BottomRF
+     ╎    ╎    ╎    ╎   64     @Base/reduce.jl:24; add_sum
+     ╎    ╎    ╎    ╎    64     @JuMP/src/operators.jl:330; +
+     ╎    ╎    ╎    ╎     64     @JuMP/src/operators.jl:288; _copy_convert_coef
+     ╎    ╎    ╎    ╎    ╎ 64     @JuMP/src/aff_expr.jl:236; copy
+     ╎    ╎    ╎    ╎    ╎  64     @OrderedCollections/src/ordered_dict.jl:55; copy
+     ╎    ╎    ╎    ╎    ╎   64     @OrderedCollections/src/ordered_dict.jl:65; OrderedDict
+     ╎    ╎    ╎    ╎    ╎    64     @OrderedCollections/src/ordered_dict.jl:50; OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}(d::OrderedCollections.OrderedDict{JuMP.VariableRef, Float64})
+   64╎    ╎    ╎    ╎    ╎     64     @OrderedCollections/src/ordered_dict.jl:14; OrderedDict
+     ╎   64     @COCOA/src/constraints.jl:616; (::COCOA.var"#59#65"{Float64, ConstraintTrees.LinearValue, ConstraintTrees.LinearValue, Symbol})(om::JuMP.Model, ::Tuple{MathOptInterface.OptimizationSense, Symbol})
+     ╎    64     @JuMP/src/macros.jl:402; macro expansion
+     ╎     64     @JuMP/src/macros/@constraint.jl:173; macro expansion
+     ╎    ╎ 32     @JuMP/src/constraints.jl:1038; add_constraint(model::JuMP.Model, con::JuMP.ScalarConstraint{JuMP.AffExpr, MathOptInterface.EqualTo{Float64}}, name::String)
+     ╎    ╎  32     @JuMP/src/constraints.jl:760; moi_function
+     ╎    ╎   32     @JuMP/src/aff_expr.jl:861; moi_function
+     ╎    ╎    32     @JuMP/src/aff_expr.jl:753; MathOptInterface.ScalarAffineFunction(a::JuMP.AffExpr)
+     ╎    ╎     32     @Base/array.jl:679; _array_for
+     ╎    ╎    ╎ 32     @Base/array.jl:675; _array_for
+   32╎    ╎    ╎  32     @Base/boot.jl:579; Array
+     ╎    ╎ 32     @JuMP/src/constraints.jl:1039; add_constraint(model::JuMP.Model, con::JuMP.ScalarConstraint{JuMP.AffExpr, MathOptInterface.EqualTo{Float64}}, name::String)
+     ╎    ╎  32     @JuMP/src/constraints.jl:1016; _moi_add_constraint(model::MathOptInterface.Utilities.CachingOptimizer{MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}}, f::MathOptInterface.ScalarAffineFunction{Float64}, s::MathOptInterface.EqualTo{Float64})
+     ╎    ╎   32     @MathOptInterface/src/Utilities/cachingoptimizer.jl:566; add_constraint(m::MathOptInterface.Utilities.CachingOptimizer{MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}}, func::MathOptInterface.ScalarAffineFunction{Float64}, set::MathOptInterface.EqualTo{Float64})
+     ╎    ╎    32     @MathOptInterface/src/Bridges/bridge_optimizer.jl:1976; add_constraint
+     ╎    ╎     32     @HiGHS/src/MOI_wrapper.jl:1771; add_constraint(model::HiGHS.Optimizer, f::MathOptInterface.ScalarAffineFunction{Float64}, s::MathOptInterface.EqualTo{Float64})
+     ╎    ╎    ╎ 32     @HiGHS/src/MOI_wrapper.jl:1751; _indices_and_coefficients(model::HiGHS.Optimizer, f::MathOptInterface.ScalarAffineFunction{Float64})
+     ╎    ╎    ╎  32     @Base/array.jl:585; zeros
+     ╎    ╎    ╎   32     @Base/array.jl:589; zeros
+     ╎    ╎    ╎    32     @Base/boot.jl:591; Array
+     ╎    ╎    ╎     32     @Base/boot.jl:578; Array
+   32╎    ╎    ╎    ╎ 32     @Base/boot.jl:516; GenericMemory
+   32╎   32     @COCOA/src/constraints.jl:622; (::COCOA.var"#59#65"{Float64, ConstraintTrees.LinearValue, ConstraintTrees.LinearValue, Symbol})(om::JuMP.Model, ::Tuple{MathOptInterface.OptimizationSense, Symbol})
+     ╎   80     @COCOA/src/constraints.jl:623; (::COCOA.var"#59#65"{Float64, ConstraintTrees.LinearValue, ConstraintTrees.LinearValue, Symbol})(om::JuMP.Model, ::Tuple{MathOptInterface.OptimizationSense, Symbol})
+     ╎    80     @JuMP/src/macros.jl:402; macro expansion
+     ╎     32     @JuMP/src/macros/@constraint.jl:171; macro expansion
+     ╎    ╎ 32     @JuMP/src/macros.jl:264; macro expansion
+     ╎    ╎  32     @MutableArithmetics/src/rewrite.jl:371; macro expansion
+     ╎    ╎   32     @MutableArithmetics/src/interface.jl:210; operate(::typeof(*), ::Float64, ::JuMP.VariableRef)
+     ╎    ╎    32     @JuMP/src/operators.jl:58; *
+     ╎    ╎     32     @JuMP/src/aff_expr.jl:82; _build_aff_expr(constant::Float64, coef::Float64, var::JuMP.VariableRef)
+     ╎    ╎    ╎ 32     @OrderedCollections/src/ordered_dict.jl:23; OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}()
+     ╎    ╎    ╎  32     @Base/boot.jl:601; Array
+   32╎    ╎    ╎   32     @Base/boot.jl:579; Array
+     ╎     48     @JuMP/src/macros/@constraint.jl:173; macro expansion
+     ╎    ╎ 32     @JuMP/src/constraints.jl:1038; add_constraint(model::JuMP.Model, con::JuMP.ScalarConstraint{JuMP.AffExpr, MathOptInterface.GreaterThan{Float64}}, name::String)
+     ╎    ╎  32     @JuMP/src/constraints.jl:760; moi_function
+     ╎    ╎   32     @JuMP/src/aff_expr.jl:861; moi_function
+     ╎    ╎    32     @JuMP/src/aff_expr.jl:753; MathOptInterface.ScalarAffineFunction(a::JuMP.AffExpr)
+     ╎    ╎     32     @Base/array.jl:679; _array_for
+     ╎    ╎    ╎ 32     @Base/array.jl:675; _array_for
+   32╎    ╎    ╎  32     @Base/boot.jl:579; Array
+     ╎    ╎ 16     @JuMP/src/constraints.jl:1039; add_constraint(model::JuMP.Model, con::JuMP.ScalarConstraint{JuMP.AffExpr, MathOptInterface.GreaterThan{Float64}}, name::String)
+     ╎    ╎  16     @JuMP/src/constraints.jl:1016; _moi_add_constraint(model::MathOptInterface.Utilities.CachingOptimizer{MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}}, f::MathOptInterface.ScalarAffineFunction{Float64}, s::MathOptInterface.GreaterThan{Float64})
+     ╎    ╎   16     @MathOptInterface/src/Utilities/cachingoptimizer.jl:589; add_constraint(m::MathOptInterface.Utilities.CachingOptimizer{MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}}, func::MathOptInterface.ScalarAffineFunction{Float64}, set::MathOptInterface.GreaterThan{Float64})
+     ╎    ╎    16     @MathOptInterface/src/Utilities/copy/index_map.jl:87; setindex!
+     ╎    ╎     16     @MathOptInterface/src/Utilities/DoubleDicts.jl:222; setindex!
+     ╎    ╎    ╎ 16     @MathOptInterface/src/Utilities/DoubleDicts.jl:106; getindex
+   16╎    ╎    ╎  16     @MathOptInterface/src/Utilities/DoubleDicts.jl:101; MathOptInterface.Utilities.DoubleDicts.IndexDoubleDictInner{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.GreaterThan{Float64}}(d::MathOptInterface.Utilities.DoubleDicts.IndexDoubleDict)
+     ╎   304    @COCOA/src/constraints.jl:624; (::COCOA.var"#59#65"{Float64, ConstraintTrees.LinearValue, ConstraintTrees.LinearValue, Symbol})(om::JuMP.Model, ::Tuple{MathOptInterface.OptimizationSense, Symbol})
+     ╎    304    @JuMP/src/macros.jl:402; macro expansion
+     ╎     304    @JuMP/src/macros/@constraint.jl:171; macro expansion
+     ╎    ╎ 304    @JuMP/src/macros.jl:264; macro expansion
+   64╎    ╎  304    @MutableArithmetics/src/rewrite.jl:371; macro expansion
+     ╎    ╎   64     @MutableArithmetics/src/interface.jl:347; copy_if_mutable(x::JuMP.AffExpr)
+     ╎    ╎    64     @MutableArithmetics/src/interface.jl:336; copy_if_mutable_fallback
+     ╎    ╎     64     @JuMP/src/mutable_arithmetics.jl:167; mutable_copy
+     ╎    ╎    ╎ 64     @JuMP/src/aff_expr.jl:395; map_coefficients
+     ╎    ╎    ╎  64     @JuMP/src/aff_expr.jl:399; _map_aff(f::typeof(MutableArithmetics.copy_if_mutable), constant::Float64, a::JuMP.AffExpr)
+     ╎    ╎    ╎   64     @OrderedCollections/src/ordered_dict.jl:23; OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}()
+   64╎    ╎    ╎    64     @OrderedCollections/src/ordered_dict.jl:14; OrderedDict
+     ╎    ╎   176    @MutableArithmetics/src/interface.jl:210; operate(::typeof(*), ::Float64, ::JuMP.VariableRef)
+     ╎    ╎    176    @JuMP/src/operators.jl:58; *
+     ╎    ╎     64     @JuMP/src/aff_expr.jl:82; _build_aff_expr(constant::Float64, coef::Float64, var::JuMP.VariableRef)
+     ╎    ╎    ╎ 64     @OrderedCollections/src/ordered_dict.jl:23; OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}()
+   64╎    ╎    ╎  64     @OrderedCollections/src/ordered_dict.jl:14; OrderedDict
+     ╎    ╎     80     @JuMP/src/aff_expr.jl:83; _build_aff_expr(constant::Float64, coef::Float64, var::JuMP.VariableRef)
+     ╎    ╎    ╎ 80     @OrderedCollections/src/ordered_dict.jl:340; setindex!
+     ╎    ╎    ╎  80     @OrderedCollections/src/ordered_dict.jl:313; _setindex!(h::OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}, v::Float64, key::JuMP.VariableRef, index::Int64)
+     ╎    ╎    ╎   80     @Base/array.jl:1261; push!
+     ╎    ╎    ╎    80     @Base/array.jl:1116; _growend!
+     ╎    ╎    ╎     80     @Base/array.jl:1129; (::Base.var"#133#134"{Vector{Float64}, Int64, Int64, Int64, Int64, Int64, Memory{Float64}, MemoryRef{Float64}})()
+     ╎    ╎    ╎    ╎ 80     @Base/array.jl:1058; array_new_memory
+   80╎    ╎    ╎    ╎  80     @Base/boot.jl:516; GenericMemory
+     ╎    ╎     32     @JuMP/src/aff_expr.jl:84; _build_aff_expr(constant::Float64, coef::Float64, var::JuMP.VariableRef)
+   32╎    ╎    ╎ 32     @JuMP/src/aff_expr.jl:140; GenericAffExpr
+     ╎   32     @COCOA/src/constraints.jl:629; (::COCOA.var"#59#65"{Float64, ConstraintTrees.LinearValue, ConstraintTrees.LinearValue, Symbol})(om::JuMP.Model, ::Tuple{MathOptInterface.OptimizationSense, Symbol})
+   32╎    32     @JuMP/src/variables.jl:986; has_upper_bound(v::JuMP.VariableRef)
+     ╎   224    @COCOA/src/constraints.jl:630; (::COCOA.var"#59#65"{Float64, ConstraintTrees.LinearValue, ConstraintTrees.LinearValue, Symbol})(om::JuMP.Model, ::Tuple{MathOptInterface.OptimizationSense, Symbol})
+     ╎    224    @JuMP/src/macros.jl:402; macro expansion
+     ╎     176    @JuMP/src/macros/@constraint.jl:171; macro expansion
+     ╎    ╎ 176    @JuMP/src/macros.jl:264; macro expansion
+   32╎    ╎  176    @MutableArithmetics/src/rewrite.jl:371; macro expansion
+     ╎    ╎   144    @MutableArithmetics/src/interface.jl:210; operate(::typeof(*), ::Float64, ::JuMP.VariableRef)
+     ╎    ╎    144    @JuMP/src/operators.jl:58; *
+     ╎    ╎     144    @JuMP/src/aff_expr.jl:83; _build_aff_expr(constant::Float64, coef::Float64, var::JuMP.VariableRef)
+     ╎    ╎    ╎ 144    @OrderedCollections/src/ordered_dict.jl:340; setindex!
+     ╎    ╎    ╎  144    @OrderedCollections/src/ordered_dict.jl:312; _setindex!(h::OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}, v::Float64, key::JuMP.VariableRef, index::Int64)
+     ╎    ╎    ╎   144    @Base/array.jl:1261; push!
+     ╎    ╎    ╎    144    @Base/array.jl:1116; _growend!
+     ╎    ╎    ╎     144    @Base/array.jl:1129; (::Base.var"#133#134"{Vector{JuMP.VariableRef}, Int64, Int64, Int64, Int64, Int64, Memory{JuMP.VariableRef}, MemoryRef{JuMP.VariableRef}})()
+     ╎    ╎    ╎    ╎ 144    @Base/array.jl:1058; array_new_memory
+  144╎    ╎    ╎    ╎  144    @Base/boot.jl:516; GenericMemory
+     ╎     48     @JuMP/src/macros/@constraint.jl:173; macro expansion
+     ╎    ╎ 48     @JuMP/src/constraints.jl:1039; add_constraint(model::JuMP.Model, con::JuMP.ScalarConstraint{JuMP.AffExpr, MathOptInterface.GreaterThan{Float64}}, name::String)
+     ╎    ╎  48     @JuMP/src/constraints.jl:1016; _moi_add_constraint(model::MathOptInterface.Utilities.CachingOptimizer{MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}}, f::MathOptInterface.ScalarAffineFunction{Float64}, s::MathOptInterface.GreaterThan{Float64})
+     ╎    ╎   48     @MathOptInterface/src/Utilities/cachingoptimizer.jl:586; add_constraint(m::MathOptInterface.Utilities.CachingOptimizer{MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}}, func::MathOptInterface.ScalarAffineFunction{Float64}, set::MathOptInterface.GreaterThan{Float64})
+     ╎    ╎    48     @MathOptInterface/src/Utilities/universalfallback.jl:851; add_constraint(uf::MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}, func::MathOptInterface.ScalarAffineFunction{Float64}, set::MathOptInterface.GreaterThan{Float64})
+     ╎    ╎     48     @MathOptInterface/src/Utilities/model.jl:325; add_constraint(model::MathOptInterface.Utilities.Model{Float64}, func::MathOptInterface.ScalarAffineFunction{Float64}, set::MathOptInterface.GreaterThan{Float64})
+     ╎    ╎    ╎ 48     @MathOptInterface/src/Utilities/struct_of_constraints.jl:67; add_constraint(model::MathOptInterface.Utilities.ModelFunctionConstraints{Float64}, func::MathOptInterface.ScalarAffineFunction{Float64}, set::MathOptInterface.GreaterThan{Float64})
+     ╎    ╎    ╎  48     @MathOptInterface/src/Utilities/struct_of_constraints.jl:67; add_constraint(model::MathOptInterface.Utilities.ModelScalarConstraints{Float64, MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.ZeroOne}, MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.Integer}, MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Flo…
+     ╎    ╎    ╎   48     @MathOptInterface/src/Utilities/vector_of_constraints.jl:80; add_constraint(v::MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.GreaterThan{Float64}}, func::MathOptInterface.ScalarAffineFunction{Float64}, set::MathOptInterface.GreaterThan{Float64})
+     ╎    ╎    ╎    48     @MathOptInterface/src/Utilities/functions.jl:1050; canonical
+     ╎    ╎    ╎     48     @MathOptInterface/src/functions.jl:147; copy
+   48╎    ╎    ╎    ╎ 48     @Base/array.jl:350; copy
+     ╎   256    @COCOA/src/constraints.jl:631; (::COCOA.var"#59#65"{Float64, ConstraintTrees.LinearValue, ConstraintTrees.LinearValue, Symbol})(om::JuMP.Model, ::Tuple{MathOptInterface.OptimizationSense, Symbol})
+     ╎    256    @JuMP/src/macros.jl:402; macro expansion
+     ╎     64     @JuMP/src/macros/@constraint.jl:171; macro expansion
+     ╎    ╎ 64     @JuMP/src/macros.jl:264; macro expansion
+   32╎    ╎  64     @MutableArithmetics/src/rewrite.jl:371; macro expansion
+     ╎    ╎   32     @MutableArithmetics/src/interface.jl:347; copy_if_mutable(x::JuMP.AffExpr)
+     ╎    ╎    32     @MutableArithmetics/src/interface.jl:336; copy_if_mutable_fallback
+     ╎    ╎     32     @JuMP/src/mutable_arithmetics.jl:167; mutable_copy
+     ╎    ╎    ╎ 32     @JuMP/src/aff_expr.jl:395; map_coefficients
+     ╎    ╎    ╎  32     @JuMP/src/aff_expr.jl:399; _map_aff(f::typeof(MutableArithmetics.copy_if_mutable), constant::Float64, a::JuMP.AffExpr)
+     ╎    ╎    ╎   32     @OrderedCollections/src/ordered_dict.jl:23; OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}()
+     ╎    ╎    ╎    32     @Base/boot.jl:601; Array
+   32╎    ╎    ╎     32     @Base/boot.jl:579; Array
+   32╎     32     @JuMP/src/macros/@constraint.jl:172; macro expansion
+     ╎     160    @JuMP/src/macros/@constraint.jl:173; macro expansion
+     ╎    ╎ 32     @JuMP/src/constraints.jl:1038; add_constraint(model::JuMP.Model, con::JuMP.ScalarConstraint{JuMP.AffExpr, MathOptInterface.GreaterThan{Float64}}, name::String)
+     ╎    ╎  32     @JuMP/src/constraints.jl:760; moi_function
+     ╎    ╎   32     @JuMP/src/aff_expr.jl:861; moi_function
+     ╎    ╎    32     @JuMP/src/aff_expr.jl:756; MathOptInterface.ScalarAffineFunction(a::JuMP.AffExpr)
+   32╎    ╎     32     @MathOptInterface/src/functions.jl:140; ScalarAffineFunction
+   16╎    ╎ 128    @JuMP/src/constraints.jl:1039; add_constraint(model::JuMP.Model, con::JuMP.ScalarConstraint{JuMP.AffExpr, MathOptInterface.GreaterThan{Float64}}, name::String)
+     ╎    ╎  112    @JuMP/src/constraints.jl:1016; _moi_add_constraint(model::MathOptInterface.Utilities.CachingOptimizer{MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}}, f::MathOptInterface.ScalarAffineFunction{Float64}, s::MathOptInterface.GreaterThan{Float64})
+     ╎    ╎   112    @MathOptInterface/src/Utilities/cachingoptimizer.jl:566; add_constraint(m::MathOptInterface.Utilities.CachingOptimizer{MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}}, func::MathOptInterface.ScalarAffineFunction{Float64}, set::MathOptInterface.GreaterThan{Float64})
+     ╎    ╎    112    @MathOptInterface/src/Bridges/bridge_optimizer.jl:1976; add_constraint
+     ╎    ╎     48     @HiGHS/src/MOI_wrapper.jl:1768; add_constraint(model::HiGHS.Optimizer, f::MathOptInterface.ScalarAffineFunction{Float64}, s::MathOptInterface.GreaterThan{Float64})
+     ╎    ╎    ╎ 48     @HiGHS/src/MOI_wrapper.jl:156; _ConstraintInfo
+   48╎    ╎    ╎  48     @HiGHS/src/MOI_wrapper.jl:145; _ConstraintInfo
+     ╎    ╎     64     @HiGHS/src/MOI_wrapper.jl:1771; add_constraint(model::HiGHS.Optimizer, f::MathOptInterface.ScalarAffineFunction{Float64}, s::MathOptInterface.GreaterThan{Float64})
+     ╎    ╎    ╎ 64     @HiGHS/src/MOI_wrapper.jl:1749; _indices_and_coefficients(model::HiGHS.Optimizer, f::MathOptInterface.ScalarAffineFunction{Float64})
+     ╎    ╎    ╎  64     @MathOptInterface/src/Utilities/functions.jl:1050; canonical
+     ╎    ╎    ╎   64     @MathOptInterface/src/functions.jl:147; copy
+   32╎    ╎    ╎    32     @Base/array.jl:351; copy
+   32╎    ╎    ╎    32     @MathOptInterface/src/functions.jl:140; ScalarAffineFunction
+     ╎   112    @COCOA/src/constraints.jl:636; (::COCOA.var"#59#65"{Float64, ConstraintTrees.LinearValue, ConstraintTrees.LinearValue, Symbol})(om::JuMP.Model, ::Tuple{MathOptInterface.OptimizationSense, Symbol})
+     ╎    112    @Base/reduce.jl:561; sum
+     ╎     112    @Base/reduce.jl:561; #sum#345
+     ╎    ╎ 112    @Base/reduce.jl:532; sum
+     ╎    ╎  112    @Base/reduce.jl:532; #sum#344
+     ╎    ╎   112    @Base/reduce.jl:307; mapreduce
+     ╎    ╎    112    @Base/reduce.jl:307; #mapreduce#341
+     ╎    ╎     112    @Base/reduce.jl:175; mapfoldl
+     ╎    ╎    ╎ 112    @Base/reduce.jl:175; #mapfoldl#337
+     ╎    ╎    ╎  112    @Base/reduce.jl:44; mapfoldl_impl
+     ╎    ╎    ╎   112    @Base/reduce.jl:48; foldl_impl
+     ╎    ╎    ╎    112    @Base/reduce.jl:62; _foldl_impl(op::Base.FilteringRF{COCOA.var"#64#70"{Vector{Int64}, ConstraintTrees.LinearValue}, Base.MappingRF{COCOA.var"#63#69"{Dict{Int64, JuMP.VariableRef}, ConstraintTrees.LinearValue}, Base.BottomRF{typeof(Base.add_sum)}}}, init::Base._InitialValue, itr::Base.OneTo{Int64})
+     ╎    ╎    ╎     112    @Base/reduce.jl:112; FilteringRF
+     ╎    ╎    ╎    ╎ 112    @Base/reduce.jl:100; MappingRF
+     ╎    ╎    ╎    ╎  112    none:0; #63
+     ╎    ╎    ╎    ╎   112    @JuMP/src/operators.jl:58; *
+     ╎    ╎    ╎    ╎    112    @JuMP/src/aff_expr.jl:82; _build_aff_expr(constant::Float64, coef::Float64, var::JuMP.VariableRef)
+     ╎    ╎    ╎    ╎     112    @OrderedCollections/src/ordered_dict.jl:23; OrderedCollections.OrderedDict{JuMP.VariableRef, Float64}()
+     ╎    ╎    ╎    ╎    ╎ 112    @Base/array.jl:585; zeros
+     ╎    ╎    ╎    ╎    ╎  112    @Base/array.jl:589; zeros
+     ╎    ╎    ╎    ╎    ╎   112    @Base/boot.jl:591; Array
+     ╎    ╎    ╎    ╎    ╎    80     @Base/boot.jl:578; Array
+   80╎    ╎    ╎    ╎    ╎     80     @Base/boot.jl:516; GenericMemory
+   32╎    ╎    ╎    ╎    ╎    32     @Base/boot.jl:579; Array
+     ╎   92200  @COCOA/src/constraints.jl:643; (::COCOA.var"#59#65"{Float64, ConstraintTrees.LinearValue, ConstraintTrees.LinearValue, Symbol})(om::JuMP.Model, ::Tuple{MathOptInterface.OptimizationSense, Symbol})
+     ╎    92200  @JuMP/src/optimizer_interface.jl:560; optimize!
+     ╎     92200  @JuMP/src/optimizer_interface.jl:609; optimize!(model::JuMP.Model; ignore_optimize_hook::Bool, _differentiation_backend::MathOptInterface.Nonlinear.SparseReverseMode, kwargs::Base.Pairs{Symbol, Union{}, Tuple{}, @NamedTuple{}})
+     ╎    ╎ 58628  @MathOptInterface/src/Utilities/cachingoptimizer.jl:370; optimize!(m::MathOptInterface.Utilities.CachingOptimizer{MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}})
+     ╎    ╎  49876  @MathOptInterface/src/MathOptInterface.jl:121; optimize!
+     ╎    ╎   49876  @MathOptInterface/src/Bridges/bridge_optimizer.jl:443; copy_to
+     ╎    ╎    2920   @MathOptInterface/src/Utilities/copy.jl:386; default_copy_to(dest::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, src::MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}})
+     ╎    ╎     64     @MathOptInterface/src/Utilities/copy.jl:527; _copy_variables_with_set(dest::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, src::MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}})
+     ╎    ╎    ╎ 64     @MathOptInterface/src/Utilities/copy/index_map.jl:31; IndexMap
+     ╎    ╎    ╎  64     @MathOptInterface/src/Utilities/CleverDicts.jl:91; CleverDict
+     ╎    ╎    ╎   64     @MathOptInterface/src/Utilities/CleverDicts.jl:91; CleverDict
+     ╎    ╎    ╎    64     @OrderedCollections/src/ordered_dict.jl:23; OrderedCollections.OrderedDict{MathOptInterface.VariableIndex, MathOptInterface.VariableIndex}()
+   64╎    ╎    ╎     64     @OrderedCollections/src/ordered_dict.jl:14; OrderedDict
+     ╎    ╎     32     @MathOptInterface/src/Utilities/copy.jl:533; _copy_variables_with_set(dest::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, src::MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}})
+     ╎    ╎    ╎ 32     @MathOptInterface/src/Utilities/copy.jl:359; sorted_variable_sets_by_cost
+     ╎    ╎    ╎  32     @MathOptInterface/src/Utilities/universalfallback.jl:444; get(uf::MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}, listattr::MathOptInterface.ListOfConstraintTypesPresent)
+     ╎    ╎    ╎   32     @MathOptInterface/src/Utilities/model.jl:373; get
+     ╎    ╎    ╎    32     @MathOptInterface/src/Utilities/struct_of_constraints.jl:126; get
+     ╎    ╎    ╎     32     @MathOptInterface/src/Utilities/struct_of_constraints.jl:299; broadcastvcat(f::MathOptInterface.Utilities.var"#131#132"{MathOptInterface.ListOfConstraintTypesPresent}, model::MathOptInterface.Utilities.ModelFunctionConstraints{Float64})
+     ╎    ╎    ╎    ╎ 32     @MathOptInterface/src/Utilities/struct_of_constraints.jl:130; (::MathOptInterface.Utilities.var"#131#132"{MathOptInterface.ListOfConstraintTypesPresent})(constrs::MathOptInterface.Utilities.ModelScalarConstraints{Float64, MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.ZeroOne}, MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.Integer}, Math…
+     ╎    ╎    ╎    ╎  32     @MathOptInterface/src/Utilities/struct_of_constraints.jl:126; get(model::MathOptInterface.Utilities.ModelScalarConstraints{Float64, MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.ZeroOne}, MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.Integer}, MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Float64}…
+     ╎    ╎    ╎    ╎   32     @MathOptInterface/src/Utilities/struct_of_constraints.jl:299; broadcastvcat(f::MathOptInterface.Utilities.var"#131#132"{MathOptInterface.ListOfConstraintTypesPresent}, model::MathOptInterface.Utilities.ModelScalarConstraints{Float64, MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.ZeroOne}, MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.…
+     ╎    ╎    ╎    ╎    32     @Base/array.jl:2229; vcat(::Vector{Tuple{Type, Type}}, ::Vector{Tuple{Type, Type}}, ::Vector{Tuple{Type, Type}}, ::Vararg{Vector{Tuple{Type, Type}}})
+   32╎    ╎    ╎    ╎     32     @Base/boot.jl:579; Array
+     ╎    ╎     2800   @MathOptInterface/src/Utilities/copy.jl:553; _copy_variables_with_set(dest::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, src::MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}})
+     ╎    ╎    ╎ 2800   @MathOptInterface/src/Bridges/bridge_optimizer.jl:2139; add_variables
+     ╎    ╎    ╎  2800   @MathOptInterface/src/variables.jl:44; add_variables
+     ╎    ╎    ╎   2800   @HiGHS/src/MOI_wrapper.jl:805; add_variable(model::HiGHS.Optimizer)
+     ╎    ╎    ╎    2800   @HiGHS/src/MOI_wrapper.jl:78; _VariableInfo
+ 2800╎    ╎    ╎     2800   @HiGHS/src/MOI_wrapper.jl:78; _VariableInfo
+     ╎    ╎     24     @MathOptInterface/src/Utilities/copy.jl:555; _copy_variables_with_set(dest::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, src::MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}})
+     ╎    ╎    ╎ 24     @MathOptInterface/src/Utilities/copy/index_map.jl:79; setindex!
+     ╎    ╎    ╎  24     @MathOptInterface/src/Utilities/CleverDicts.jl:183; setindex!(c::MathOptInterface.Utilities.CleverDicts.CleverDict{MathOptInterface.VariableIndex, MathOptInterface.VariableIndex, typeof(MathOptInterface.Utilities.CleverDicts.key_to_index), typeof(MathOptInterface.Utilities.CleverDicts.index_to_key)}, value::MathOptInterface.VariableIndex, key::MathOptInterface.VariableIndex)
+     ╎    ╎    ╎   24     @Base/array.jl:1261; push!
+     ╎    ╎    ╎    24     @Base/array.jl:1116; _growend!
+     ╎    ╎    ╎     24     @Base/array.jl:1129; (::Base.var"#133#134"{Vector{MathOptInterface.VariableIndex}, Int64, Int64, Int64, Int64, Int64, Memory{MathOptInterface.VariableIndex}, MemoryRef{MathOptInterface.VariableIndex}})()
+     ╎    ╎    ╎    ╎ 24     @Base/array.jl:1058; array_new_memory
+   24╎    ╎    ╎    ╎  24     @Base/boot.jl:516; GenericMemory
+     ╎    ╎    46956  @MathOptInterface/src/Utilities/copy.jl:393; default_copy_to(dest::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, src::MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}})
+     ╎    ╎     96     @MathOptInterface/src/Utilities/copy.jl:247; _pass_constraints(dest::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, src::MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}, index_map::MathOptInterface.Utilities.IndexMap, variable_constraints_not_added::Vector{Any})
+     ╎    ╎    ╎ 96     @MathOptInterface/src/Utilities/universalfallback.jl:444; get(uf::MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}, listattr::MathOptInterface.ListOfConstraintTypesPresent)
+     ╎    ╎    ╎  96     @MathOptInterface/src/Utilities/model.jl:373; get
+     ╎    ╎    ╎   32     @Base/array.jl:2229; vcat(::Vector{Tuple{Type, Type}}, ::Vector{Tuple{Type, Type}})
+   32╎    ╎    ╎    32     @Base/boot.jl:579; Array
+     ╎    ╎    ╎   64     @MathOptInterface/src/Utilities/struct_of_constraints.jl:126; get
+     ╎    ╎    ╎    64     @MathOptInterface/src/Utilities/struct_of_constraints.jl:299; broadcastvcat(f::MathOptInterface.Utilities.var"#131#132"{MathOptInterface.ListOfConstraintTypesPresent}, model::MathOptInterface.Utilities.ModelFunctionConstraints{Float64})
+     ╎    ╎    ╎     64     @MathOptInterface/src/Utilities/struct_of_constraints.jl:130; (::MathOptInterface.Utilities.var"#131#132"{MathOptInterface.ListOfConstraintTypesPresent})(constrs::MathOptInterface.Utilities.ModelScalarConstraints{Float64, MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.ZeroOne}, MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.Integer}, MathO…
+     ╎    ╎    ╎    ╎ 64     @MathOptInterface/src/Utilities/struct_of_constraints.jl:126; get(model::MathOptInterface.Utilities.ModelScalarConstraints{Float64, MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.ZeroOne}, MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.Integer}, MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Float64},…
+     ╎    ╎    ╎    ╎  64     @MathOptInterface/src/Utilities/struct_of_constraints.jl:299; broadcastvcat(f::MathOptInterface.Utilities.var"#131#132"{MathOptInterface.ListOfConstraintTypesPresent}, model::MathOptInterface.Utilities.ModelScalarConstraints{Float64, MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.ZeroOne}, MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.I…
+     ╎    ╎    ╎    ╎   32     @MathOptInterface/src/Utilities/struct_of_constraints.jl:128; #131
+     ╎    ╎    ╎    ╎    32     @Base/array.jl:400; getindex
+   32╎    ╎    ╎    ╎     32     @Base/boot.jl:579; Array
+     ╎    ╎    ╎    ╎   32     @MathOptInterface/src/Utilities/struct_of_constraints.jl:130; #131
+     ╎    ╎    ╎    ╎    32     @MathOptInterface/src/Utilities/vector_of_constraints.jl:147; get(v::MathOptInterface.Utilities.VectorOfConstraints{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.EqualTo{Float64}}, ::MathOptInterface.ListOfConstraintTypesPresent)
+     ╎    ╎    ╎    ╎     32     @Base/array.jl:618; convert
+     ╎    ╎    ╎    ╎    ╎ 32     @Base/array.jl:626; Array
+     ╎    ╎    ╎    ╎    ╎  32     @Base/boot.jl:591; Array
+   32╎    ╎    ╎    ╎    ╎   32     @Base/boot.jl:579; Array
+     ╎    ╎     46860  @MathOptInterface/src/Utilities/copy.jl:251; _pass_constraints(dest::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, src::MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}, index_map::MathOptInterface.Utilities.IndexMap, variable_constraints_not_added::Vector{Any})
+     ╎    ╎    ╎ 46860  @MathOptInterface/src/Bridges/bridge_optimizer.jl:427; pass_nonvariable_constraints(dest::MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, src::MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}, idxmap::MathOptInterface.Utilities.IndexMap, constraint_types::Vector{Tuple{Type, Type}})
+     ╎    ╎    ╎  46860  @MathOptInterface/src/Utilities/copy.jl:229; pass_nonvariable_constraints
+     ╎    ╎    ╎   46860  @MathOptInterface/src/Utilities/copy.jl:203; pass_nonvariable_constraints_fallback(dest::HiGHS.Optimizer, src::MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}, index_map::MathOptInterface.Utilities.IndexMap, constraint_types::Vector{Tuple{Type, Type}})
+     ╎    ╎    ╎    46860  @MathOptInterface/src/Utilities/copy.jl:192; _copy_constraints(dest::HiGHS.Optimizer, src::MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}, index_map::MathOptInterface.Utilities.IndexMap, cis_src::Vector{MathOptInterface.ConstraintIndex{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.EqualTo{Float64}}})
+     ╎    ╎    ╎     11168  @MathOptInterface/src/Utilities/copy.jl:178; _copy_constraints(dest::HiGHS.Optimizer, src::MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}, index_map::MathOptInterface.Utilities.IndexMap, index_map_FS::MathOptInterface.Utilities.DoubleDicts.IndexDoubleDictInner{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.GreaterThan{Float64}}, cis_src::Vector{MathOptInterface.ConstraintIndex{MathOptInterface.ScalarAffineFun…
+     ╎    ╎    ╎    ╎ 11168  @MathOptInterface/src/Utilities/universalfallback.jl:872; get(uf::MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}, attr::MathOptInterface.ConstraintFunction, ci::MathOptInterface.ConstraintIndex{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.GreaterThan{Float64}})
+     ╎    ╎    ╎    ╎  11168  @MathOptInterface/src/Utilities/model.jl:402; get
+     ╎    ╎    ╎    ╎   11168  @MathOptInterface/src/Utilities/struct_of_constraints.jl:85; get(model::MathOptInterface.Utilities.ModelFunctionConstraints{Float64}, attr::MathOptInterface.ConstraintFunction, ci::MathOptInterface.ConstraintIndex{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.GreaterThan{Float64}})
+     ╎    ╎    ╎    ╎    11168  @MathOptInterface/src/Utilities/struct_of_constraints.jl:85; get
+     ╎    ╎    ╎    ╎     11168  @MathOptInterface/src/Utilities/vector_of_constraints.jl:106; get
+     ╎    ╎    ╎    ╎    ╎ 11168  @MathOptInterface/src/functions.jl:147; copy
+ 4768╎    ╎    ╎    ╎    ╎  4768   @Base/array.jl:350; copy
+ 3360╎    ╎    ╎    ╎    ╎  3360   @Base/array.jl:351; copy
+ 3040╎    ╎    ╎    ╎    ╎  3040   @MathOptInterface/src/functions.jl:140; ScalarAffineFunction
+     ╎    ╎    ╎     35692  @MathOptInterface/src/Utilities/copy.jl:180; _copy_constraints(dest::HiGHS.Optimizer, src::MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}, index_map::MathOptInterface.Utilities.IndexMap, index_map_FS::MathOptInterface.Utilities.DoubleDicts.IndexDoubleDictInner{MathOptInterface.ScalarAffineFunction{Float64}, MathOptInterface.EqualTo{Float64}}, cis_src::Vector{MathOptInterface.ConstraintIndex{MathOptInterface.ScalarAffineFunctio…
+     ╎    ╎    ╎    ╎ 4704   @HiGHS/src/MOI_wrapper.jl:1768; add_constraint(model::HiGHS.Optimizer, f::MathOptInterface.ScalarAffineFunction{Float64}, s::MathOptInterface.EqualTo{Float64})
+     ╎    ╎    ╎    ╎  4704   @HiGHS/src/MOI_wrapper.jl:156; _ConstraintInfo
+ 4704╎    ╎    ╎    ╎   4704   @HiGHS/src/MOI_wrapper.jl:145; _ConstraintInfo
+     ╎    ╎    ╎    ╎ 21228  @HiGHS/src/MOI_wrapper.jl:1771; add_constraint(model::HiGHS.Optimizer, f::MathOptInterface.ScalarAffineFunction{Float64}, s::MathOptInterface.EqualTo{Float64})
+     ╎    ╎    ╎    ╎  10704  @HiGHS/src/MOI_wrapper.jl:1749; _indices_and_coefficients(model::HiGHS.Optimizer, f::MathOptInterface.ScalarAffineFunction{Float64})
+     ╎    ╎    ╎    ╎   10704  @MathOptInterface/src/Utilities/functions.jl:1050; canonical
+     ╎    ╎    ╎    ╎    10704  @MathOptInterface/src/functions.jl:147; copy
+ 4176╎    ╎    ╎    ╎     4176   @Base/array.jl:350; copy
+ 3264╎    ╎    ╎    ╎     3264   @Base/array.jl:351; copy
+ 3264╎    ╎    ╎    ╎     3264   @MathOptInterface/src/functions.jl:140; ScalarAffineFunction
+     ╎    ╎    ╎    ╎  10524  @HiGHS/src/MOI_wrapper.jl:1751; _indices_and_coefficients(model::HiGHS.Optimizer, f::MathOptInterface.ScalarAffineFunction{Float64})
+     ╎    ╎    ╎    ╎   10524  @Base/array.jl:585; zeros
+     ╎    ╎    ╎    ╎    10524  @Base/array.jl:589; zeros
+     ╎    ╎    ╎    ╎     10524  @Base/boot.jl:591; Array
+     ╎    ╎    ╎    ╎    ╎ 4412   @Base/boot.jl:578; Array
+ 4412╎    ╎    ╎    ╎    ╎  4412   @Base/boot.jl:516; GenericMemory
+ 6112╎    ╎    ╎    ╎    ╎ 6112   @Base/boot.jl:579; Array
+     ╎    ╎    ╎    ╎ 9760   @MathOptInterface/src/Utilities/functions.jl:241; map_indices
+     ╎    ╎    ╎    ╎  9760   @MathOptInterface/src/Utilities/functions.jl:304; map_indices
+     ╎    ╎    ╎    ╎   6592   @MathOptInterface/src/Utilities/functions.jl:261; map_indices
+     ╎    ╎    ╎    ╎    6592   @Base/array.jl:367; similar
+     ╎    ╎    ╎    ╎     3360   @Base/boot.jl:578; Array
+ 3360╎    ╎    ╎    ╎    ╎ 3360   @Base/boot.jl:516; GenericMemory
+ 3232╎    ╎    ╎    ╎     3232   @Base/boot.jl:579; Array
+ 3168╎    ╎    ╎    ╎   3168   @MathOptInterface/src/functions.jl:140; ScalarAffineFunction
+     ╎    ╎  8752   @MathOptInterface/src/MathOptInterface.jl:122; optimize!
+     ╎    ╎   8752   @MathOptInterface/src/Bridges/bridge_optimizer.jl:367; optimize!
+     ╎    ╎    8752   @HiGHS/src/MOI_wrapper.jl:2223; optimize!(model::HiGHS.Optimizer)
+     ╎    ╎     8752   @Base/c.jl:167; disable_sigint
+     ╎    ╎    ╎ 8752   @HiGHS/src/MOI_wrapper.jl:2223; #42
+ 1920╎    ╎    ╎  8752   @HiGHS/src/gen/libhighs.jl:328; Highs_run
+     ╎    ╎    ╎   6832   @HiGHS/src/MOI_wrapper.jl:3235; _cfn_user_callback(callback_type::Int32, message::Ptr{Int8}, p_data_out::Ptr{HiGHS.HighsCallbackDataOut}, p_data_in::Ptr{HiGHS.HighsCallbackDataIn}, p_user_data::Ptr{Nothing})
+     ╎    ╎    ╎    6832   @Base/c.jl:181; reenable_sigint
+ 5248╎    ╎    ╎     5248   @HiGHS/src/MOI_wrapper.jl:3236; (::HiGHS.var"#71#72"{Int32, Ptr{Int8}, Ptr{HiGHS.HighsCallbackDataIn}, HiGHS.HighsCallbackDataOut, HiGHS._CallbackData})()
+ 1584╎    ╎    ╎     1584   @HiGHS/src/MOI_wrapper.jl:3237; (::HiGHS.var"#71#72"{Int32, Ptr{Int8}, Ptr{HiGHS.HighsCallbackDataIn}, HiGHS.HighsCallbackDataOut, HiGHS._CallbackData})()
+     ╎    ╎ 33572  @MathOptInterface/src/Utilities/cachingoptimizer.jl:379; optimize!(m::MathOptInterface.Utilities.CachingOptimizer{MathOptInterface.Bridges.LazyBridgeOptimizer{HiGHS.Optimizer}, MathOptInterface.Utilities.UniversalFallback{MathOptInterface.Utilities.Model{Float64}}})
+     ╎    ╎  33572  @MathOptInterface/src/Bridges/bridge_optimizer.jl:367; optimize!
+     ╎    ╎   7456   @HiGHS/src/MOI_wrapper.jl:2223; optimize!(model::HiGHS.Optimizer)
+     ╎    ╎    7456   @Base/c.jl:167; disable_sigint
+     ╎    ╎     7456   @HiGHS/src/MOI_wrapper.jl:2223; #42
+ 1440╎    ╎    ╎ 7456   @HiGHS/src/gen/libhighs.jl:328; Highs_run
+     ╎    ╎    ╎  6016   @HiGHS/src/MOI_wrapper.jl:3235; _cfn_user_callback(callback_type::Int32, message::Ptr{Int8}, p_data_out::Ptr{HiGHS.HighsCallbackDataOut}, p_data_in::Ptr{HiGHS.HighsCallbackDataIn}, p_user_data::Ptr{Nothing})
+     ╎    ╎    ╎   6016   @Base/c.jl:181; reenable_sigint
+ 4576╎    ╎    ╎    4576   @HiGHS/src/MOI_wrapper.jl:3236; (::HiGHS.var"#71#72"{Int32, Ptr{Int8}, Ptr{HiGHS.HighsCallbackDataIn}, HiGHS.HighsCallbackDataOut, HiGHS._CallbackData})()
+ 1440╎    ╎    ╎    1440   @HiGHS/src/MOI_wrapper.jl:3237; (::HiGHS.var"#71#72"{Int32, Ptr{Int8}, Ptr{HiGHS.HighsCallbackDataIn}, HiGHS.HighsCallbackDataOut, HiGHS._CallbackData})()
+     ╎    ╎   26116  @HiGHS/src/MOI_wrapper.jl:2230; optimize!(model::HiGHS.Optimizer)
+     ╎    ╎    26116  @HiGHS/src/MOI_wrapper.jl:2088; _store_solution(model::HiGHS.Optimizer, ret::Int32)
+     ╎    ╎     26116  @Base/array.jl:1451; resize!(a::Vector{Int32}, nl_::Int32)
+     ╎    ╎    ╎ 26116  @Base/array.jl:1116; _growend!
+     ╎    ╎    ╎  26116  @Base/array.jl:1129; (::Base.var"#133#134"{Vector{Int32}, Int64, Int64, Int64, Int64, Int64, Memory{Int32}, MemoryRef{Int32}})()
+     ╎    ╎    ╎   26116  @Base/array.jl:1058; array_new_memory
+26116╎    ╎    ╎    26116  @Base/boot.jl:516; GenericMemory
+     ╎6072   @Base/client.jl:541; _start()
+     ╎ 6072   @Base/client.jl:567; repl_main
+     ╎  6072   @Base/client.jl:430; run_main_repl(interactive::Bool, quiet::Bool, banner::Symbol, history_file::Bool, color_set::Bool)
+     ╎   6072   @Base/essentials.jl:1052; invokelatest
+     ╎    6072   @Base/essentials.jl:1055; #invokelatest#2
+     ╎     6072   @Base/client.jl:446; (::Base.var"#1150#1152"{Bool, Symbol, Bool})(REPL::Module)
+     ╎    ╎ 6072   @REPL/src/REPL.jl:486; run_repl(repl::REPL.AbstractREPL, consumer::Any)
+     ╎    ╎  6072   @REPL/src/REPL.jl:500; run_repl(repl::REPL.AbstractREPL, consumer::Any; backend_on_current_task::Bool, backend::Any)
+     ╎    ╎   6072   @REPL/src/REPL.jl:340; kwcall(::NamedTuple, ::typeof(REPL.start_repl_backend), backend::REPL.REPLBackend, consumer::Any)
+     ╎    ╎    6072   @REPL/src/REPL.jl:343; start_repl_backend(backend::REPL.REPLBackend, consumer::Any; get_module::Function)
+     ╎    ╎     6072   @REPL/src/REPL.jl:368; repl_backend_loop(backend::REPL.REPLBackend, get_module::Function)
+     ╎    ╎    ╎ 6072   @REPL/src/REPL.jl:261; eval_user_input(ast::Any, backend::REPL.REPLBackend, mod::Module)
+     ╎    ╎    ╎  6072   @Base/boot.jl:430; eval
+     ╎    ╎    ╎   6072   @COCOA/src/analysis.jl:471; kwcall(::@NamedTuple{optimizer::DataType, sample_size::Int64, cv_threshold::Float64, stage_size::Int64, batch_size::Int64}, ::typeof(concordance_analysis), model::SBMLFBCModels.SBMLFBCModel)
+     ╎    ╎    ╎    80     @COCOA/src/analysis.jl:500; concordance_analysis(model::SBMLFBCModels.SBMLFBCModel; modifications::Vector{Function}, optimizer::Type, settings::Vector{Any}, workers::Vector{Int64}, tolerance::Float64, correlation_threshold::Float64, early_correlation_threshold::Float64, sample_size::Int64, stage_size::Int64, batch_size::Int64, use_shared_arrays::Bool, min_size_for_sharing::Int64, min_valid_samples::Int64, max_correlation_pairs::Int64, seed::Int64, use_unidirectional_c…
+     ╎    ╎    ╎     80     @AbstractFBCModels/src/canonical.jl:195; convert(::Type{AbstractFBCModels.CanonicalModel.Model}, x::SBMLFBCModels.SBMLFBCModel)
+     ╎    ╎    ╎    ╎ 80     @Base/dict.jl:117; Dict
+     ╎    ╎    ╎    ╎  80     @Base/abstractdict.jl:643; dict_with_eltype
+     ╎    ╎    ╎    ╎   80     @Base/abstractdict.jl:636; dict_with_eltype
+     ╎    ╎    ╎    ╎    80     @Base/dict.jl:95; Dict{String, AbstractFBCModels.CanonicalModel.Gene}(kv::Base.Generator{Vector{String}, AbstractFBCModels.CanonicalModel.var"#20#24"{SBMLFBCModels.SBMLFBCModel}})
+     ╎    ╎    ╎    ╎     80     @Base/generator.jl:48; iterate
+     ╎    ╎    ╎    ╎    ╎ 16     @Base/essentials.jl:0; (::AbstractFBCModels.CanonicalModel.var"#18#22"{SBMLFBCModels.SBMLFBCModel})(::Tuple{String, Float64, Float64, Float64})
+     ╎    ╎    ╎    ╎    ╎  16     @SBMLFBCModels/src/interface.jl:175; reaction_gene_association_dnf(model::SBMLFBCModels.SBMLFBCModel, rid::String)
+     ╎    ╎    ╎    ╎    ╎   16     @SBMLFBCModels/src/misc.jl:7; maybemap(fn::typeof(SBMLFBCModels.parse_grr), x::SBML.GPAOr)
+     ╎    ╎    ╎    ╎    ╎    16     @SBMLFBCModels/src/misc.jl:55; parse_grr(gpa::SBML.GPAOr)
+     ╎    ╎    ╎    ╎    ╎     16     @SBMLFBCModels/src/misc.jl:52; (::SBMLFBCModels.var"#dnf#35")(x::SBML.GPAOr)
+     ╎    ╎    ╎    ╎    ╎    ╎ 16     @Base/broadcast.jl:872; materialize(bc::Base.Broadcast.Broadcasted{Base.Broadcast.DefaultArrayStyle{1}, Nothing, SBMLFBCModels.var"#dnf#35", Tuple{Vector{SBML.GeneProductAssociation}}})
+     ╎    ╎    ╎    ╎    ╎    ╎  16     @Base/broadcast.jl:911; copy
+     ╎    ╎    ╎    ╎    ╎    ╎   16     @Base/broadcast.jl:610; getindex
+     ╎    ╎    ╎    ╎    ╎    ╎    16     @Base/broadcast.jl:651; _broadcast_getindex
+     ╎    ╎    ╎    ╎    ╎    ╎     16     @Base/broadcast.jl:678; _broadcast_getindex_evalf
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎ 16     @SBMLFBCModels/src/misc.jl:53; (::SBMLFBCModels.var"#dnf#35")(x::SBML.GPAAnd)
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎  16     @SBMLFBCModels/src/misc.jl:45; (::SBMLFBCModels.var"#fold_and#32")(dnfs::Vector{Vector{Vector{String}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎   16     @SBMLFBCModels/src/misc.jl:16; sortunique(x::Base.Iterators.Flatten{Base.Generator{Vector{Vector{String}}, SBMLFBCModels.var"#31#33"{Vector{Vector{Vector{String}}}}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    16     @Base/array.jl:716; collect
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎     16     @Base/array.jl:768; _collect
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎ 16     @Base/array.jl:864; grow_to!(dest::Vector{Any}, itr::Base.Iterators.Flatten{Base.Generator{Vector{Vector{String}}, SBMLFBCModels.var"#31#33"{Vector{Vector{Vector{String}}}}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎  16     @Base/iterators.jl:1247; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎   16     @Base/iterators.jl:1251; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    16     @Base/generator.jl:48; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎     16     @Base/genericmemory.jl:0; (::SBMLFBCModels.var"#31#33"{Vector{Vector{Vector{String}}}})(l::Vector{String})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎ 16     @SBMLFBCModels/src/misc.jl:45; (::SBMLFBCModels.var"#fold_and#32")(dnfs::Vector{Vector{Vector{String}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎  16     @SBMLFBCModels/src/misc.jl:16; sortunique(x::Base.Iterators.Flatten{Base.Generator{Vector{Vector{String}}, SBMLFBCModels.var"#31#33"{Vector{Vector{Vector{String}}}}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎   16     @Base/array.jl:716; collect
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    16     @Base/array.jl:768; _collect
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎     16     @Base/array.jl:864; grow_to!(dest::Vector{Any}, itr::Base.Iterators.Flatten{Base.Generator{Vector{Vector{String}}, SBMLFBCModels.var"#31#33"{Vector{Vector{Vector{String}}}}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎ 16     @Base/iterators.jl:1247; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎  16     @Base/iterators.jl:1251; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎   16     @Base/generator.jl:48; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    16     @Base/genericmemory.jl:0; (::SBMLFBCModels.var"#31#33"{Vector{Vector{Vector{String}}}})(l::Vector{String})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎     16     @SBMLFBCModels/src/misc.jl:45; (::SBMLFBCModels.var"#fold_and#32")(dnfs::Vector{Vector{Vector{String}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎ 16     @SBMLFBCModels/src/misc.jl:16; sortunique(x::Base.Iterators.Flatten{Base.Generator{Vector{Vector{String}}, SBMLFBCModels.var"#31#33"{Vector{Vector{Vector{String}}}}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎  16     @Base/array.jl:716; collect
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎   16     @Base/array.jl:768; _collect
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    16     @Base/array.jl:864; grow_to!(dest::Vector{Any}, itr::Base.Iterators.Flatten{Base.Generator{Vector{Vector{String}}, SBMLFBCModels.var"#31#33"{Vector{Vector{Vector{String}}}}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎     16     @Base/iterators.jl:1247; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎ 16     @Base/iterators.jl:1251; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎  16     @Base/generator.jl:48; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎   16     @Base/genericmemory.jl:0; (::SBMLFBCModels.var"#31#33"{Vector{Vector{Vector{String}}}})(l::Vector{String})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    16     @SBMLFBCModels/src/misc.jl:45; (::SBMLFBCModels.var"#fold_and#32")(dnfs::Vector{Vector{Vector{String}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎     16     @SBMLFBCModels/src/misc.jl:16; sortunique(x::Base.Iterators.Flatten{Base.Generator{Vector{Vector{String}}, SBMLFBCModels.var"#31#33"{Vector{Vector{Vector{String}}}}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎ 16     @Base/array.jl:716; collect
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎  16     @Base/array.jl:768; _collect
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎   16     @Base/array.jl:864; grow_to!(dest::Vector{Any}, itr::Base.Iterators.Flatten{Base.Generator{Vector{Vector{String}}, SBMLFBCModels.var"#31#33"{Vector{Vector{Vector{String}}}}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    16     @Base/iterators.jl:1247; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎     16     @Base/iterators.jl:1251; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎ 16     @Base/generator.jl:48; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎  16     @Base/genericmemory.jl:0; (::SBMLFBCModels.var"#31#33"{Vector{Vector{Vector{String}}}})(l::Vector{String})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎   16     @SBMLFBCModels/src/misc.jl:45; (::SBMLFBCModels.var"#fold_and#32")(dnfs::Vector{Vector{Vector{String}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    16     @SBMLFBCModels/src/misc.jl:16; sortunique(x::Base.Iterators.Flatten{Base.Generator{Vector{Vector{String}}, SBMLFBCModels.var"#31#33"{Vector{Vector{Vector{String}}}}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎     16     @Base/array.jl:716; collect
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎ 16     @Base/array.jl:768; _collect
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎  16     @Base/array.jl:864; grow_to!(dest::Vector{Any}, itr::Base.Iterators.Flatten{Base.Generator{Vector{Vector{String}}, SBMLFBCModels.var"#31#33"{Vector{Vector{Vector{String}}}}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎   16     @Base/iterators.jl:1247; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    16     @Base/iterators.jl:1251; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎     16     @Base/generator.jl:48; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎ 16     @Base/genericmemory.jl:0; (::SBMLFBCModels.var"#31#33"{Vector{Vector{Vector{String}}}})(l::Vector{String})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎  16     @SBMLFBCModels/src/misc.jl:45; (::SBMLFBCModels.var"#fold_and#32")(dnfs::Vector{Vector{Vector{String}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎   16     @SBMLFBCModels/src/misc.jl:16; sortunique(x::Base.Iterators.Flatten{Base.Generator{Vector{Vector{String}}, SBMLFBCModels.var"#31#33"{Vector{Vector{Vector{String}}}}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    16     @Base/array.jl:716; collect
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎     16     @Base/array.jl:768; _collect
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎ 16     @Base/array.jl:864; grow_to!(dest::Vector{Any}, itr::Base.Iterators.Flatten{Base.Generator{Vector{Vector{String}}, SBMLFBCModels.var"#31#33"{Vector{Vector{Vector{String}}}}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎  16     @Base/iterators.jl:1247; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎   16     @Base/iterators.jl:1251; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    16     @Base/generator.jl:48; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎     16     @Base/genericmemory.jl:0; (::SBMLFBCModels.var"#31#33"{Vector{Vector{Vector{String}}}})(l::Vector{String})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎ 16     @SBMLFBCModels/src/misc.jl:45; (::SBMLFBCModels.var"#fold_and#32")(dnfs::Vector{Vector{Vector{String}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎  16     @SBMLFBCModels/src/misc.jl:16; sortunique(x::Base.Iterators.Flatten{Base.Generator{Vector{Vector{String}}, SBMLFBCModels.var"#31#33"{Vector{Vector{Vector{String}}}}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎   16     @Base/array.jl:716; collect
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    16     @Base/array.jl:768; _collect
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎     16     @Base/array.jl:864; grow_to!(dest::Vector{Any}, itr::Base.Iterators.Flatten{Base.Generator{Vector{Vector{String}}, SBMLFBCModels.var"#31#33"{Vector{Vector{Vector{String}}}}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎ 16     @Base/iterators.jl:1247; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎  16     @Base/iterators.jl:1251; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎   16     @Base/generator.jl:48; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    16     @Base/genericmemory.jl:0; (::SBMLFBCModels.var"#31#33"{Vector{Vector{Vector{String}}}})(l::Vector{String})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎     16     @SBMLFBCModels/src/misc.jl:45; (::SBMLFBCModels.var"#fold_and#32")(dnfs::Vector{Vector{Vector{String}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎ 16     @SBMLFBCModels/src/misc.jl:16; sortunique(x::Base.Iterators.Flatten{Base.Generator{Vector{Vector{String}}, SBMLFBCModels.var"#31#33"{Vector{Vector{Vector{String}}}}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎  16     @Base/array.jl:716; collect
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎   16     @Base/array.jl:768; _collect
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    16     @Base/array.jl:866; grow_to!(dest::Vector{Any}, itr::Base.Iterators.Flatten{Base.Generator{Vector{Vector{String}}, SBMLFBCModels.var"#31#33"{Vector{Vector{Vector{String}}}}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎     16     @Base/abstractarray.jl:887; empty
+   16╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎ 16     @Base/abstractarray.jl:824; similar
+     ╎    ╎    ╎    ╎    ╎ 64     none:0; #20
+     ╎    ╎    ╎    ╎    ╎  64     @SBMLFBCModels/src/interface.jl:215; gene_annotations(model::SBMLFBCModels.SBMLFBCModel, gid::String)
+     ╎    ╎    ╎    ╎    ╎   64     @SBMLFBCModels/src/misc.jl:103; sbml_import_cvterms(sbo::String, cvs::Vector{SBML.CVTerm})
+     ╎    ╎    ╎    ╎    ╎    64     @Base/broadcast.jl:872; materialize
+     ╎    ╎    ╎    ╎    ╎     64     @Base/broadcast.jl:897; copy
+     ╎    ╎    ╎    ╎    ╎    ╎ 64     @Base/broadcast.jl:925; copyto!
+     ╎    ╎    ╎    ╎    ╎    ╎  64     @Base/broadcast.jl:972; copyto!
+     ╎    ╎    ╎    ╎    ╎    ╎   64     @Base/simdloop.jl:77; macro expansion
+     ╎    ╎    ╎    ╎    ╎    ╎    64     @Base/broadcast.jl:973; macro expansion
+     ╎    ╎    ╎    ╎    ╎    ╎     64     @Base/broadcast.jl:610; getindex
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎ 64     @Base/broadcast.jl:651; _broadcast_getindex
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎  64     @Base/broadcast.jl:678; _broadcast_getindex_evalf
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎   64     @SBMLFBCModels/src/misc.jl:94; parse_sbml_identifiers_org_uri(uri::String)
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    64     @Base/regex.jl:462; match
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎     64     @Base/regex.jl:417; match
+   64╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎ 64     @Base/regex.jl:433; match(re::Regex, str::String, idx::Int64, add_opts::UInt32)
+     ╎    ╎    ╎    912    @COCOA/src/analysis.jl:513; concordance_analysis(model::SBMLFBCModels.SBMLFBCModel; modifications::Vector{Function}, optimizer::Type, settings::Vector{Any}, workers::Vector{Int64}, tolerance::Float64, correlation_threshold::Float64, early_correlation_threshold::Float64, sample_size::Int64, stage_size::Int64, batch_size::Int64, use_shared_arrays::Bool, min_size_for_sharing::Int64, min_valid_samples::Int64, max_correlation_pairs::Int64, seed::Int64, use_unidirectional_c…
+     ╎    ╎    ╎     912    @COCOA/src/constraints.jl:286; concordance_constraints
+     ╎    ╎    ╎    ╎ 192    @COCOA/src/constraints.jl:295; concordance_constraints(model::AbstractFBCModels.CanonicalModel.Model; modifications::Vector{Function}, interface::Nothing, use_unidirectional_constraints::Bool, use_shared_arrays::Bool, min_size_for_sharing::Int64)
+     ╎    ╎    ╎    ╎  32     @COCOA/src/constraints.jl:215; create_unidirectional_constraints(model::AbstractFBCModels.CanonicalModel.Model)
+     ╎    ╎    ╎    ╎   32     @COBREXA/src/builders/unsigned.jl:136; kwcall(::@NamedTuple{positive::ConstraintTrees.ConstraintTree, negative::ConstraintTrees.ConstraintTree, signed::ConstraintTrees.ConstraintTree}, ::typeof(sign_split_constraints))
+     ╎    ╎    ╎    ╎    32     @COBREXA/src/builders/unsigned.jl:136; #sign_split_constraints#191
+     ╎    ╎    ╎    ╎     32     @ConstraintTrees/src/tree.jl:392; zip(f::COBREXA.var"#192#193", x::ConstraintTrees.ConstraintTree, y::ConstraintTrees.ConstraintTree, z::ConstraintTrees.ConstraintTree, ::Type{ConstraintTrees.Constraint})
+     ╎    ╎    ╎    ╎    ╎ 32     @ConstraintTrees/src/tree.jl:386; (::ConstraintTrees.var"#go#101"{ConstraintTrees.Constraint, COBREXA.var"#192#193"})(x::ConstraintTrees.ConstraintTree, y::ConstraintTrees.ConstraintTree, z::ConstraintTrees.ConstraintTree)
+     ╎    ╎    ╎    ╎    ╎  32     @ConstraintTrees/src/tree.jl:35; Tree
+     ╎    ╎    ╎    ╎    ╎   32     @DataStructures/src/sorted_dict.jl:119; SortedDict
+     ╎    ╎    ╎    ╎    ╎    32     @DataStructures/src/sorted_dict.jl:122; (DataStructures.SortedDict{Symbol, Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}})(o::Base.Order.ForwardOrdering, kv::Base.Generator{DataStructures.SortedSet{Symbol, Base.Order.ForwardOrdering}, ConstraintTrees.var"#100#102"{ConstraintTrees.ConstraintTree, ConstraintTrees.ConstraintTree, ConstraintTrees.ConstraintTree}})
+     ╎    ╎    ╎    ╎    ╎     32     @DataStructures/src/sorted_dict.jl:29; DataStructures.SortedDict{Symbol, Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}, Base.Order.ForwardOrdering}(o::Base.Order.ForwardOrdering, kv::Base.Generator{DataStructures.SortedSet{Symbol, Base.Order.ForwardOrdering}, ConstraintTrees.var"#100#102"{ConstraintTrees.ConstraintTree, ConstraintTrees.ConstraintTree, ConstraintTrees.ConstraintTree}})
+     ╎    ╎    ╎    ╎    ╎    ╎ 32     @Base/generator.jl:48; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎  32     none:0; (::ConstraintTrees.var"#100#102"{ConstraintTrees.ConstraintTree, ConstraintTrees.ConstraintTree, ConstraintTrees.ConstraintTree})(k::Symbol)
+     ╎    ╎    ╎    ╎    ╎    ╎   32     @ConstraintTrees/src/tree.jl:390; (::ConstraintTrees.var"#go#101"{ConstraintTrees.Constraint, COBREXA.var"#192#193"})(x::ConstraintTrees.Constraint, y::ConstraintTrees.Constraint, z::ConstraintTrees.Constraint)
+     ╎    ╎    ╎    ╎    ╎    ╎    32     @COBREXA/src/builders/unsigned.jl:142; (::COBREXA.var"#192#193")(p::ConstraintTrees.Constraint, n::ConstraintTrees.Constraint, s::ConstraintTrees.Constraint)
+     ╎    ╎    ╎    ╎    ╎    ╎     32     @ConstraintTrees/src/linear_value.jl:133; +(a::ConstraintTrees.LinearValue, b::ConstraintTrees.LinearValue)
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎ 32     @ConstraintTrees/src/linear_value.jl:92; add_sparse_linear_combination(a_idxs::Vector{Int64}, a_weights::Vector{Float64}, b_idxs::Vector{Int64}, b_weights::Vector{Float64})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎  32     @Base/array.jl:400; getindex
+   32╎    ╎    ╎    ╎    ╎    ╎    ╎   32     @Base/boot.jl:579; Array
+     ╎    ╎    ╎    ╎  128    @COCOA/src/constraints.jl:242; create_unidirectional_constraints(model::AbstractFBCModels.CanonicalModel.Model)
+     ╎    ╎    ╎    ╎   128    @ConstraintTrees/src/constraint_tree.jl:350; substitute
+     ╎    ╎    ╎    ╎    128    @ConstraintTrees/src/tree.jl:195; map(f::Function, x::ConstraintTrees.ConstraintTree)
+     ╎    ╎    ╎    ╎     128    @ConstraintTrees/src/tree.jl:198; map(f::ConstraintTrees.var"#154#155"{Vector{ConstraintTrees.LinearValue}}, x::ConstraintTrees.ConstraintTree, ::Type{ConstraintTrees.Constraint})
+     ╎    ╎    ╎    ╎    ╎ 128    @ConstraintTrees/src/tree.jl:195; (::ConstraintTrees.var"#go#63"{ConstraintTrees.Constraint, ConstraintTrees.var"#154#155"{Vector{ConstraintTrees.LinearValue}}})(x::ConstraintTrees.ConstraintTree)
+     ╎    ╎    ╎    ╎    ╎  128    @ConstraintTrees/src/tree.jl:35; Tree
+     ╎    ╎    ╎    ╎    ╎   128    @DataStructures/src/sorted_dict.jl:119; SortedDict
+     ╎    ╎    ╎    ╎    ╎    128    @DataStructures/src/sorted_dict.jl:122; (DataStructures.SortedDict{Symbol, Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}})(o::Base.Order.ForwardOrdering, kv::Base.Generator{ConstraintTrees.ConstraintTree, ConstraintTrees.var"#62#64"})
+     ╎    ╎    ╎    ╎    ╎     128    @DataStructures/src/sorted_dict.jl:29; DataStructures.SortedDict{Symbol, Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}, Base.Order.ForwardOrdering}(o::Base.Order.ForwardOrdering, kv::Base.Generator{ConstraintTrees.ConstraintTree, ConstraintTrees.var"#62#64"})
+     ╎    ╎    ╎    ╎    ╎    ╎ 128    @Base/generator.jl:48; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎  128    none:0; (::ConstraintTrees.var"#62#64")(::Pair{Symbol, ConstraintTrees.ConstraintTree})
+     ╎    ╎    ╎    ╎    ╎    ╎   128    @ConstraintTrees/src/tree.jl:195; (::ConstraintTrees.var"#go#63"{ConstraintTrees.Constraint, ConstraintTrees.var"#154#155"{Vector{ConstraintTrees.LinearValue}}})(x::ConstraintTrees.ConstraintTree)
+     ╎    ╎    ╎    ╎    ╎    ╎    128    @ConstraintTrees/src/tree.jl:35; Tree
+     ╎    ╎    ╎    ╎    ╎    ╎     128    @DataStructures/src/sorted_dict.jl:119; SortedDict
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎ 128    @DataStructures/src/sorted_dict.jl:122; (DataStructures.SortedDict{Symbol, Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}})(o::Base.Order.ForwardOrdering, kv::Base.Generator{ConstraintTrees.ConstraintTree, ConstraintTrees.var"#62#64"})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎  64     @DataStructures/src/sorted_dict.jl:28; DataStructures.SortedDict{Symbol, Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}, Base.Order.ForwardOrdering}(o::Base.Order.ForwardOrdering, kv::Base.Generator{ConstraintTrees.ConstraintTree, ConstraintTrees.var"#62#64"})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎   64     @DataStructures/src/sorted_dict.jl:212; setindex!
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    64     @DataStructures/src/balanced_tree.jl:480; insert!(t::DataStructures.BalancedTree23{Symbol, Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}, Base.Order.ForwardOrdering}, k::Symbol, d::ConstraintTrees.Constraint, allowdups::Bool)
+   64╎    ╎    ╎    ╎    ╎    ╎    ╎     64     @DataStructures/src/balanced_tree.jl:65; TreeNode
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎  64     @DataStructures/src/sorted_dict.jl:29; DataStructures.SortedDict{Symbol, Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}, Base.Order.ForwardOrdering}(o::Base.Order.ForwardOrdering, kv::Base.Generator{ConstraintTrees.ConstraintTree, ConstraintTrees.var"#62#64"})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎   32     @Base/generator.jl:45; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    32     @ConstraintTrees/src/tree.jl:58; iterate(x::ConstraintTrees.ConstraintTree, st::DataStructures.SAIterationState)
+   32╎    ╎    ╎    ╎    ╎    ╎    ╎     32     @DataStructures/src/container_loops.jl:302; iterate(s::DataStructures.SortedDict{Symbol, Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}, Base.Order.ForwardOrdering}, state::DataStructures.SAIterationState)
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎   32     @Base/generator.jl:48; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    32     none:0; (::ConstraintTrees.var"#62#64")(::Pair{Symbol, ConstraintTrees.Constraint})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎     32     @ConstraintTrees/src/tree.jl:196; (::ConstraintTrees.var"#go#63"{ConstraintTrees.Constraint, ConstraintTrees.var"#154#155"{Vector{ConstraintTrees.LinearValue}}})(x::ConstraintTrees.Constraint)
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎ 32     @ConstraintTrees/src/constraint_tree.jl:352; #154
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎  32     @ConstraintTrees/src/constraint.jl:79; substitute(x::ConstraintTrees.Constraint, y::Vector{ConstraintTrees.LinearValue})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎   32     @ConstraintTrees/src/linear_value.jl:144; substitute(x::ConstraintTrees.LinearValue, y::Vector{ConstraintTrees.LinearValue})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    32     @ConstraintTrees/src/value.jl:101; sum
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎     32     @ConstraintTrees/src/value.jl:101; #sum#2
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎ 32     @ConstraintTrees/src/value.jl:61; preduce
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎  32     @ConstraintTrees/src/value.jl:76; preduce(op::typeof(+), xs::Base.Generator{Base.Iterators.Enumerate{Vector{Int64}}, ConstraintTrees.var"#5#6"{ConstraintTrees.LinearValue, Vector{ConstraintTrees.LinearValue}}}; init::Float64, stack_type::Type)
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎   32     @ConstraintTrees/src/linear_value.jl:133; +(a::ConstraintTrees.LinearValue, b::ConstraintTrees.LinearValue)
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    32     @ConstraintTrees/src/linear_value.jl:93; add_sparse_linear_combination(a_idxs::Vector{Int64}, a_weights::Vector{Float64}, b_idxs::Vector{Int64}, b_weights::Vector{Float64})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎     32     @Base/array.jl:400; getindex
+   32╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎ 32     @Base/boot.jl:579; Array
+     ╎    ╎    ╎    ╎  32     @COCOA/src/constraints.jl:257; create_unidirectional_constraints(model::AbstractFBCModels.CanonicalModel.Model)
+     ╎    ╎    ╎    ╎   32     @ConstraintTrees/src/constraint_tree.jl:202; prune_variables(x::ConstraintTrees.ConstraintTree)
+     ╎    ╎    ╎    ╎    32     @ConstraintTrees/src/constraint_tree.jl:223; renumber_variables(x::ConstraintTrees.ConstraintTree, mapping::DataStructures.SortedDict{Int64, Int64, Base.Order.ForwardOrdering})
+     ╎    ╎    ╎    ╎     32     @ConstraintTrees/src/tree.jl:35; ConstraintTrees.ConstraintTree(x::Base.Generator{ConstraintTrees.ConstraintTree, ConstraintTrees.var"#139#140"{DataStructures.SortedDict{Int64, Int64, Base.Order.ForwardOrdering}}})
+     ╎    ╎    ╎    ╎    ╎ 32     @DataStructures/src/sorted_dict.jl:119; (DataStructures.SortedDict{Symbol, Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}})(kv::Base.Generator{ConstraintTrees.ConstraintTree, ConstraintTrees.var"#139#140"{DataStructures.SortedDict{Int64, Int64, Base.Order.ForwardOrdering}}})
+     ╎    ╎    ╎    ╎    ╎  32     @DataStructures/src/sorted_dict.jl:122; (DataStructures.SortedDict{Symbol, Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}})(o::Base.Order.ForwardOrdering, kv::Base.Generator{ConstraintTrees.ConstraintTree, ConstraintTrees.var"#139#140"{DataStructures.SortedDict{Int64, Int64, Base.Order.ForwardOrdering}}})
+     ╎    ╎    ╎    ╎    ╎   32     @DataStructures/src/sorted_dict.jl:29; DataStructures.SortedDict{Symbol, Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}, Base.Order.ForwardOrdering}(o::Base.Order.ForwardOrdering, kv::Base.Generator{ConstraintTrees.ConstraintTree, ConstraintTrees.var"#139#140"{DataStructures.SortedDict{Int64, Int64, Base.Order.ForwardOrdering}}})
+     ╎    ╎    ╎    ╎    ╎    32     @Base/generator.jl:48; iterate(g::Base.Generator{ConstraintTrees.ConstraintTree, ConstraintTrees.var"#139#140"{DataStructures.SortedDict{Int64, Int64, Base.Order.ForwardOrdering}}}, s::DataStructures.SAIterationState)
+     ╎    ╎    ╎    ╎    ╎     32     none:0; (::ConstraintTrees.var"#139#140"{DataStructures.SortedDict{Int64, Int64, Base.Order.ForwardOrdering}})(::Pair{Symbol, ConstraintTrees.ConstraintTree})
+     ╎    ╎    ╎    ╎    ╎    ╎ 32     @ConstraintTrees/src/constraint_tree.jl:223; renumber_variables(x::ConstraintTrees.ConstraintTree, mapping::DataStructures.SortedDict{Int64, Int64, Base.Order.ForwardOrdering})
+     ╎    ╎    ╎    ╎    ╎    ╎  32     @ConstraintTrees/src/tree.jl:35; ConstraintTrees.ConstraintTree(x::Base.Generator{ConstraintTrees.ConstraintTree, ConstraintTrees.var"#139#140"{DataStructures.SortedDict{Int64, Int64, Base.Order.ForwardOrdering}}})
+     ╎    ╎    ╎    ╎    ╎    ╎   32     @DataStructures/src/sorted_dict.jl:119; (DataStructures.SortedDict{Symbol, Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}})(kv::Base.Generator{ConstraintTrees.ConstraintTree, ConstraintTrees.var"#139#140"{DataStructures.SortedDict{Int64, Int64, Base.Order.ForwardOrdering}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    32     @DataStructures/src/sorted_dict.jl:122; (DataStructures.SortedDict{Symbol, Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}})(o::Base.Order.ForwardOrdering, kv::Base.Generator{ConstraintTrees.ConstraintTree, ConstraintTrees.var"#139#140"{DataStructures.SortedDict{Int64, Int64, Base.Order.ForwardOrdering}}})
+     ╎    ╎    ╎    ╎    ╎    ╎     32     @DataStructures/src/sorted_dict.jl:29; DataStructures.SortedDict{Symbol, Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}, Base.Order.ForwardOrdering}(o::Base.Order.ForwardOrdering, kv::Base.Generator{ConstraintTrees.ConstraintTree, ConstraintTrees.var"#139#140"{DataStructures.SortedDict{Int64, Int64, Base.Order.ForwardOrdering}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎ 32     @Base/generator.jl:45; iterate(g::Base.Generator{ConstraintTrees.ConstraintTree, ConstraintTrees.var"#139#140"{DataStructures.SortedDict{Int64, Int64, Base.Order.ForwardOrdering}}}, s::DataStructures.SAIterationState)
+   32╎    ╎    ╎    ╎    ╎    ╎    ╎  32     @ConstraintTrees/src/tree.jl:58; iterate(x::ConstraintTrees.ConstraintTree, st::DataStructures.SAIterationState)
+     ╎    ╎    ╎    ╎ 48     @COCOA/src/constraints.jl:312; concordance_constraints(model::AbstractFBCModels.CanonicalModel.Model; modifications::Vector{Function}, interface::Nothing, use_unidirectional_constraints::Bool, use_shared_arrays::Bool, min_size_for_sharing::Int64)
+     ╎    ╎    ╎    ╎  48     @COCOA/src/constraints.jl:25; extract_complexes_and_incidence
+     ╎    ╎    ╎    ╎   48     @COCOA/src/constraints.jl:99; extract_complexes_and_incidence(model::AbstractFBCModels.CanonicalModel.Model; use_shared_arrays::Bool, min_size_for_sharing::Int64)
+     ╎    ╎    ╎    ╎    32     @COCOA/src/constraints.jl:157; create_complex(met_idxs::Vector{Int32}, stoich::Vector{Float32}, met_names::Vector{String})
+     ╎    ╎    ╎    ╎     32     @Base/array.jl:400; getindex
+   32╎    ╎    ╎    ╎    ╎ 32     @Base/boot.jl:579; Array
+     ╎    ╎    ╎    ╎    16     @COCOA/src/constraints.jl:167; create_complex(met_idxs::Vector{Int32}, stoich::Vector{Float32}, met_names::Vector{String})
+     ╎    ╎    ╎    ╎     16     @Base/strings/io.jl:377; join
+     ╎    ╎    ╎    ╎    ╎ 16     @Base/strings/io.jl:359; _join_preserve_annotations
+     ╎    ╎    ╎    ╎    ╎  16     @Base/strings/io.jl:107; sprint
+   16╎    ╎    ╎    ╎    ╎   16     @Base/strings/io.jl:114; sprint(::Function, ::Vector{String}, ::Vararg{Any}; context::Nothing, sizehint::Int64)
+     ╎    ╎    ╎    ╎ 672    @COCOA/src/constraints.jl:339; concordance_constraints(model::AbstractFBCModels.CanonicalModel.Model; modifications::Vector{Function}, interface::Nothing, use_unidirectional_constraints::Bool, use_shared_arrays::Bool, min_size_for_sharing::Int64)
+     ╎    ╎    ╎    ╎  672    @COCOA/src/constraints.jl:385; build_complex_activities_functional(complexes::Vector{COCOA.Complex}, A_matrix::COCOA.SparseIncidenceMatrix, flux_constraints::ConstraintTrees.ConstraintTree, constraint_rxn_ids::Vector{Symbol})
+     ╎    ╎    ╎    ╎   672    @Base/abstractarray.jl:3371; map
+     ╎    ╎    ╎    ╎    672    @Base/array.jl:720; collect_similar
+     ╎    ╎    ╎    ╎     672    @Base/array.jl:821; _collect(c::UnitRange{Int64}, itr::Base.Generator{UnitRange{Int64}, COCOA.var"#53#54"{Vector{COCOA.Complex}, ConstraintTrees.ConstraintTree, Vector{Symbol}, SparseArrays.SparseMatrixCSC{Float64, Int64}}}, ::Base.EltypeUnknown, isz::Base.HasShape{1})
+     ╎    ╎    ╎    ╎    ╎ 672    @Base/array.jl:827; collect_to_with_first!
+     ╎    ╎    ╎    ╎    ╎  672    @Base/array.jl:849; collect_to!
+     ╎    ╎    ╎    ╎    ╎   672    @Base/generator.jl:48; iterate
+     ╎    ╎    ╎    ╎    ╎    640    @COCOA/src/constraints.jl:389; #53
+     ╎    ╎    ╎    ╎    ╎     32     @COCOA/src/constraints.jl:423; build_activity_expression(A_sparse::SparseArrays.SparseMatrixCSC{Float64, Int64}, complex_idx::Int64, constraint_rxn_ids::Vector{Symbol}, flux_constraints::ConstraintTrees.ConstraintTree)
+     ╎    ╎    ╎    ╎    ╎    ╎ 32     @Base/boot.jl:601; Array
+   32╎    ╎    ╎    ╎    ╎    ╎  32     @Base/boot.jl:579; Array
+     ╎    ╎    ╎    ╎    ╎     608    @COCOA/src/constraints.jl:429; build_activity_expression(A_sparse::SparseArrays.SparseMatrixCSC{Float64, Int64}, complex_idx::Int64, constraint_rxn_ids::Vector{Symbol}, flux_constraints::ConstraintTrees.ConstraintTree)
+     ╎    ╎    ╎    ╎    ╎    ╎ 608    @ConstraintTrees/src/constraint_tree.jl:101; variable_count(x::ConstraintTrees.ConstraintTree)
+     ╎    ╎    ╎    ╎    ╎    ╎  608    @Base/broadcast.jl:872; materialize(bc::Base.Broadcast.Broadcasted{Base.Broadcast.DefaultArrayStyle{1}, Nothing, typeof(ConstraintTrees.variable_count), Tuple{Vector{Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}}}})
+     ╎    ╎    ╎    ╎    ╎    ╎   32     @Base/broadcast.jl:894; copy(bc::Base.Broadcast.Broadcasted{Base.Broadcast.DefaultArrayStyle{1}, Tuple{Base.OneTo{Int64}}, typeof(ConstraintTrees.variable_count), Tuple{Vector{Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    32     @Base/broadcast.jl:729; combine_eltypes(f::Function, args::Tuple{Vector{Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}}})
+   32╎    ╎    ╎    ╎    ╎    ╎     32     @Base/compiler/typeinfer.jl:1160; return_type(f::Any, t::DataType)
+     ╎    ╎    ╎    ╎    ╎    ╎   576    @Base/broadcast.jl:897; copy(bc::Base.Broadcast.Broadcasted{Base.Broadcast.DefaultArrayStyle{1}, Tuple{Base.OneTo{Int64}}, typeof(ConstraintTrees.variable_count), Tuple{Vector{Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    576    @Base/broadcast.jl:925; copyto!(dest::Vector{Int64}, bc::Base.Broadcast.Broadcasted{Base.Broadcast.DefaultArrayStyle{1}, Tuple{Base.OneTo{Int64}}, typeof(ConstraintTrees.variable_count), Tuple{Vector{Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}}}})
+     ╎    ╎    ╎    ╎    ╎    ╎     576    @Base/broadcast.jl:972; copyto!(dest::Vector{Int64}, bc::Base.Broadcast.Broadcasted{Nothing, Tuple{Base.OneTo{Int64}}, typeof(ConstraintTrees.variable_count), Tuple{Vector{Union{ConstraintTrees.Constraint, ConstraintTrees.ConstraintTree}}}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎ 576    @Base/simdloop.jl:77; macro expansion
+  576╎    ╎    ╎    ╎    ╎    ╎    ╎  576    @Base/broadcast.jl:973; macro expansion
+     ╎    ╎    ╎    ╎    ╎    32     @COCOA/src/constraints.jl:394; #53
+     ╎    ╎    ╎    ╎    ╎     32     @ConstraintTrees/src/constraint.jl:30; Constraint
+     ╎    ╎    ╎    ╎    ╎    ╎ 32     @ConstraintTrees/src/constraint.jl:30; #Constraint#49
+   32╎    ╎    ╎    ╎    ╎    ╎  32     @ConstraintTrees/src/constraint.jl:40; Constraint
+     ╎    ╎    ╎    32     @COCOA/src/analysis.jl:558; concordance_analysis(model::SBMLFBCModels.SBMLFBCModel; modifications::Vector{Function}, optimizer::Type, settings::Vector{Any}, workers::Vector{Int64}, tolerance::Float64, correlation_threshold::Float64, early_correlation_threshold::Float64, sample_size::Int64, stage_size::Int64, batch_size::Int64, use_shared_arrays::Bool, min_size_for_sharing::Int64, min_valid_samples::Int64, max_correlation_pairs::Int64, seed::Int64, use_unidirectional_c…
+     ╎    ╎    ╎     32     @Base/timing.jl:421; macro expansion
+     ╎    ╎    ╎    ╎ 32     @COBREXA/src/analysis/variability.jl:27; kwcall(::@NamedTuple{optimizer::DataType, settings::Vector{Any}, output::typeof(COCOA.ava_output_with_warmup), output_type::DataType, workers::Vector{Int64}}, ::typeof(constraints_variability), constraints::ConstraintTrees.ConstraintTree, targets::ConstraintTrees.ConstraintTree)
+     ╎    ╎    ╎    ╎  32     @COBREXA/src/analysis/variability.jl:39; constraints_variability(constraints::ConstraintTrees.ConstraintTree, targets::ConstraintTrees.ConstraintTree; kwargs::Base.Pairs{Symbol, Any, NTuple{5, Symbol}, @NamedTuple{optimizer::DataType, settings::Vector{Any}, output::typeof(COCOA.ava_output_with_warmup), output_type::DataType, workers::Vector{Int64}}})
+     ╎    ╎    ╎    ╎   32     @Base/tuple.jl:167; indexed_iterate(I::SubArray{Union{Nothing, Tuple{Float64, Vector{Float64}}}, 1, Matrix{Union{Nothing, Tuple{Float64, Vector{Float64}}}}, Tuple{Int64, Base.Slice{Base.OneTo{Int64}}}, true}, i::Int64, state::Tuple{Base.OneTo{Int64}, Int64})
+   32╎    ╎    ╎    ╎    32     @Base/abstractarray.jl:1209; iterate
+     ╎    ╎    ╎    5000   @COCOA/src/analysis.jl:698; concordance_analysis(model::SBMLFBCModels.SBMLFBCModel; modifications::Vector{Function}, optimizer::Type, settings::Vector{Any}, workers::Vector{Int64}, tolerance::Float64, correlation_threshold::Float64, early_correlation_threshold::Float64, sample_size::Int64, stage_size::Int64, batch_size::Int64, use_shared_arrays::Bool, min_size_for_sharing::Int64, min_valid_samples::Int64, max_correlation_pairs::Int64, seed::Int64, use_unidirectional_c…
+     ╎    ╎    ╎     5000   @Base/timing.jl:421; macro expansion
+     ╎    ╎    ╎    ╎ 5000   @COCOA/src/filter.jl:475; kwcall(::@NamedTuple{tolerance::Float64, correlation_threshold::Float64, sample_size::Int64, min_valid_samples::Int64, max_correlation_pairs::Int64, early_correlation_threshold::Float64, workers::Vector{Int64}, seed::Int64, use_cv_filtering::Bool, cv_threshold::Float64, cv_epsilon::Float64, cv_fallback_to_correlation::Bool}, ::typeof(COCOA.streaming_filter), complexes::Vector{COCOA.Complex}, balanced_complexes::Set{Symbol}, positive_complex…
+     ╎    ╎    ╎    ╎  600    @COCOA/src/filter.jl:604; streaming_filter(complexes::Vector{COCOA.Complex}, balanced_complexes::Set{Symbol}, positive_complexes::Set{Int64}, negative_complexes::Set{Int64}, unrestricted_complexes::Set{Int64}, trivial_pairs::Set{Tuple{Int64, Int64}}, warmup::Matrix{Float64}, constraints::ConstraintTrees.ConstraintTree; tolerance::Float64, correlation_threshold::Float64, sample_size::Int64, min_valid_samples::Int64, max_correlation_pairs::Int64, early_correlation_th…
+     ╎    ╎    ╎    ╎   600    @COBREXA/src/analysis/sample.jl:203; kwcall(::@NamedTuple{output::ConstraintTrees.ConstraintTree, start_variables::Matrix{Float64}, seed::UInt64, n_chains::Int64, collect_iterations::Vector{Int64}, workers::Vector{Int64}}, ::typeof(sample_constraints), sampler::Function, constraints::ConstraintTrees.ConstraintTree)
+     ╎    ╎    ╎    ╎    8      @COBREXA/src/analysis/sample.jl:211; sample_constraints(sampler::Function, constraints::ConstraintTrees.ConstraintTree; output::ConstraintTrees.ConstraintTree, aggregate::typeof(collect), aggregate_type::Type{Vector{Float64}}, kwargs::Base.Pairs{Symbol, Any, NTuple{5, Symbol}, @NamedTuple{start_variables::Matrix{Float64}, seed::UInt64, n_chains::Int64, collect_iterations::Vector{Int64}, workers::Vector{Int64}}})
+     ╎    ╎    ╎    ╎     8      @COBREXA/src/analysis/sample.jl:129; kwcall(::@NamedTuple{start_variables::Matrix{Float64}, seed::UInt64, n_chains::Int64, collect_iterations::Vector{Int64}, workers::Vector{Int64}}, ::typeof(sample_constraint_variables), sampler::Function, constraints::ConstraintTrees.ConstraintTree)
+     ╎    ╎    ╎    ╎    ╎ 8      @COBREXA/src/analysis/sample.jl:168; sample_constraint_variables(sampler::typeof(sample_chain_achr), constraints::ConstraintTrees.ConstraintTree; start_variables::Matrix{Float64}, seed::UInt64, workers::Vector{Int64}, n_chains::Int64, kwargs::Base.Pairs{Symbol, Vector{Int64}, Tuple{Symbol}, @NamedTuple{collect_iterations::Vector{Int64}}})
+     ╎    ╎    ╎    ╎    ╎  8      @Base/broadcast.jl:1323; broadcasted
+     ╎    ╎    ╎    ╎    ╎   8      @Base/broadcast.jl:712; broadcastable
+     ╎    ╎    ╎    ╎    ╎    8      @Base/array.jl:801; collect(itr::Base.Generator{Vector{ConstraintTrees.Constraint}, COBREXA.var"#22#28"{Int64}})
+     ╎    ╎    ╎    ╎    ╎     8      @Base/array.jl:827; collect_to_with_first!(dest::Vector{SparseArrays.SparseVector{Float64, Int64}}, v1::SparseArrays.SparseVector{Float64, Int64}, itr::Base.Generator{Vector{ConstraintTrees.Constraint}, COBREXA.var"#22#28"{Int64}}, st::Int64)
+     ╎    ╎    ╎    ╎    ╎    ╎ 8      @Base/array.jl:849; collect_to!(dest::Vector{SparseArrays.SparseVector{Float64, Int64}}, itr::Base.Generator{Vector{ConstraintTrees.Constraint}, COBREXA.var"#22#28"{Int64}}, offs::Int64, st::Int64)
+     ╎    ╎    ╎    ╎    ╎    ╎  8      @Base/generator.jl:48; iterate
+    8╎    ╎    ╎    ╎    ╎    ╎   8      none:0; (::COBREXA.var"#22#28"{Int64})(c::ConstraintTrees.Constraint)
+     ╎    ╎    ╎    ╎    592    @COBREXA/src/analysis/sample.jl:213; sample_constraints(sampler::Function, constraints::ConstraintTrees.ConstraintTree; output::ConstraintTrees.ConstraintTree, aggregate::typeof(collect), aggregate_type::Type{Vector{Float64}}, kwargs::Base.Pairs{Symbol, Any, NTuple{5, Symbol}, @NamedTuple{start_variables::Matrix{Float64}, seed::UInt64, n_chains::Int64, collect_iterations::Vector{Int64}, workers::Vector{Int64}}})
+     ╎    ╎    ╎    ╎     592    @ConstraintTrees/src/tree.jl:198; map(f::COBREXA.var"#33#35"{typeof(collect), Matrix{Float64}}, x::ConstraintTrees.ConstraintTree, ::Type{Vector{Float64}})
+     ╎    ╎    ╎    ╎    ╎ 592    @ConstraintTrees/src/tree.jl:195; (::ConstraintTrees.var"#go#63"{Vector{Float64}, COBREXA.var"#33#35"{typeof(collect), Matrix{Float64}}})(x::ConstraintTrees.ConstraintTree)
+     ╎    ╎    ╎    ╎    ╎  592    @ConstraintTrees/src/tree.jl:35; Tree
+     ╎    ╎    ╎    ╎    ╎   592    @DataStructures/src/sorted_dict.jl:119; SortedDict
+     ╎    ╎    ╎    ╎    ╎    592    @DataStructures/src/sorted_dict.jl:122; (DataStructures.SortedDict{Symbol, Union{ConstraintTrees.Tree{Vector{Float64}}, Vector{Float64}}})(o::Base.Order.ForwardOrdering, kv::Base.Generator{ConstraintTrees.ConstraintTree, ConstraintTrees.var"#62#64"})
+     ╎    ╎    ╎    ╎    ╎     592    @DataStructures/src/sorted_dict.jl:29; DataStructures.SortedDict{Symbol, Union{ConstraintTrees.Tree{Vector{Float64}}, Vector{Float64}}, Base.Order.ForwardOrdering}(o::Base.Order.ForwardOrdering, kv::Base.Generator{ConstraintTrees.ConstraintTree, ConstraintTrees.var"#62#64"})
+     ╎    ╎    ╎    ╎    ╎    ╎ 592    @Base/generator.jl:48; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎  576    none:0; (::ConstraintTrees.var"#62#64")(::Pair{Symbol, ConstraintTrees.Constraint})
+     ╎    ╎    ╎    ╎    ╎    ╎   576    @ConstraintTrees/src/tree.jl:196; (::ConstraintTrees.var"#go#63"{Vector{Float64}, COBREXA.var"#33#35"{typeof(collect), Matrix{Float64}}})(x::ConstraintTrees.Constraint)
+     ╎    ╎    ╎    ╎    ╎    ╎    576    @COBREXA/src/analysis/sample.jl:214; #33
+   16╎    ╎    ╎    ╎    ╎    ╎     16     @Base/array.jl:796; collect(itr::Base.Generator{RowSlices{Matrix{Float64}, Tuple{Base.OneTo{Int64}}, SubArray{Float64, 1, Matrix{Float64}, Tuple{Int64, Base.Slice{Base.OneTo{Int64}}}, true}}, COBREXA.var"#34#36"{ConstraintTrees.Constraint}})
+     ╎    ╎    ╎    ╎    ╎    ╎     560    @Base/array.jl:801; collect(itr::Base.Generator{RowSlices{Matrix{Float64}, Tuple{Base.OneTo{Int64}}, SubArray{Float64, 1, Matrix{Float64}, Tuple{Int64, Base.Slice{Base.OneTo{Int64}}}, true}}, COBREXA.var"#34#36"{ConstraintTrees.Constraint}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎ 560    @Base/array.jl:827; collect_to_with_first!(dest::Vector{Float64}, v1::Float64, itr::Base.Generator{RowSlices{Matrix{Float64}, Tuple{Base.OneTo{Int64}}, SubArray{Float64, 1, Matrix{Float64}, Tuple{Int64, Base.Slice{Base.OneTo{Int64}}}, true}}, COBREXA.var"#34#36"{ConstraintTrees.Constraint}}, st::Tuple{Base.OneTo{Int64}, Int64})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎  560    @Base/array.jl:849; collect_to!(dest::Vector{Float64}, itr::Base.Generator{RowSlices{Matrix{Float64}, Tuple{Base.OneTo{Int64}}, SubArray{Float64, 1, Matrix{Float64}, Tuple{Int64, Base.Slice{Base.OneTo{Int64}}}, true}}, COBREXA.var"#34#36"{ConstraintTrees.Constraint}}, offs::Int64, st::Tuple{Base.OneTo{Int64}, Int64})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎   560    @Base/generator.jl:48; iterate
+  144╎    ╎    ╎    ╎    ╎    ╎    ╎    560    none:0; (::COBREXA.var"#34#36"{ConstraintTrees.Constraint})(row::SubArray{Float64, 1, Matrix{Float64}, Tuple{Int64, Base.Slice{Base.OneTo{Int64}}}, true})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎     416    @ConstraintTrees/src/linear_value.jl:144; substitute(x::ConstraintTrees.LinearValue, y::SubArray{Float64, 1, Matrix{Float64}, Tuple{Int64, Base.Slice{Base.OneTo{Int64}}}, true})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎ 416    @ConstraintTrees/src/value.jl:101; sum
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎  416    @ConstraintTrees/src/value.jl:101; #sum#2
+   80╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎   416    @ConstraintTrees/src/value.jl:61; preduce
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    32     @ConstraintTrees/src/value.jl:65; preduce(op::typeof(+), xs::Base.Generator{Base.Iterators.Enumerate{Vector{Int64}}, ConstraintTrees.var"#5#6"{ConstraintTrees.LinearValue, SubArray{Float64, 1, Matrix{Float64}, Tuple{Int64, Base.Slice{Base.OneTo{Int64}}}, true}}}; init::Float64, stack_type::Type)
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎     32     @Base/boot.jl:601; Array
+   32╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎ 32     @Base/boot.jl:579; Array
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    32     @ConstraintTrees/src/value.jl:66; preduce(op::typeof(+), xs::Base.Generator{Base.Iterators.Enumerate{Vector{Int64}}, ConstraintTrees.var"#5#6"{ConstraintTrees.LinearValue, SubArray{Float64, 1, Matrix{Float64}, Tuple{Int64, Base.Slice{Base.OneTo{Int64}}}, true}}}; init::Float64, stack_type::Type)
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎     32     @Base/boot.jl:601; Vector{Any}()
+   32╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎ 32     @Base/boot.jl:579; Array
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    48     @ConstraintTrees/src/value.jl:68; preduce(op::typeof(+), xs::Base.Generator{Base.Iterators.Enumerate{Vector{Int64}}, ConstraintTrees.var"#5#6"{ConstraintTrees.LinearValue, SubArray{Float64, 1, Matrix{Float64}, Tuple{Int64, Base.Slice{Base.OneTo{Int64}}}, true}}}; init::Float64, stack_type::Type)
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎     48     @Base/generator.jl:45; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎ 48     @Base/iterators.jl:205; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎  48     @Base/iterators.jl:206; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎   48     @Base/array.jl:902; iterate
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    48     @Base/array.jl:902; iterate
+   48╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎     48     @Base/essentials.jl:916; getindex
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    48     @ConstraintTrees/src/value.jl:72; preduce(op::typeof(+), xs::Base.Generator{Base.Iterators.Enumerate{Vector{Int64}}, ConstraintTrees.var"#5#6"{ConstraintTrees.LinearValue, SubArray{Float64, 1, Matrix{Float64}, Tuple{Int64, Base.Slice{Base.OneTo{Int64}}}, true}}}; init::Float64, stack_type::Type)
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎     48     @Base/array.jl:1261; push!
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎ 48     @Base/array.jl:1116; _growend!
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎  48     @Base/array.jl:1129; (::Base.var"#133#134"{Vector{Bool}, Int64, Int64, Int64, Int64, Int64, Memory{Bool}, MemoryRef{Bool}})()
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎   48     @Base/array.jl:1058; array_new_memory
+   48╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    48     @Base/boot.jl:516; GenericMemory
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    112    @ConstraintTrees/src/value.jl:73; preduce(op::typeof(+), xs::Base.Generator{Base.Iterators.Enumerate{Vector{Int64}}, ConstraintTrees.var"#5#6"{ConstraintTrees.LinearValue, SubArray{Float64, 1, Matrix{Float64}, Tuple{Int64, Base.Slice{Base.OneTo{Int64}}}, true}}}; init::Float64, stack_type::Type)
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎     80     @Base/array.jl:1268; push!
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎ 80     @Base/array.jl:1116; _growend!
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎  80     @Base/array.jl:1129; (::Base.var"#133#134"{Vector{Any}, Int64, Int64, Int64, Int64, Int64, Memory{Any}, MemoryRef{Any}})()
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎   80     @Base/array.jl:1058; array_new_memory
+   80╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    80     @Base/boot.jl:516; GenericMemory
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎     32     @Base/array.jl:1269; push!
+   32╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎ 32     @Base/array.jl:999; __safe_setindex!
+   48╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    48     @ConstraintTrees/src/value.jl:76; preduce(op::typeof(+), xs::Base.Generator{Base.Iterators.Enumerate{Vector{Int64}}, ConstraintTrees.var"#5#6"{ConstraintTrees.LinearValue, SubArray{Float64, 1, Matrix{Float64}, Tuple{Int64, Base.Slice{Base.OneTo{Int64}}}, true}}}; init::Float64, stack_type::Type)
+   16╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    16     @ConstraintTrees/src/value.jl:87; preduce(op::typeof(+), xs::Base.Generator{Base.Iterators.Enumerate{Vector{Int64}}, ConstraintTrees.var"#5#6"{ConstraintTrees.LinearValue, SubArray{Float64, 1, Matrix{Float64}, Tuple{Int64, Base.Slice{Base.OneTo{Int64}}}, true}}}; init::Float64, stack_type::Type)
+   16╎    ╎    ╎    ╎    ╎    ╎  16     @Base/tuple.jl:31; getindex
+     ╎    ╎    ╎    ╎  4400   @COCOA/src/filter.jl:698; streaming_filter(complexes::Vector{COCOA.Complex}, balanced_complexes::Set{Symbol}, positive_complexes::Set{Int64}, negative_complexes::Set{Int64}, unrestricted_complexes::Set{Int64}, trivial_pairs::Set{Tuple{Int64, Int64}}, warmup::Matrix{Float64}, constraints::ConstraintTrees.ConstraintTree; tolerance::Float64, correlation_threshold::Float64, sample_size::Int64, min_valid_samples::Int64, max_correlation_pairs::Int64, early_correlation_th…
+     ╎    ╎    ╎    ╎   2480   @COCOA/src/filter.jl:438; coefficient_of_variation_filter(activity_refs::Dict{Symbol, Vector{Float64}}, valid_complexes::Vector{COCOA.Complex}, cv_threshold::Float64, cv_epsilon::Float64)
+     ╎    ╎    ╎    ╎    2480   @Base/broadcast.jl:872; materialize
+     ╎    ╎    ╎    ╎     2480   @Base/broadcast.jl:897; copy
+     ╎    ╎    ╎    ╎    ╎ 2480   @Base/broadcast.jl:223; similar
+     ╎    ╎    ╎    ╎    ╎  2480   @Base/broadcast.jl:224; similar
+     ╎    ╎    ╎    ╎    ╎   2480   @Base/abstractarray.jl:867; similar
+     ╎    ╎    ╎    ╎    ╎    2480   @Base/abstractarray.jl:868; similar
+     ╎    ╎    ╎    ╎    ╎     2480   @Base/boot.jl:599; Array
+     ╎    ╎    ╎    ╎    ╎    ╎ 2480   @Base/boot.jl:591; Array
+     ╎    ╎    ╎    ╎    ╎    ╎  2448   @Base/boot.jl:578; Array
+ 2448╎    ╎    ╎    ╎    ╎    ╎   2448   @Base/boot.jl:516; GenericMemory
+   32╎    ╎    ╎    ╎    ╎    ╎  32     @Base/boot.jl:579; Array
+     ╎    ╎    ╎    ╎   1920   @COCOA/src/filter.jl:441; coefficient_of_variation_filter(activity_refs::Dict{Symbol, Vector{Float64}}, valid_complexes::Vector{COCOA.Complex}, cv_threshold::Float64, cv_epsilon::Float64)
+     ╎    ╎    ╎    ╎    1664   @Base/abstractarray.jl:1312; getindex
+     ╎    ╎    ╎    ╎     1664   @Base/multidimensional.jl:915; _getindex
+     ╎    ╎    ╎    ╎    ╎ 1664   @Base/multidimensional.jl:927; _unsafe_getindex(::IndexLinear, A::Vector{Float64}, I::Base.LogicalIndex{Int64, BitVector})
+     ╎    ╎    ╎    ╎    ╎  1664   @Base/abstractarray.jl:822; similar
+     ╎    ╎    ╎    ╎    ╎   1664   @Base/array.jl:372; similar
+     ╎    ╎    ╎    ╎    ╎    1664   @Base/boot.jl:591; Array
+     ╎    ╎    ╎    ╎    ╎     1632   @Base/boot.jl:578; Array
+ 1632╎    ╎    ╎    ╎    ╎    ╎ 1632   @Base/boot.jl:516; GenericMemory
+   32╎    ╎    ╎    ╎    ╎     32     @Base/boot.jl:579; Array
+     ╎    ╎    ╎    ╎    256    @Base/broadcast.jl:872; materialize
+     ╎    ╎    ╎    ╎     256    @Base/broadcast.jl:897; copy
+     ╎    ╎    ╎    ╎    ╎ 256    @Base/broadcast.jl:223; similar
+     ╎    ╎    ╎    ╎    ╎  256    @Base/broadcast.jl:226; similar
+     ╎    ╎    ╎    ╎    ╎   256    @Base/abstractarray.jl:867; similar
+     ╎    ╎    ╎    ╎    ╎    256    @Base/abstractarray.jl:868; similar
+     ╎    ╎    ╎    ╎    ╎     256    @Base/bitarray.jl:71; BitArray
+     ╎    ╎    ╎    ╎    ╎    ╎ 160    @Base/bitarray.jl:37; BitArray
+     ╎    ╎    ╎    ╎    ╎    ╎  96     @Base/boot.jl:578; Array
+   96╎    ╎    ╎    ╎    ╎    ╎   96     @Base/boot.jl:516; GenericMemory
+   64╎    ╎    ╎    ╎    ╎    ╎  64     @Base/boot.jl:579; Array
+   96╎    ╎    ╎    ╎    ╎    ╎ 96     @Base/bitarray.jl:39; BitArray
+     ╎    ╎    ╎    48     @COCOA/src/analysis.jl:727; concordance_analysis(model::SBMLFBCModels.SBMLFBCModel; modifications::Vector{Function}, optimizer::Type, settings::Vector{Any}, workers::Vector{Int64}, tolerance::Float64, correlation_threshold::Float64, early_correlation_threshold::Float64, sample_size::Int64, stage_size::Int64, batch_size::Int64, use_shared_arrays::Bool, min_size_for_sharing::Int64, min_valid_samples::Int64, max_correlation_pairs::Int64, seed::Int64, use_unidirectional_c…
+     ╎    ╎    ╎     48     @Base/timing.jl:421; macro expansion
+     ╎    ╎    ╎    ╎ 48     @COCOA/src/analysis.jl:33; process_in_stages
+     ╎    ╎    ╎    ╎  48     @COCOA/src/analysis.jl:124; process_in_stages(constraints::ConstraintTrees.ConstraintTree, complexes::Vector{COCOA.Complex}, candidate_priorities::Vector{COCOA.PairPriority}, A_matrix::COCOA.SparseIncidenceMatrix, concordance_tracker::COCOA.SharedConcordanceTracker; optimizer::Type, settings::Vector{Any}, workers::Vector{Int64}, stage_size::Int64, batch_size::Int64, tolerance::Float64)
+     ╎    ╎    ╎    ╎   48     @COCOA/src/analysis.jl:365; process_concordance_batch
+   16╎    ╎    ╎    ╎    16     @COCOA/src/analysis.jl:378; process_concordance_batch(constraints::ConstraintTrees.ConstraintTree, complexes::Vector{COCOA.Complex}, batch_pairs::Vector{Tuple{Int64, Int64, Set{Symbol}}}, A_matrix::COCOA.SparseIncidenceMatrix; optimizer::Type, settings::Vector{Any}, workers::Vector{Int64}, tolerance::Float64)
+     ╎    ╎    ╎    ╎    32     @COCOA/src/analysis.jl:400; process_concordance_batch(constraints::ConstraintTrees.ConstraintTree, complexes::Vector{COCOA.Complex}, batch_pairs::Vector{Tuple{Int64, Int64, Set{Symbol}}}, A_matrix::COCOA.SparseIncidenceMatrix; optimizer::Type, settings::Vector{Any}, workers::Vector{Int64}, tolerance::Float64)
+     ╎    ╎    ╎    ╎     32     @COCOA/src/constraints.jl:574; test_concordance
+     ╎    ╎    ╎    ╎    ╎ 32     @COCOA/src/constraints.jl:585; test_concordance(base_constraints::ConstraintTrees.ConstraintTree, c1_activity::ConstraintTrees.LinearValue, c2_activity::ConstraintTrees.LinearValue, direction::Symbol; tolerance::Float64, optimizer::Type, workers::Vector{Int64}, settings::Vector{Any})
+     ╎    ╎    ╎    ╎    ╎  32     @COBREXA/src/analysis/screen.jl:52; screen_optimization_model
+     ╎    ╎    ╎    ╎    ╎   32     @COBREXA/src/analysis/screen.jl:70; #screen_optimization_model#38
+     ╎    ╎    ╎    ╎    ╎    32     @Distributed/src/pmap.jl:99; pmap
+     ╎    ╎    ╎    ╎    ╎     32     @Distributed/src/pmap.jl:126; pmap(f::Function, p::CachingPool, c::Vector{Tuple{MathOptInterface.OptimizationSense, Symbol}}; distributed::Bool, batch_size::Int64, on_error::Nothing, retry_delays::Vector{Any}, retry_check::Nothing)
+     ╎    ╎    ╎    ╎    ╎    ╎ 32     @Base/asyncmap.jl:74; asyncmap
+     ╎    ╎    ╎    ╎    ╎    ╎  32     @Base/asyncmap.jl:75; #asyncmap#1154
+     ╎    ╎    ╎    ╎    ╎    ╎   32     @Base/asyncmap.jl:78; async_usemap
+     ╎    ╎    ╎    ╎    ╎    ╎    32     @Base/asyncmap.jl:97; #async_usemap#1155
+     ╎    ╎    ╎    ╎    ╎    ╎     32     @Base/asyncmap.jl:147; wrap_n_exec_twice
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎ 32     @Base/asyncmap.jl:181; maptwice(wrapped_f::Function, chnl::Channel{Any}, worker_tasks::Vector{Any}, c::Vector{Tuple{MathOptInterface.OptimizationSense, Symbol}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎  32     @Base/abstractarray.jl:3371; map(f::Function, A::Vector{Base.RefValue{Any}})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎   32     @Base/array.jl:720; collect_similar(cont::Vector{Base.RefValue{Any}}, itr::Base.Generator{Vector{Base.RefValue{Any}}, Base.var"#1171#1173"})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    32     @Base/array.jl:816; _collect(c::Vector{Base.RefValue{Any}}, itr::Base.Generator{Vector{Base.RefValue{Any}}, Base.var"#1171#1173"}, ::Base.EltypeUnknown, isz::Base.HasShape{1})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎     32     @Base/array.jl:670; _similar_for
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎ 32     @Base/abstractarray.jl:830; similar
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎  32     @Base/array.jl:372; similar(a::Vector{Base.RefValue{Any}}, T::Type, dims::Tuple{Int64})
+     ╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎   32     @Base/boot.jl:591; Vector{Nothing}(::UndefInitializer, d::Tuple{Int64})
+   32╎    ╎    ╎    ╎    ╎    ╎    ╎    ╎    32     @Base/boot.jl:579; Array
+     ╎72     @Base/threadingconstructs.jl:154; (::Base.Threads.var"#1#2"{COCOA.var"#7894#threadsfor_fun#233"{COCOA.var"#7894#threadsfor_fun#225#234"{Float64, Vector{Vector{COCOA.StreamingCorrelation}}, Int64, ProgressMeter.Progress, Base.Threads.Atomic{Int64}, Int64, Vector{COCOA.Complex}, Dict{Symbol, Vector{Float64}}, COCOA.CorrelationTracker, UnitRange{Int64}}}, Int64})()
+     ╎ 72     @Base/threadingconstructs.jl:220; #7894#threadsfor_fun
+     ╎  72     @Base/threadingconstructs.jl:253; (::COCOA.var"#7894#threadsfor_fun#233"{COCOA.var"#7894#threadsfor_fun#225#234"{Float64, Vector{Vector{COCOA.StreamingCorrelation}}, Int64, ProgressMeter.Progress, Base.Threads.Atomic{Int64}, Int64, Vector{COCOA.Complex}, Dict{Symbol, Vector{Float64}}, COCOA.CorrelationTracker, UnitRange{Int64}}})(tid::Int64; onethread::Bool)
+    8╎   8      @COCOA/src/filter.jl:792; macro expansion
+     ╎   64     @COCOA/src/filter.jl:817; macro expansion
+     ╎    64     @COCOA/src/filter.jl:245; update_correlation_tracker!(tracker::COCOA.CorrelationTracker, pair_key::Tuple{Symbol, Symbol}, corr_acc::COCOA.StreamingCorrelation, sample_number::Int64, final_threshold::Float64)
+     ╎     64     @Base/lock.jl:232; lock(f::COCOA.var"#210#211"{COCOA.CorrelationTracker, Tuple{Symbol, Symbol}, COCOA.StreamingCorrelation, Int64, Float64, Float64}, l::ReentrantLock)
+     ╎    ╎ 64     @COCOA/src/filter.jl:272; (::COCOA.var"#210#211"{COCOA.CorrelationTracker, Tuple{Symbol, Symbol}, COCOA.StreamingCorrelation, Int64, Float64, Float64})()
+     ╎    ╎  64     @COCOA/src/filter.jl:207; copy
+   64╎    ╎   64     @COCOA/src/filter.jl:66; StreamingCorrelation
+Total snapshots: 6173
+Total bytes: 320381

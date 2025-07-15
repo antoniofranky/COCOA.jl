@@ -460,6 +460,10 @@ Main concordance analysis function optimized for large models and HPC execution.
 - `max_correlation_pairs=500_000`: Maximum correlation pairs to evaluate
 - `seed=42`: Master random seed for hierarchical reproducible RNG. Uses StableRNGs for cross-platform reproducibility and generates deterministic seeds for different analysis components (warmup generation, batch coordination, etc.)
 - `use_unidirectional_constraints=true`: Split reversible reactions
+- `use_cv_filtering=true`: Use coefficient of variation filtering (upstream MATLAB approach) instead of correlation filtering
+- `cv_threshold=0.01`: Maximum coefficient of variation for activity ratios (lower = more stringent)
+- `cv_epsilon=1e-12`: Numerical stability epsilon for ratio calculations
+- `cv_fallback_to_correlation=true`: Fall back to correlation filtering if CV filtering fails
 
 # Returns
 Named tuple with concordance analysis results including complexes, modules, and statistics.
@@ -482,7 +486,11 @@ function concordance_analysis(
     max_correlation_pairs::Int=500_000,
     seed::Union{Int,Nothing}=42,
     use_unidirectional_constraints::Bool=true,
-    sampling_quality::Symbol=:balanced,  # :conservative, :balanced, :high_quality
+    # CV filtering parameters (new upstream MATLAB approach)
+    use_cv_filtering::Bool=true,
+    cv_threshold::Float64=0.01,
+    cv_epsilon::Float64=1e-12,
+    cv_fallback_to_correlation::Bool=false,
 )
     start_time = time()
 
@@ -687,7 +695,7 @@ function concordance_analysis(
     @info "Generating candidate pairs via streaming correlation"
 
     # Pass the pre-computed warmup points directly
-    correlation_time = @elapsed candidate_priorities = streaming_correlation_filter(
+    correlation_time = @elapsed candidate_priorities = streaming_filter(
         complexes,
         balanced_complexes,
         positive_complexes,
@@ -704,7 +712,11 @@ function concordance_analysis(
         early_correlation_threshold=early_correlation_threshold,
         workers=workers,
         seed=seed,
-        sampling_quality=sampling_quality,
+        # CV filtering parameters
+        use_cv_filtering=use_cv_filtering,
+        cv_threshold=cv_threshold,
+        cv_epsilon=cv_epsilon,
+        cv_fallback_to_correlation=cv_fallback_to_correlation,
     )
 
     @info "Candidate pairs identified" n_pairs = length(candidate_priorities) correlation_time_sec = round(correlation_time, digits=2)

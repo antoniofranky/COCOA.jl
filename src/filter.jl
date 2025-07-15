@@ -135,7 +135,7 @@ mutable struct CorrelationTracker
     pairs_promoted::Threads.Atomic{Int}
     pairs_rejected_statistically::Threads.Atomic{Int}
     pairs_evicted_lru::Threads.Atomic{Int}
-    
+
     # Thread synchronization
     tracker_lock::ReentrantLock
 
@@ -340,7 +340,7 @@ Thread-safe access to tracker data structures.
 """
 function get_candidate_pairs(tracker::CorrelationTracker, final_threshold::Float64, min_valid_samples::Int)
     candidates = CorrelationEntry[]
-    
+
     lock(tracker.tracker_lock) do
         # High confidence pairs (already meet promotion threshold)
         for (pair_key, corr_acc) in tracker.high_confidence
@@ -403,12 +403,76 @@ end
 """
 $(TYPEDSIGNATURES)
 
+Compute coefficient of variation for activity ratios between complex pairs.
+Based on the upstream MATLAB algorithm approach.
+
+For each pair (i,j), computes CV of activity_i/activity_j ratios across samples.
+Pairs with CV <= cv_threshold are considered for concordance testing.
+
+Returns a vector of tuples (i, j, cv_value) for pairs meeting the threshold.
+"""
+function coefficient_of_variation_filter(
+    activity_refs::Dict{Symbol,Vector{Float64}},
+    valid_complexes::Vector{Complex},
+    cv_threshold::Float64,
+    cv_epsilon::Float64
+)
+    n_valid = length(valid_complexes)
+
+    # Pre-allocate result vector
+    cv_candidates = Vector{Tuple{Int,Int,Float64}}()
+
+    # Process pairs in batches for memory efficiency
+    @info "Computing CV filtering for $(n_valid) complexes" cv_threshold
+
+    for i in 1:n_valid
+        ci = valid_complexes[i]
+        ci_activities = activity_refs[ci.id]
+
+        for j in (i+1):n_valid
+            cj = valid_complexes[j]
+            cj_activities = activity_refs[cj.id]
+
+            # Compute activity ratios with epsilon for numerical stability
+            # Following the MATLAB approach: (sample+eps)./(sample_reshaped+eps)
+            ratios = (ci_activities .+ cv_epsilon) ./ (cj_activities .+ cv_epsilon)
+
+            # Handle potential infinite or NaN values
+            valid_ratios = ratios[isfinite.(ratios)]
+
+            if length(valid_ratios) >= 2  # Need at least 2 samples for CV
+                # Compute coefficient of variation: std/mean
+                ratio_mean = mean(valid_ratios)
+                ratio_std = std(valid_ratios)
+
+                # Avoid division by zero
+                if abs(ratio_mean) > cv_epsilon
+                    cv_value = ratio_std / abs(ratio_mean)
+
+                    # Keep pairs with LOW coefficient of variation (consistent ratios)
+                    if cv_value <= cv_threshold
+                        push!(cv_candidates, (i, j, cv_value))
+                    end
+                end
+            end
+        end
+    end
+
+    @info "CV filtering complete" n_pairs_evaluated = div(n_valid * (n_valid - 1), 2) n_cv_candidates = length(cv_candidates)
+
+    return cv_candidates
+end
+
+"""
+$(TYPEDSIGNATURES)
+
 Perform streaming correlation analysis for complex concordance with direct matrix sampling.
-- Uses memory-efficient direct matrix sampling
+- Uses memory-efficient direct matrix sampling  
 - Filters out balanced complexes and trivial pairs
+- Supports both CV-based and correlation-based filtering
 - Returns PairPriority objects for high-correlation candidates
 """
-function streaming_correlation_filter(
+function streaming_filter(
     complexes::Vector{Complex},
     balanced_complexes::Set{Symbol},
     positive_complexes::Set{Int},
@@ -425,7 +489,11 @@ function streaming_correlation_filter(
     early_correlation_threshold::Float64=0.8,
     workers=workers,
     seed::Union{Int,Nothing}=42,
-    sampling_quality::Symbol=:balanced,
+    # CV filtering parameters
+    use_cv_filtering::Bool=true,
+    cv_threshold::Float64=0.01,
+    cv_epsilon::Float64=1e-12,
+    cv_fallback_to_correlation::Bool=true,
 )
     # Setup simple RNG for reproducible sampling
     rng = seed === nothing ? StableRNG() : StableRNG(seed)
@@ -449,74 +517,87 @@ function streaming_correlation_filter(
 
     # Use more workers for better parallelization 
     n_chains = min(12, length(workers))  # Use most available workers (was 4, now up to 12)
-    
-    # IMPROVED: Configurable sampling quality with intelligent scaling
+
+    # Sampling configuration
     n_warmup_available = size(warmup, 1)
     n_complexes = length(complexes)
-    
-    # Configure parameters based on sampling quality preference
-    if sampling_quality == :conservative
-        # Original conservative settings (fast, lower quality)
-        base_warmup_per_chain = 100
-        burn_in_period = 32
-        thinning_interval = 8
-        quality_multiplier = 1.0
-    elseif sampling_quality == :high_quality
-        # High quality settings (slower, best quality)
-        base_warmup_per_chain = 300
-        burn_in_period = 80
-        thinning_interval = 4
-        quality_multiplier = 1.5
-    else  # :balanced (default)
-        # Balanced settings (good quality, reasonable speed)
-        base_warmup_per_chain = 200
-        burn_in_period = 50
-        thinning_interval = 6
-        quality_multiplier = 1.2
-    end
-    
+
+    # Use balanced settings (good quality, reasonable speed)
+    base_warmup_per_chain = 200
+    burn_in_period = 50
+    thinning_interval = 6
+
     # Scale based on model complexity and available data
     if n_complexes > 10_000  # Large models need more diverse sampling
-        target_warmup_per_chain = round(Int, base_warmup_per_chain * 2.0 * quality_multiplier)
+        target_warmup_per_chain = round(Int, base_warmup_per_chain * 2.4)
     elseif n_complexes > 5_000  # Medium models
-        target_warmup_per_chain = round(Int, base_warmup_per_chain * 1.5 * quality_multiplier)
+        target_warmup_per_chain = round(Int, base_warmup_per_chain * 1.8)
     else  # Smaller models
-        target_warmup_per_chain = round(Int, base_warmup_per_chain * quality_multiplier)
+        target_warmup_per_chain = round(Int, base_warmup_per_chain * 1.2)
     end
-    
+
     # Scale with available data, distribute efficiently across chains
     max_warmup_per_chain = min(
         600,  # Reasonable upper limit for computational efficiency
         max(target_warmup_per_chain, div(n_warmup_available, max(1, div(n_chains, 2))))
     )
-    
+
     n_warmup_points_per_chain = min(max_warmup_per_chain, n_warmup_available)
-    
-    @info "Intelligent sampling configuration" sampling_quality n_complexes target_warmup_per_chain n_warmup_available n_warmup_points_per_chain burn_in_period thinning_interval
 
-    # Calculate required collections more efficiently
+    @info "Intelligent sampling configuration" n_complexes target_warmup_per_chain n_warmup_available n_warmup_points_per_chain burn_in_period thinning_interval
+
+    # Calculate required collections - FIXED to generate exactly requested samples
     target_samples_per_chain = ceil(Int, sample_size / n_chains)
-    n_collections_per_chain = min(target_samples_per_chain, n_warmup_points_per_chain)
 
-    # Generate iteration list more efficiently
-    iters_to_collect = collect(burn_in_period:thinning_interval:(burn_in_period+(n_collections_per_chain-1)*thinning_interval))
+    # CRITICAL FIX: collect_iterations should be a single iteration number
+    # COBREXA generates n_warmup_points_per_chain samples AT EACH iteration
+    # So we need exactly 1 iteration to get n_warmup_points_per_chain samples
 
-    @info "Optimized sampling parameters" n_chains n_warmup_points_per_chain n_collections_per_chain iters_to_collect
-    
+    # CRITICAL FIX: We need to generate exactly target_samples_per_chain samples
+    # COBREXA's sample_chain_achr generates n_warmup_points samples at each iteration
+    # So we need to ensure we have exactly target_samples_per_chain warmup points
+
+    # Don't reduce the quality of warmup points - instead, adjust the number of chains
+    # to ensure we get exactly the right number of samples
+    n_warmup_points_per_chain = target_samples_per_chain
+
+    # Calculate a reasonable iteration for sampling (after burn-in)
+    target_iteration = burn_in_period + max(1, (target_samples_per_chain - 1) * thinning_interval)
+
+    # Use a single iteration to avoid multiplying sample count
+    iters_to_collect = [target_iteration]
+
+    @info "Optimized sampling parameters" n_chains n_warmup_points_per_chain target_samples_per_chain iters_to_collect
+
     # Performance monitoring metrics
-    expected_total_samples = n_chains * n_collections_per_chain
+    expected_total_samples = n_chains * target_samples_per_chain
     warmup_efficiency = round(n_warmup_points_per_chain / max(1, n_warmup_available), digits=3)
     @info "Sampling efficiency metrics" expected_total_samples warmup_efficiency
+
+    # VALIDATION: Ensure we're configured to generate exactly the requested samples
+    if expected_total_samples != sample_size
+        @warn "Sample configuration mismatch!" expected_total_samples sample_size n_chains target_samples_per_chain
+    end
 
     # === MEMORY-EFFICIENT SAMPLING ===
     @info "Generating flux samples with memory optimization"
 
-    # Use a subset of warmup points to reduce memory pressure
+    # Use exactly the number of warmup points we need for the target sample count
+    # This ensures we get exactly target_samples_per_chain samples per chain
     if size(warmup, 1) > n_warmup_points_per_chain
         selected_indices = sort(randperm(rng, size(warmup, 1))[1:n_warmup_points_per_chain])
         limited_warmup = warmup[selected_indices, :]
     else
-        limited_warmup = warmup
+        # If we don't have enough warmup points, we'll need to repeat some
+        if size(warmup, 1) < n_warmup_points_per_chain
+            # Repeat warmup points to reach target
+            n_repeats = ceil(Int, n_warmup_points_per_chain / size(warmup, 1))
+            repeated_warmup = repeat(warmup, n_repeats, 1)
+            selected_indices = sort(randperm(rng, size(repeated_warmup, 1))[1:n_warmup_points_per_chain])
+            limited_warmup = repeated_warmup[selected_indices, :]
+        else
+            limited_warmup = warmup
+        end
     end
 
     # Sample with optimized settings
@@ -533,6 +614,20 @@ function streaming_correlation_filter(
 
     # === OPTIMIZED SAMPLE PROCESSING ===
     @info "Processing samples with zero-copy optimization"
+
+    # VALIDATION: Check that we got exactly the expected number of samples
+    if !isempty(all_samples)
+        # Check first complex to verify sample count
+        first_complex_id = first(keys(all_samples))
+        actual_samples_per_complex = length(all_samples[first_complex_id])
+        actual_total_samples = actual_samples_per_complex * n_chains
+
+        @info "Sample count validation" actual_samples_per_complex actual_total_samples expected_total_samples
+
+        if actual_total_samples != expected_total_samples
+            @warn "Generated sample count doesn't match expected!" actual_total_samples expected_total_samples
+        end
+    end
 
     # Pre-filter active complexes more efficiently
     active_complexes = [c for c in complexes if !(c.id in balanced_complexes)]
@@ -590,54 +685,86 @@ function streaming_correlation_filter(
     n_samples = length(first(values(activity_refs)))
     @info "Total samples available: $n_samples"
 
-    # OPTIMIZED: Pre-allocate and compute all valid pairs to avoid reallocations
-    # First pass: count valid pairs to pre-allocate exact size
-    n_valid_pairs = 0
-    for i = 1:n_valid
-        ci = valid_complexes[i]
-        ci_original_idx = get(original_indices, ci.id, 0)
-        if ci_original_idx == 0
-            continue
-        end
-        for j = (i+1):n_valid
-            cj = valid_complexes[j]
-            cj_original_idx = get(original_indices, cj.id, 0)
-            if cj_original_idx == 0
+    # FINAL VALIDATION: Assert that we got exactly the requested sample count
+    if n_samples != sample_size
+        error("CRITICAL: Generated $n_samples samples but requested $sample_size samples!")
+    end
+
+    # === CV-BASED FILTERING (NEW APPROACH) ===
+    if use_cv_filtering
+        @info "Using CV-based filtering (upstream MATLAB approach)"
+
+        # Apply CV filtering to get candidate pairs
+        cv_candidates = coefficient_of_variation_filter(
+            activity_refs, valid_complexes, cv_threshold, cv_epsilon
+        )
+
+        # Convert CV candidates to the same format as correlation pairs
+        cv_valid_pairs = [(i, j) for (i, j, _) in cv_candidates]
+
+        @info "CV filtering results" n_cv_candidates = length(cv_valid_pairs) cv_threshold
+
+        # Use CV candidates as the pairs to process
+        valid_pairs = cv_valid_pairs
+        total_pairs = length(valid_pairs)
+
+        # Process CV-filtered pairs with correlation tracking for consistency
+        @info "Processing CV-filtered pairs with correlation tracking"
+
+    else
+        @info "Using correlation-based filtering (original approach)"
+
+        # OPTIMIZED: Pre-allocate and compute all valid pairs to avoid reallocations
+        # First pass: count valid pairs to pre-allocate exact size
+        n_valid_pairs = 0
+        for i = 1:n_valid
+            ci = valid_complexes[i]
+            ci_original_idx = get(original_indices, ci.id, 0)
+            if ci_original_idx == 0
                 continue
             end
-            if (i, j) ∉ skip_pairs_set
-                n_valid_pairs += 1
+            for j = (i+1):n_valid
+                cj = valid_complexes[j]
+                cj_original_idx = get(original_indices, cj.id, 0)
+                if cj_original_idx == 0
+                    continue
+                end
+                if (i, j) ∉ skip_pairs_set
+                    n_valid_pairs += 1
+                end
             end
         end
-    end
-    
-    # Pre-allocate with exact size to avoid reallocations
-    valid_pairs = Vector{Tuple{Int,Int}}(undef, n_valid_pairs)
-    pair_idx = 0
-    
-    # Second pass: fill pre-allocated array
-    for i = 1:n_valid
-        ci = valid_complexes[i]
-        ci_original_idx = get(original_indices, ci.id, 0)
-        if ci_original_idx == 0
-            continue
-        end
-        for j = (i+1):n_valid
-            cj = valid_complexes[j]
-            cj_original_idx = get(original_indices, cj.id, 0)
-            if cj_original_idx == 0
+
+        # Pre-allocate with exact size to avoid reallocations
+        valid_pairs = Vector{Tuple{Int,Int}}(undef, n_valid_pairs)
+        pair_idx = 0
+
+        # Second pass: fill pre-allocated array
+        for i = 1:n_valid
+            ci = valid_complexes[i]
+            ci_original_idx = get(original_indices, ci.id, 0)
+            if ci_original_idx == 0
                 continue
             end
-            if (i, j) ∉ skip_pairs_set
-                pair_idx += 1
-                valid_pairs[pair_idx] = (i, j)
+            for j = (i+1):n_valid
+                cj = valid_complexes[j]
+                cj_original_idx = get(original_indices, cj.id, 0)
+                if cj_original_idx == 0
+                    continue
+                end
+                if (i, j) ∉ skip_pairs_set
+                    pair_idx += 1
+                    valid_pairs[pair_idx] = (i, j)
+                end
             end
         end
-    end
-    
-    total_pairs = length(valid_pairs)
+
+        total_pairs = length(valid_pairs)
+    end  # End of else block
+
+    # Common processing for both CV and correlation approaches
     @info "Total pairs to process: $total_pairs"
-    
+
     # Initialize thread-safe progress tracking
     processed_pairs = Threads.Atomic{Int}(0)
     progress = Progress(total_pairs, desc="Computing correlations: ", showspeed=true)
@@ -645,25 +772,25 @@ function streaming_correlation_filter(
     # OPTIMIZED: Process correlations with object pooling to reduce allocations
     n_threads = Threads.nthreads()
     use_threading = should_use_threading()
-    
+
     # Create thread-local object pools for StreamingCorrelation reuse
     POOL_SIZE = 10  # Small pool per thread to avoid excessive memory
     thread_pools = [Vector{StreamingCorrelation}(undef, POOL_SIZE) for _ in 1:n_threads]
-    
+
     # Initialize pools
     for pool in thread_pools
         for i in 1:POOL_SIZE
             pool[i] = StreamingCorrelation()
         end
     end
-    
+
     if use_threading
         @info "Using $n_threads threads for correlation computation with object pooling"
-        
+
         # Thread-parallel correlation computation with object pooling
         Threads.@threads for pair_idx in 1:total_pairs
             i, j = valid_pairs[pair_idx]
-            
+
             ci = valid_complexes[i]
             cj = valid_complexes[j]
 
@@ -672,7 +799,7 @@ function streaming_correlation_filter(
             pool = thread_pools[thread_id]
             pool_idx = ((pair_idx - 1) % POOL_SIZE) + 1
             corr_acc = pool[pool_idx]
-            
+
             # Reset for reuse
             reset!(corr_acc)
 
@@ -697,20 +824,20 @@ function streaming_correlation_filter(
         end
     else
         @info "Using sequential correlation computation with object pooling (single thread)"
-        
+
         # Sequential correlation computation with single pool
         pool = thread_pools[1]
-        
+
         for pair_idx in 1:total_pairs
             i, j = valid_pairs[pair_idx]
-            
+
             ci = valid_complexes[i]
             cj = valid_complexes[j]
 
             # Get from object pool (avoids allocation)
             pool_idx = ((pair_idx - 1) % POOL_SIZE) + 1
             corr_acc = pool[pool_idx]
-            
+
             # Reset for reuse
             reset!(corr_acc)
 
@@ -736,13 +863,32 @@ function streaming_correlation_filter(
     end
 
     ProgressMeter.finish!(progress)
-    @info "Threaded correlation computation complete" processed_pairs=processed_pairs[] n_threads=n_threads
+    @info "Threaded correlation computation complete" processed_pairs = processed_pairs[] n_threads = n_threads
 
     # === EXTRACT FINAL CANDIDATES ===
     @info "Extracting final candidates"
 
     candidates = get_candidate_pairs(correlation_tracker, correlation_threshold, min_valid_samples)
     @info "Found $(length(candidates)) candidate pairs"
+
+    # Log performance comparison between CV and correlation filtering
+    if use_cv_filtering
+        @info "CV filtering performance summary" (
+            method="CV-based",
+            cv_threshold=cv_threshold,
+            cv_pairs_processed=total_pairs,
+            final_candidates=length(candidates),
+            cv_efficiency=length(candidates) / total_pairs
+        )
+    else
+        @info "Correlation filtering performance summary" (
+            method="Correlation-based",
+            correlation_threshold=correlation_threshold,
+            correlation_pairs_processed=total_pairs,
+            final_candidates=length(candidates),
+            correlation_efficiency=length(candidates) / total_pairs
+        )
+    end
 
     # Convert to PairPriority objects
     priorities = PairPriority[]
