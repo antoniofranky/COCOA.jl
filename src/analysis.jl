@@ -26,12 +26,12 @@ import Base.Iterators
 """
 $(TYPEDSIGNATURES)
 
-Process concordance analysis in stages with intelligent reprioritization based on concordant discoveries.
+Process concordance analysis in stages.
 When concordant pairs are found, remaining pairs involving those complexes are prioritized.
 This exploits the clustering tendency of concordant complexes to dramatically improve efficiency.
 """
 function process_in_stages(
-    constraints::ConstraintTree,
+    constraints::C.ConstraintTree,
     complexes::Vector{Complex},
     candidate_priorities::Vector{PairPriority},
     A_matrix::Union{SparseIncidenceMatrix,SharedSparseMatrix},
@@ -63,8 +63,6 @@ function process_in_stages(
     total_pairs = length(remaining_pairs)
     processed_pairs = 0
     all_concordant_complexes = Set{Symbol}()  # Accumulate across stages
-
-    @info "Processing concordance tests in stages with intelligent prioritization"
 
     prog = Progress(
         total_pairs,
@@ -360,10 +358,48 @@ end
 """
 $(TYPEDSIGNATURES)
 
-Process a batch of concordance tests using ConstraintTrees approach.
+Pre-compute reaction indices for all expanded pairs to avoid repeated union operations.
+"""
+function precompute_reaction_indices(expanded_pairs, activity_lookup, complexes)
+    reaction_indices_cache = Dict{Tuple{Int,Int},Set{Int}}()
+
+    for (c1_idx, c2_idx, _) in expanded_pairs
+        key = (c1_idx, c2_idx)
+        if !haskey(reaction_indices_cache, key)
+            c1_activity = activity_lookup[complexes[c1_idx].id]
+            c2_activity = activity_lookup[complexes[c2_idx].id]
+            reaction_indices_cache[key] = Set(union(c1_activity.idxs, c2_activity.idxs))
+        end
+    end
+
+    return reaction_indices_cache
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Build efficient activity expression avoiding repeated allocations.
+"""
+function build_activity_expression(activity::C.LinearValue, w::Dict{Int,JuMP.VariableRef}, reaction_indices::Set{Int})
+    # Pre-filter relevant indices to avoid repeated checks
+    relevant_terms = JuMP.AffExpr()
+
+    for i in eachindex(activity.idxs)
+        if activity.idxs[i] in reaction_indices
+            JuMP.add_to_expression!(relevant_terms, activity.weights[i], w[activity.idxs[i]])
+        end
+    end
+
+    return relevant_terms
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Process a batch of concordance tests using ConstraintTrees approach with parallel batch processing.
 """
 function process_concordance_batch(
-    constraints::ConstraintTree,
+    constraints::C.ConstraintTree,
     complexes::Vector{Complex},
     batch_pairs::Vector{Tuple{Int,Int,Set{Symbol}}},
     A_matrix::Union{SparseIncidenceMatrix,SharedSparseMatrix};
@@ -372,10 +408,13 @@ function process_concordance_batch(
     workers=workers,
     tolerance::Float64=1e-12
 )
+    # Optimize constraint trees by pruning unused variables
+    pruned_constraints = C.prune_variables(constraints)
+
     # Extract activity lookup from pre-computed ConstraintTrees
     activity_lookup = Dict{Symbol,C.LinearValue}()
 
-    for (complex_id, constraint) in constraints.concordance_analysis.complexes
+    for (complex_id, constraint) in pruned_constraints.concordance_analysis.complexes
         activity_lookup[complex_id] = constraint.value
     end
 
@@ -387,23 +426,131 @@ function process_concordance_batch(
         end
     end
 
-    # Test concordance using the new efficient ConstraintTrees-based approach
-    results = []
+    # Pre-compute reaction indices to avoid repeated union operations
+    reaction_indices_cache = precompute_reaction_indices(expanded_pairs, activity_lookup, complexes)
+
+    # Pre-build ALL test data on the main thread
+    # This moves all preparation work out of the worker functions
+    all_test_data = []
+    pair_mappings = []
+
     for (c1_idx, c2_idx, direction) in expanded_pairs
-        # Get pre-computed activities from ConstraintTrees
-        c1_id = complexes[c1_idx].id
-        c2_id = complexes[c2_idx].id
+        c1_activity = activity_lookup[complexes[c1_idx].id]
+        c2_activity = activity_lookup[complexes[c2_idx].id]
+        reaction_indices = reaction_indices_cache[(c1_idx, c2_idx)]
 
-        c1_activity = activity_lookup[c1_id]
-        c2_activity = activity_lookup[c2_id]
-
-        is_conc, lambda = test_concordance(
-            constraints, c1_activity, c2_activity, direction;
+        # Pre-build all test data for this specific concordance test
+        test_data = (
+            c1_activity=c1_activity,
+            c2_activity=c2_activity,
+            direction=direction,
             tolerance=tolerance,
-            optimizer=optimizer,
-            workers=workers,
-            settings=settings
+            reaction_indices=reaction_indices
         )
+
+        push!(all_test_data, test_data)
+        push!(pair_mappings, (c1_idx, c2_idx, direction))
+    end
+
+    # Process ALL concordance tests in parallel using screen_optimization_model
+    # Each worker gets pre-built test data, minimal constraint building needed
+    batch_results = COBREXA.screen_optimization_model(
+        pruned_constraints,
+        all_test_data;
+        optimizer=optimizer,
+        settings=settings,
+        workers=workers
+    ) do om, test_data
+        # Extract test parameters
+        c1_activity = test_data.c1_activity
+        c2_activity = test_data.c2_activity
+        direction = test_data.direction
+        tolerance = test_data.tolerance
+        reaction_indices = test_data.reaction_indices
+
+        # Process both MIN and MAX senses for this test
+        results = []
+        for sense in [JuMP.MIN_SENSE, JuMP.MAX_SENSE]
+            # Clear any existing objective
+            @objective(om, sense, 0)
+
+            # Pre-allocate variable Dict with expected size
+            w = Dict{Int,JuMP.VariableRef}()
+            sizehint!(w, length(reaction_indices))
+
+            # Create transformed variables (only for involved reactions)
+            for j in reaction_indices
+                w[j] = @variable(om)
+            end
+            t = @variable(om)
+
+            # Direction constraint on t
+            if direction == :positive
+                @constraint(om, t >= tolerance)
+            else
+                @constraint(om, t <= -tolerance)
+            end
+
+            # Extract bounds from original flux variables
+            x = om[:x]
+
+            # Complex c2 activity constraint using efficient expression building
+            c2_expr = build_activity_expression(c2_activity, w, reaction_indices)
+            target = direction == :positive ? 1.0 : -1.0
+            @constraint(om, c2_expr == target)
+
+            # Charnes-Cooper bounds constraints
+            if direction == :positive
+                for j in reaction_indices
+                    lb = has_lower_bound(x[j]) ? lower_bound(x[j]) : -1e6
+                    ub = has_upper_bound(x[j]) ? upper_bound(x[j]) : 1e6
+                    @constraint(om, w[j] - lb * t >= 0)
+                    @constraint(om, ub * t - w[j] >= 0)
+                end
+            else
+                for j in reaction_indices
+                    lb = has_lower_bound(x[j]) ? lower_bound(x[j]) : -1e6
+                    ub = has_upper_bound(x[j]) ? upper_bound(x[j]) : 1e6
+                    @constraint(om, w[j] - ub * t >= 0)
+                    @constraint(om, lb * t - w[j] >= 0)
+                end
+            end
+
+            # Objective: optimize complex c1 activity using efficient expression building
+            c1_expr = build_activity_expression(c1_activity, w, reaction_indices)
+            @objective(om, sense, c1_expr)
+            optimize!(om)
+
+            if termination_status(om) == OPTIMAL
+                push!(results, objective_value(om))
+            else
+                push!(results, nothing)
+            end
+        end
+
+        return results  # [min_val, max_val]
+    end
+
+    # Process batch results back to individual concordance test results
+    results = []
+
+    # batch_results contains results for each test, with each test processed for both MIN and MAX
+    for (i, test_results) in enumerate(batch_results)
+        c1_idx, c2_idx, direction = pair_mappings[i]
+
+        # Extract min and max values from the test results
+        min_val = test_results[1]  # MIN_SENSE result
+        max_val = test_results[2]  # MAX_SENSE result
+
+        if min_val === nothing || max_val === nothing
+            is_conc = false
+            lambda = nothing
+        else
+            # Check concordance
+            is_conc = isapprox(min_val, max_val; atol=tolerance)
+            lambda = is_conc ? min_val : nothing
+        end
+
         push!(results, (c1_idx, c2_idx, direction, is_conc, lambda))
     end
 
@@ -460,10 +607,9 @@ Main concordance analysis function optimized for large models and HPC execution.
 - `max_correlation_pairs=500_000`: Maximum correlation pairs to evaluate
 - `seed=42`: Master random seed for hierarchical reproducible RNG. Uses StableRNGs for cross-platform reproducibility and generates deterministic seeds for different analysis components (warmup generation, batch coordination, etc.)
 - `use_unidirectional_constraints=true`: Split reversible reactions
-- `use_cv_filtering=true`: Use coefficient of variation filtering (upstream MATLAB approach) instead of correlation filtering
+- `filter=[:cv, :cor]`: Filtering methods to use. Can contain `:cv` for coefficient of variation filtering, `:cor` for correlation filtering, or both
 - `cv_threshold=0.01`: Maximum coefficient of variation for activity ratios (lower = more stringent)
 - `cv_epsilon=1e-12`: Numerical stability epsilon for ratio calculations
-- `cv_fallback_to_correlation=true`: Fall back to correlation filtering if CV filtering fails
 
 # Returns
 Named tuple with concordance analysis results including complexes, modules, and statistics.
@@ -486,11 +632,10 @@ function concordance_analysis(
     max_correlation_pairs::Int=500_000,
     seed::Union{Int,Nothing}=42,
     use_unidirectional_constraints::Bool=true,
-    # CV filtering parameters (new upstream MATLAB approach)
-    use_cv_filtering::Bool=true,
+    # Filtering parameters
+    filter::Vector{Symbol}=[:cv, :cor],
     cv_threshold::Float64=0.01,
     cv_epsilon::Float64=1e-12,
-    cv_fallback_to_correlation::Bool=false,
 )
     start_time = time()
 
@@ -712,11 +857,10 @@ function concordance_analysis(
         early_correlation_threshold=early_correlation_threshold,
         workers=workers,
         seed=seed,
-        # CV filtering parameters
-        use_cv_filtering=use_cv_filtering,
+        # Filtering parameters
+        filter=filter,
         cv_threshold=cv_threshold,
         cv_epsilon=cv_epsilon,
-        cv_fallback_to_correlation=cv_fallback_to_correlation,
     )
 
     @info "Candidate pairs identified" n_pairs = length(candidate_priorities) correlation_time_sec = round(correlation_time, digits=2)

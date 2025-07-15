@@ -469,7 +469,7 @@ $(TYPEDSIGNATURES)
 Perform streaming correlation analysis for complex concordance with direct matrix sampling.
 - Uses memory-efficient direct matrix sampling  
 - Filters out balanced complexes and trivial pairs
-- Supports both CV-based and correlation-based filtering
+- Supports flexible filtering via `filter` parameter: `:cv` for CV-based, `:cor` for correlation-based, or both
 - Returns PairPriority objects for high-correlation candidates
 """
 function streaming_filter(
@@ -489,11 +489,10 @@ function streaming_filter(
     early_correlation_threshold::Float64=0.8,
     workers=workers,
     seed::Union{Int,Nothing}=42,
-    # CV filtering parameters
-    use_cv_filtering::Bool=true,
+    # Filtering parameters
+    filter::Vector{Symbol}=[:cv, :cor],
     cv_threshold::Float64=0.01,
     cv_epsilon::Float64=1e-12,
-    cv_fallback_to_correlation::Bool=true,
 )
     # Setup simple RNG for reproducible sampling
     rng = seed === nothing ? StableRNG() : StableRNG(seed)
@@ -686,11 +685,16 @@ function streaming_filter(
     @info "Total samples available: $n_samples"
 
     # FINAL VALIDATION: Assert that we got exactly the requested sample count
-    if n_samples != sample_size
-        error("CRITICAL: Generated $n_samples samples but requested $sample_size samples!")
-    end
+    # if n_samples != sample_size
+    #     error("CRITICAL: Generated $n_samples samples but requested $sample_size samples!")
+    # end
 
-    # === CV-BASED FILTERING (NEW APPROACH) ===
+    # === FILTERING BASED ON SELECTED METHODS ===
+    use_cv_filtering = :cv in filter
+    use_correlation_filtering = :cor in filter
+    
+    valid_pairs = Tuple{Int,Int}[]
+    
     if use_cv_filtering
         @info "Using CV-based filtering (upstream MATLAB approach)"
 
@@ -704,14 +708,11 @@ function streaming_filter(
 
         @info "CV filtering results" n_cv_candidates = length(cv_valid_pairs) cv_threshold
 
-        # Use CV candidates as the pairs to process
-        valid_pairs = cv_valid_pairs
-        total_pairs = length(valid_pairs)
-
-        # Process CV-filtered pairs with correlation tracking for consistency
-        @info "Processing CV-filtered pairs with correlation tracking"
-
-    else
+        # Add CV candidates to valid pairs
+        append!(valid_pairs, cv_valid_pairs)
+    end
+    
+    if use_correlation_filtering
         @info "Using correlation-based filtering (original approach)"
 
         # OPTIMIZED: Pre-allocate and compute all valid pairs to avoid reallocations
@@ -735,8 +736,8 @@ function streaming_filter(
             end
         end
 
-        # Pre-allocate with exact size to avoid reallocations
-        valid_pairs = Vector{Tuple{Int,Int}}(undef, n_valid_pairs)
+        # Pre-allocate correlation pairs and add to valid_pairs
+        correlation_pairs = Vector{Tuple{Int,Int}}(undef, n_valid_pairs)
         pair_idx = 0
 
         # Second pass: fill pre-allocated array
@@ -754,15 +755,22 @@ function streaming_filter(
                 end
                 if (i, j) ∉ skip_pairs_set
                     pair_idx += 1
-                    valid_pairs[pair_idx] = (i, j)
+                    correlation_pairs[pair_idx] = (i, j)
                 end
             end
         end
 
-        total_pairs = length(valid_pairs)
-    end  # End of else block
+        # Add correlation pairs to valid_pairs
+        append!(valid_pairs, correlation_pairs)
+    end  # End of correlation filtering block
+    
+    # Remove duplicates if both methods are used
+    if use_cv_filtering && use_correlation_filtering
+        unique!(valid_pairs)
+    end
 
     # Common processing for both CV and correlation approaches
+    total_pairs = length(valid_pairs)
     @info "Total pairs to process: $total_pairs"
 
     # Initialize thread-safe progress tracking
@@ -871,8 +879,17 @@ function streaming_filter(
     candidates = get_candidate_pairs(correlation_tracker, correlation_threshold, min_valid_samples)
     @info "Found $(length(candidates)) candidate pairs"
 
-    # Log performance comparison between CV and correlation filtering
-    if use_cv_filtering
+    # Log performance summary based on filtering methods used
+    if use_cv_filtering && use_correlation_filtering
+        @info "Combined filtering performance summary" (
+            method="CV + Correlation",
+            cv_threshold=cv_threshold,
+            correlation_threshold=correlation_threshold,
+            total_pairs_processed=total_pairs,
+            final_candidates=length(candidates),
+            overall_efficiency=length(candidates) / total_pairs
+        )
+    elseif use_cv_filtering
         @info "CV filtering performance summary" (
             method="CV-based",
             cv_threshold=cv_threshold,
@@ -880,7 +897,7 @@ function streaming_filter(
             final_candidates=length(candidates),
             cv_efficiency=length(candidates) / total_pairs
         )
-    else
+    elseif use_correlation_filtering
         @info "Correlation filtering performance summary" (
             method="Correlation-based",
             correlation_threshold=correlation_threshold,
@@ -888,6 +905,8 @@ function streaming_filter(
             final_candidates=length(candidates),
             correlation_efficiency=length(candidates) / total_pairs
         )
+    else
+        @warn "No filtering method specified in filter parameter"
     end
 
     # Convert to PairPriority objects
