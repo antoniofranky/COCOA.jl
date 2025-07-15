@@ -87,7 +87,7 @@ function process_in_stages(
             clear_module_cache!(concordance_tracker)
         end
 
-        @info "Starting stage $stage_count" remaining = length(remaining_pairs)
+        @debug "Starting stage $stage_count" remaining = length(remaining_pairs)
 
         # Filter out pairs that can be inferred by transitivity
         filtered_pairs, skipped_count = filter_transitive_pairs(
@@ -98,7 +98,7 @@ function process_in_stages(
         stage_results["skipped_by_transitivity"] += skipped_count
 
         if isempty(filtered_pairs)
-            @info "No more pairs to process after transitivity filtering"
+            @debug "No more pairs to process after transitivity filtering"
             break
         end
 
@@ -107,7 +107,7 @@ function process_in_stages(
         stage_pairs = filtered_pairs[1:stage_size_actual]
         remaining_pairs = filtered_pairs[(stage_size_actual+1):end]
 
-        @info "Processing stage $stage_count" pairs = length(stage_pairs) batch_size
+        @debug "Processing stage $stage_count" pairs = length(stage_pairs) batch_size
 
         # Split stage into batches for memory management
         all_batch_results = []
@@ -212,7 +212,7 @@ function process_in_stages(
         stage_results["pairs_processed"] += length(stage_pairs)
         stage_results["stages_completed"] = stage_count
 
-        @info "Stage $stage_count complete" new_concordant = stage_concordant_count
+        @debug "Stage $stage_count complete" new_concordant = stage_concordant_count
 
         # Update progress bar with live values
         ProgressMeter.update!(prog, processed_pairs;
@@ -269,7 +269,7 @@ function filter_transitive_pairs(
     end
 
     if skipped_count > 0
-        @info "Filtered pairs by transitivity" skipped = skipped_count remaining = length(filtered_pairs)
+        @debug "Filtered pairs by transitivity" skipped = skipped_count remaining = length(filtered_pairs)
     end
 
     return filtered_pairs, skipped_count
@@ -309,7 +309,7 @@ function reprioritize_by_concordant_complexes(
     # (We don't have correlation info at this stage, so use indices as proxy)
     sort!(priority_pairs, by=p -> (p[1], p[2]))
 
-    @info "Reprioritization effect" (
+    @debug "Reprioritization effect" (
         priority_pairs=length(priority_pairs),
         regular_pairs=length(regular_pairs),
         priority_percentage=round(100 * length(priority_pairs) / length(remaining_pairs), digits=1)
@@ -348,7 +348,7 @@ function apply_transitivity_elimination(
     eliminated_count = length(remaining_pairs) - length(filtered_pairs)
 
     if eliminated_count > 0
-        @info "Transitivity elimination" (
+        @debug "Transitivity elimination" (
             pairs_eliminated=eliminated_count,
             remaining_pairs=length(filtered_pairs)
         )
@@ -562,7 +562,7 @@ function concordance_analysis(
     warmup_points = Vector{Float64}[]
 
     # Process FVA results correctly - iterate directly over the Tree
-    @info "Processing AVA results" n_ava_results = length(ava_results)
+    @debug "Processing AVA results" n_ava_results = length(ava_results)
 
     for (cid, (min_result, max_result)) in ava_results
         @debug "Processing AVA result for complex $cid" min_result max_result
@@ -664,7 +664,7 @@ function concordance_analysis(
         end
     end
 
-    @info "Complex classification complete" n_ava_balanced tolerance n_trivial_ava_confirmed n_trivial_ava_rejected
+    @debug "Complex classification complete" n_ava_balanced tolerance n_trivial_ava_confirmed n_trivial_ava_rejected
 
     @info "Complex classification" balanced = length(balanced_complexes) trivially_balanced = length(trivially_balanced) positive = length(positive_complexes) negative = length(negative_complexes) unrestricted = length(unrestricted_complexes)
 
@@ -789,7 +789,7 @@ function concordance_analysis(
         complexes_df.max_activity = max_activities
         complexes_df.ava_confirms_balanced = ava_confirms
 
-        @info "Trivially balanced verification" n_trivial_confirmed n_trivial_contradicted n_total_trivial = length(trivially_balanced)
+        @debug "Trivially balanced verification" n_trivial_confirmed n_trivial_contradicted n_total_trivial = length(trivially_balanced)
     end
 
     modules_df = DataFrame(

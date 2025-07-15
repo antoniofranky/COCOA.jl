@@ -88,6 +88,19 @@ function correlation(c::StreamingCorrelation)
 end
 
 """
+Reset a StreamingCorrelation for reuse in object pooling.
+"""
+function reset!(c::StreamingCorrelation)
+    c.n = 0
+    c.mean_x = 0.0
+    c.mean_y = 0.0
+    c.cov_sum = 0.0
+    c.var_x_sum = 0.0
+    c.var_y_sum = 0.0
+    return c
+end
+
+"""
 Correlation tracker entry for memory-efficient correlation storage.
 """
 struct CorrelationEntry
@@ -577,8 +590,9 @@ function streaming_correlation_filter(
     n_samples = length(first(values(activity_refs)))
     @info "Total samples available: $n_samples"
 
-    # Pre-compute all valid pairs to process
-    valid_pairs = Tuple{Int,Int}[]
+    # OPTIMIZED: Pre-allocate and compute all valid pairs to avoid reallocations
+    # First pass: count valid pairs to pre-allocate exact size
+    n_valid_pairs = 0
     for i = 1:n_valid
         ci = valid_complexes[i]
         ci_original_idx = get(original_indices, ci.id, 0)
@@ -592,7 +606,31 @@ function streaming_correlation_filter(
                 continue
             end
             if (i, j) ∉ skip_pairs_set
-                push!(valid_pairs, (i, j))
+                n_valid_pairs += 1
+            end
+        end
+    end
+    
+    # Pre-allocate with exact size to avoid reallocations
+    valid_pairs = Vector{Tuple{Int,Int}}(undef, n_valid_pairs)
+    pair_idx = 0
+    
+    # Second pass: fill pre-allocated array
+    for i = 1:n_valid
+        ci = valid_complexes[i]
+        ci_original_idx = get(original_indices, ci.id, 0)
+        if ci_original_idx == 0
+            continue
+        end
+        for j = (i+1):n_valid
+            cj = valid_complexes[j]
+            cj_original_idx = get(original_indices, cj.id, 0)
+            if cj_original_idx == 0
+                continue
+            end
+            if (i, j) ∉ skip_pairs_set
+                pair_idx += 1
+                valid_pairs[pair_idx] = (i, j)
             end
         end
     end
@@ -604,22 +642,39 @@ function streaming_correlation_filter(
     processed_pairs = Threads.Atomic{Int}(0)
     progress = Progress(total_pairs, desc="Computing correlations: ", showspeed=true)
 
-    # Process correlations in parallel using all available threads
+    # OPTIMIZED: Process correlations with object pooling to reduce allocations
     n_threads = Threads.nthreads()
     use_threading = should_use_threading()
     
+    # Create thread-local object pools for StreamingCorrelation reuse
+    POOL_SIZE = 10  # Small pool per thread to avoid excessive memory
+    thread_pools = [Vector{StreamingCorrelation}(undef, POOL_SIZE) for _ in 1:n_threads]
+    
+    # Initialize pools
+    for pool in thread_pools
+        for i in 1:POOL_SIZE
+            pool[i] = StreamingCorrelation()
+        end
+    end
+    
     if use_threading
-        @info "Using $n_threads threads for correlation computation"
+        @info "Using $n_threads threads for correlation computation with object pooling"
         
-        # Thread-parallel correlation computation
+        # Thread-parallel correlation computation with object pooling
         Threads.@threads for pair_idx in 1:total_pairs
             i, j = valid_pairs[pair_idx]
             
             ci = valid_complexes[i]
             cj = valid_complexes[j]
 
-            # Create thread-local streaming correlation accumulator
-            corr_acc = StreamingCorrelation()
+            # Get from thread-local object pool (avoids allocation)
+            thread_id = Threads.threadid()
+            pool = thread_pools[thread_id]
+            pool_idx = ((pair_idx - 1) % POOL_SIZE) + 1
+            corr_acc = pool[pool_idx]
+            
+            # Reset for reuse
+            reset!(corr_acc)
 
             # Compute correlation using direct array access (zero-copy)
             x_values = activity_refs[ci.id]
@@ -641,17 +696,23 @@ function streaming_correlation_filter(
             end
         end
     else
-        @info "Using sequential correlation computation (single thread)"
+        @info "Using sequential correlation computation with object pooling (single thread)"
         
-        # Sequential correlation computation (fallback)
+        # Sequential correlation computation with single pool
+        pool = thread_pools[1]
+        
         for pair_idx in 1:total_pairs
             i, j = valid_pairs[pair_idx]
             
             ci = valid_complexes[i]
             cj = valid_complexes[j]
 
-            # Create streaming correlation accumulator
-            corr_acc = StreamingCorrelation()
+            # Get from object pool (avoids allocation)
+            pool_idx = ((pair_idx - 1) % POOL_SIZE) + 1
+            corr_acc = pool[pool_idx]
+            
+            # Reset for reuse
+            reset!(corr_acc)
 
             # Compute correlation using direct array access (zero-copy)
             x_values = activity_refs[ci.id]

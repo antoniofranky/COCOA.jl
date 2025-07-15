@@ -1,5 +1,5 @@
 """
-    module COCOA
+COCOA
 
 COnstraint-based COncordance Analysis for metabolic networks - optimized for large-scale models.
 

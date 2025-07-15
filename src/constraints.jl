@@ -188,15 +188,15 @@ function create_unidirectional_constraints(
 
     # DIAGNOSTIC: Track variable indices before transformations
     initial_var_count = C.variable_count(constraints)
-    @info "Initial constraint tree" var_count = initial_var_count flux_constraints = length(constraints.fluxes)
+    @debug "Initial constraint tree" var_count = initial_var_count flux_constraints = length(constraints.fluxes)
 
     # Sample a few constraints to see their structure
     sample_rxn_ids = collect(keys(constraints.fluxes))[1:min(3, end)]
     for rxn_id in sample_rxn_ids
         flux_constraint = constraints.fluxes[rxn_id]
-        @info "Initial flux constraint" rxn_id constraint_type = typeof(flux_constraint) has_value = hasfield(typeof(flux_constraint), :value)
+        @debug "Initial flux constraint" rxn_id constraint_type = typeof(flux_constraint) has_value = hasfield(typeof(flux_constraint), :value)
         if hasfield(typeof(flux_constraint), :value) && isa(flux_constraint.value, C.LinearValue)
-            @info "Initial constraint details" rxn_id var_indices = flux_constraint.value.idxs weights = flux_constraint.value.weights
+            @debug "Initial constraint details" rxn_id var_indices = flux_constraint.value.idxs weights = flux_constraint.value.weights
         end
     end
 
@@ -209,7 +209,7 @@ function create_unidirectional_constraints(
 
     # DIAGNOSTIC: Track variable indices after sign splitting
     after_split_var_count = C.variable_count(constraints)
-    @info "After sign splitting" var_count = after_split_var_count has_forward = haskey(constraints, :fluxes_forward) has_reverse = haskey(constraints, :fluxes_reverse)
+    @debug "After sign splitting" var_count = after_split_var_count has_forward = haskey(constraints, :fluxes_forward) has_reverse = haskey(constraints, :fluxes_reverse)
 
     # Create directional constraints using hierarchical composition
     constraints *= :directional_flux_balance^COBREXA.sign_split_constraints(
@@ -220,7 +220,7 @@ function create_unidirectional_constraints(
 
     # DIAGNOSTIC: Track variable indices after directional constraints
     after_directional_var_count = C.variable_count(constraints)
-    @info "After directional constraints" var_count = after_directional_var_count
+    @debug "After directional constraints" var_count = after_directional_var_count
 
     # Functional variable substitution and pruning
     subst_vals = [C.variable(; idx).value for idx = 1:C.variable_count(constraints)]
@@ -235,21 +235,21 @@ function create_unidirectional_constraints(
 
     # DIAGNOSTIC: Track variable indices after substitution preparation
     after_subst_prep_var_count = C.variable_count(constraints)
-    @info "After substitution preparation" var_count = after_subst_prep_var_count
+    @debug "After substitution preparation" var_count = after_subst_prep_var_count
 
     # Apply optimized substitution and pruning
-    @info "Applying substitution and pruning - THIS IS WHERE INDEX RENUMBERING HAPPENS"
+    @debug "Applying substitution and pruning - THIS IS WHERE INDEX RENUMBERING HAPPENS"
     constraints_before_pruning = C.substitute(constraints, subst_vals)
     before_pruning_var_count = C.variable_count(constraints_before_pruning)
-    @info "After substitution, before pruning" var_count = before_pruning_var_count
+    @debug "After substitution, before pruning" var_count = before_pruning_var_count
 
     # Sample flux constraints before pruning
     for rxn_id in sample_rxn_ids
         if haskey(constraints_before_pruning.fluxes, rxn_id)
             flux_constraint = constraints_before_pruning.fluxes[rxn_id]
-            @info "Before pruning flux constraint" rxn_id constraint_type = typeof(flux_constraint)
+            @debug "Before pruning flux constraint" rxn_id constraint_type = typeof(flux_constraint)
             if hasfield(typeof(flux_constraint), :value) && isa(flux_constraint.value, C.LinearValue)
-                @info "Before pruning constraint details" rxn_id var_indices = flux_constraint.value.idxs weights = flux_constraint.value.weights
+                @debug "Before pruning constraint details" rxn_id var_indices = flux_constraint.value.idxs weights = flux_constraint.value.weights
             end
         end
     end
@@ -258,15 +258,15 @@ function create_unidirectional_constraints(
 
     # DIAGNOSTIC: Track variable indices after pruning - INDEX RENUMBERING COMPLETE
     final_var_count = C.variable_count(constraints)
-    @info "AFTER PRUNING (INDEX RENUMBERING COMPLETE)" var_count = final_var_count
+    @debug "AFTER PRUNING (INDEX RENUMBERING COMPLETE)" var_count = final_var_count
 
     # Sample flux constraints after pruning to see the renumbered indices
     for rxn_id in sample_rxn_ids
         if haskey(constraints.fluxes, rxn_id)
             flux_constraint = constraints.fluxes[rxn_id]
-            @info "After pruning flux constraint" rxn_id constraint_type = typeof(flux_constraint)
+            @debug "After pruning flux constraint" rxn_id constraint_type = typeof(flux_constraint)
             if hasfield(typeof(flux_constraint), :value) && isa(flux_constraint.value, C.LinearValue)
-                @info "AFTER PRUNING constraint details" rxn_id var_indices = flux_constraint.value.idxs weights = flux_constraint.value.weights
+                @debug "AFTER PRUNING constraint details" rxn_id var_indices = flux_constraint.value.idxs weights = flux_constraint.value.weights
             end
         end
     end
@@ -313,19 +313,19 @@ function concordance_constraints(
         use_shared_arrays, min_size_for_sharing)
 
     # Create complex activity expressions using functional patterns
-    @info "Building complex activities" n_complexes = length(complexes) n_constraint_rxns = length(constraint_rxn_ids)
+    @debug "Building complex activities" n_complexes = length(complexes) n_constraint_rxns = length(constraint_rxn_ids)
 
     # DIAGNOSTIC: Check the structure of the flux constraints after transformations
-    @info "Flux constraint structure after transformations"
+    @debug "Flux constraint structure after transformations"
     sample_rxn_ids = constraint_rxn_ids[1:min(3, end)]
     for rxn_id in sample_rxn_ids
         if haskey(constraints.fluxes, rxn_id)
             flux_constraint = constraints.fluxes[rxn_id]
-            @info "Sample flux constraint" rxn_id constraint_type = typeof(flux_constraint) has_value = hasfield(typeof(flux_constraint), :value)
+            @debug "Sample flux constraint" rxn_id constraint_type = typeof(flux_constraint) has_value = hasfield(typeof(flux_constraint), :value)
             if hasfield(typeof(flux_constraint), :value)
-                @info "Constraint value details" rxn_id value_type = typeof(flux_constraint.value)
+                @debug "Constraint value details" rxn_id value_type = typeof(flux_constraint.value)
                 if isa(flux_constraint.value, C.LinearValue)
-                    @info "LinearValue details" rxn_id var_indices = flux_constraint.value.idxs weights = flux_constraint.value.weights
+                    @debug "LinearValue details" rxn_id var_indices = flux_constraint.value.idxs weights = flux_constraint.value.weights
                 end
             end
         end
@@ -334,23 +334,23 @@ function concordance_constraints(
     # DIAGNOSTIC: Check variable count consistency
     constraint_var_count = C.variable_count(constraints)
     flux_constraint_var_count = C.variable_count(constraints.fluxes)
-    @info "Variable count consistency check" constraint_var_count flux_constraint_var_count
+    @debug "Variable count consistency check" constraint_var_count flux_constraint_var_count
 
     complex_activities = build_complex_activities_functional(
         complexes, A_matrix, constraints.fluxes, constraint_rxn_ids
     )
-    @info "Complex activities built" n_complex_activities = length(complex_activities)
+    @debug "Complex activities built" n_complex_activities = length(complex_activities)
 
     # Hierarchically compose the complete constraint system
-    @info "Adding complex activities to constraint tree"
+    @debug "Adding complex activities to constraint tree"
     constraints = constraints * (:concordance_analysis^(
         :complexes^complex_activities
     ))
 
     # Verify the structure was added correctly
-    @info "Constraint tree structure after adding complexes" has_concordance_analysis = haskey(constraints, :concordance_analysis)
+    @debug "Constraint tree structure after adding complexes" has_concordance_analysis = haskey(constraints, :concordance_analysis)
     if haskey(constraints, :concordance_analysis)
-        @info "Concordance analysis structure" has_complexes = haskey(constraints.concordance_analysis, :complexes) n_complexes_in_tree = length(constraints.concordance_analysis.complexes)
+        @debug "Concordance analysis structure" has_complexes = haskey(constraints.concordance_analysis, :complexes) n_complexes_in_tree = length(constraints.concordance_analysis.complexes)
     end
 
     return constraints
@@ -423,11 +423,11 @@ function build_activity_expression(
     idxs = Vector{Int}()
     weights = Vector{Float64}()
 
-    @info "Building activity for complex $complex_idx" n_reactions = length(constraint_rxn_ids)
+    @debug "Building activity for complex $complex_idx" n_reactions = length(constraint_rxn_ids)
 
     # DIAGNOSTIC: Check the total variable count in the constraint tree
     total_var_count = C.variable_count(flux_constraints)
-    @info "Constraint tree variable count during activity building" total_vars = total_var_count
+    @debug "Constraint tree variable count during activity building" total_vars = total_var_count
 
     # Iterate through all columns to find non-zero elements in row complex_idx
     for j_idx in eachindex(constraint_rxn_ids)
@@ -439,7 +439,7 @@ function build_activity_expression(
                     # Get the actual variable index from the constraint tree
                     flux_constraint = flux_constraints[rxn_id]
 
-                    @info "Processing reaction $rxn_id" coeff constraint_type = typeof(flux_constraint)
+                    @debug "Processing reaction $rxn_id" coeff constraint_type = typeof(flux_constraint)
 
                     # Handle different constraint types after transformations
                     if isa(flux_constraint, C.Constraint)
@@ -447,7 +447,7 @@ function build_activity_expression(
                         value = flux_constraint.value
                         if isa(value, C.LinearValue)
                             # DIAGNOSTIC: Check variable indices are valid
-                            @info "LinearValue found" rxn_id var_indices = value.idxs weights = value.weights
+                            @debug "LinearValue found" rxn_id var_indices = value.idxs weights = value.weights
 
                             # Extract variable indices from the LinearValue
                             for (var_idx, var_coeff) in zip(value.idxs, value.weights)
@@ -460,7 +460,7 @@ function build_activity_expression(
                                 push!(idxs, var_idx)
                                 push!(weights, coeff * var_coeff)
                             end
-                            @info "Added linear terms" rxn_id n_new_terms = length(value.idxs)
+                            @debug "Added linear terms" rxn_id n_new_terms = length(value.idxs)
                         elseif isa(value, C.Variable)
                             # Single variable constraint
                             var_idx = value.idx
@@ -473,7 +473,7 @@ function build_activity_expression(
 
                             push!(idxs, var_idx)
                             push!(weights, coeff)
-                            @info "Added single variable" rxn_id var_idx
+                            @debug "Added single variable" rxn_id var_idx
                         else
                             @error "Unsupported flux constraint value type" rxn_id value_type = typeof(value)
                         end
@@ -487,7 +487,7 @@ function build_activity_expression(
         end
     end
 
-    @info "Built activity expression for complex $complex_idx" n_terms = length(idxs) unique_variables = length(unique(idxs))
+    @debug "Built activity expression for complex $complex_idx" n_terms = length(idxs) unique_variables = length(unique(idxs))
 
     if isempty(idxs)
         @error "No terms found for complex $complex_idx - this indicates a constraint building issue"
@@ -497,7 +497,7 @@ function build_activity_expression(
     if !isempty(idxs)
         max_idx = maximum(idxs)
         min_idx = minimum(idxs)
-        @info "LinearValue validation" complex_idx min_idx max_idx total_var_count valid_range = (min_idx >= 1 && max_idx <= total_var_count)
+        @debug "LinearValue validation" complex_idx min_idx max_idx total_var_count valid_range = (min_idx >= 1 && max_idx <= total_var_count)
 
         if min_idx < 1 || max_idx > total_var_count
             @error "CRITICAL: LinearValue contains invalid variable indices" complex_idx min_idx max_idx total_var_count
