@@ -14,159 +14,8 @@ using SparseArrays
 using Distributed
 using DocStringExtensions
 import ConstraintTrees as C
-# Global constraint cache for reusing patterns
-const CONSTRAINT_CACHE = Dict{UInt64,C.ConstraintTree}()
 
-"""
-$(TYPEDSIGNATURES)
 
-Extract complexes and build incidence matrix with optional shared memory.
-"""
-function extract_complexes_and_incidence(model::AbstractFBCModels.AbstractFBCModel;
-    use_shared_arrays::Bool=true,
-    min_size_for_sharing::Int=1_000_000)
-    rxns = AbstractFBCModels.reactions(model)
-    mets = AbstractFBCModels.metabolites(model)
-    n_rxns = length(rxns)
-    n_mets = length(mets)
-
-    # Use Int32 for indices to save memory
-    met_idx_map = Dict{String,Int32}(m => Int32(i) for (i, m) in enumerate(mets))
-
-    complexes = Complex[]
-    complex_dict = Dict{UInt64,Int32}()
-
-    # Pre-allocate for incidence matrix construction
-    I_rows = Int32[]
-    J_cols = Int32[]
-    V_vals = Float32[]
-
-    sizehint!(I_rows, 2 * n_rxns)
-    sizehint!(J_cols, 2 * n_rxns)
-    sizehint!(V_vals, 2 * n_rxns)
-
-    # Pre-allocate buffers for metabolite processing to avoid repeated allocations
-    substrate_mets = Int32[]
-    substrate_stoich = Float32[]
-    product_mets = Int32[]
-    product_stoich = Float32[]
-    sizehint!(substrate_mets, 10)  # Reasonable estimate for typical reaction size
-    sizehint!(substrate_stoich, 10)
-    sizehint!(product_mets, 10)
-    sizehint!(product_stoich, 10)
-
-    # Process reactions in batches
-    batch_size = min(1000, n_rxns)
-    for batch_start in 1:batch_size:n_rxns
-        batch_end = min(batch_start + batch_size - 1, n_rxns)
-
-        for ridx in batch_start:batch_end
-            rxn = rxns[ridx]
-            rxn_id = Symbol(rxn)
-            rxn_stoich = AbstractFBCModels.reaction_stoichiometry(model, rxn)
-
-            # Check if this reaction is reversible (using the same logic as unidirectional constraints)
-            # We'll determine this from the model bounds if available
-            is_reversible = false
-            try
-                # Try to get bounds from the model
-                # This is a simplified check - in practice, we'd use the constraint system
-                # For now, assume reversible if we can't determine otherwise
-                is_reversible = true  # Conservative default
-            catch
-                is_reversible = true  # Conservative default
-            end
-
-            # Separate substrates and products (reuse pre-allocated buffers)
-            empty!(substrate_mets)
-            empty!(substrate_stoich)
-            empty!(product_mets)
-            empty!(product_stoich)
-
-            for (met, coeff) in rxn_stoich
-                met_idx = met_idx_map[met]
-                if coeff < 0
-                    push!(substrate_mets, met_idx)
-                    push!(substrate_stoich, -Float32(coeff))
-                elseif coeff > 0
-                    push!(product_mets, met_idx)
-                    push!(product_stoich, Float32(coeff))
-                end
-            end
-
-            # Process substrate complex
-            if !isempty(substrate_mets)
-                sub_complex = create_complex(
-                    substrate_mets, substrate_stoich, mets
-                )
-                complex_idx = get!(complex_dict, sub_complex.hash) do
-                    push!(complexes, sub_complex)
-                    Int32(length(complexes))
-                end
-                push!(I_rows, complex_idx)
-                push!(J_cols, Int32(ridx))
-                push!(V_vals, -1.0f0)
-            end
-
-            # Process product complex
-            if !isempty(product_mets)
-                prod_complex = create_complex(
-                    product_mets, product_stoich, mets
-                )
-                complex_idx = get!(complex_dict, prod_complex.hash) do
-                    push!(complexes, prod_complex)
-                    Int32(length(complexes))
-                end
-                push!(I_rows, complex_idx)
-                push!(J_cols, Int32(ridx))
-                push!(V_vals, 1.0f0)
-            end
-        end
-
-        if batch_end < n_rxns
-            GC.safepoint()
-        end
-    end
-
-    # Build sparse incidence matrix
-    A_sparse = sparse(Int.(I_rows), Int.(J_cols), V_vals, length(complexes), n_rxns)
-
-    # Use shared memory if enabled and beneficial
-    if use_shared_arrays && nworkers() > 0 &&
-       (nnz(A_sparse) * (sizeof(Int32) + sizeof(Float32)) > min_size_for_sharing)
-        A_matrix = SharedSparseMatrix(A_sparse)
-    else
-        A_matrix = SparseIncidenceMatrix(Int.(I_rows), Int.(J_cols), V_vals,
-            length(complexes), n_rxns)
-    end
-
-    return complexes, A_matrix, complex_dict
-end
-
-"""
-Create a complex from metabolite indices with memory-efficient ID generation.
-"""
-function create_complex(met_idxs::Vector{Int32}, stoich::Vector{Float32},
-    met_names::Vector{String})
-    # Sort by indices for canonical ordering
-    perm = sortperm(met_idxs)
-    sorted_idxs = met_idxs[perm]
-    sorted_stoich = stoich[perm]
-
-    # Build ID more efficiently - ensure type stability
-    id_parts = String[]
-    sizehint!(id_parts, length(sorted_idxs))
-
-    for i in eachindex(sorted_idxs)
-        idx = sorted_idxs[i]
-        coeff = sorted_stoich[i]
-        coeff_str = isinteger(coeff) ? string(Int(coeff)) : string(coeff)
-        push!(id_parts, "$(coeff_str)_$(met_names[idx])")
-    end
-
-    id = Symbol(join(id_parts, "+"))
-    return Complex(id, sorted_idxs, sorted_stoich)
-end
 
 """
 $(TYPEDSIGNATURES)
@@ -186,20 +35,6 @@ function create_unidirectional_constraints(
     # Start with standard flux balance constraints
     constraints = COBREXA.flux_balance_constraints(model)
 
-    # DIAGNOSTIC: Track variable indices before transformations
-    initial_var_count = C.variable_count(constraints)
-    @debug "Initial constraint tree" var_count = initial_var_count flux_constraints = length(constraints.fluxes)
-
-    # Sample a few constraints to see their structure
-    sample_rxn_ids = collect(keys(constraints.fluxes))[1:min(3, end)]
-    for rxn_id in sample_rxn_ids
-        flux_constraint = constraints.fluxes[rxn_id]
-        @debug "Initial flux constraint" rxn_id constraint_type = typeof(flux_constraint) has_value = hasfield(typeof(flux_constraint), :value)
-        if hasfield(typeof(flux_constraint), :value) && isa(flux_constraint.value, C.LinearValue)
-            @debug "Initial constraint details" rxn_id var_indices = flux_constraint.value.idxs weights = flux_constraint.value.weights
-        end
-    end
-
     # Use COBREXA's optimized sign splitting
     constraints += COBREXA.sign_split_variables(
         constraints.fluxes,
@@ -207,20 +42,12 @@ function create_unidirectional_constraints(
         negative=:fluxes_reverse
     )
 
-    # DIAGNOSTIC: Track variable indices after sign splitting
-    after_split_var_count = C.variable_count(constraints)
-    @debug "After sign splitting" var_count = after_split_var_count has_forward = haskey(constraints, :fluxes_forward) has_reverse = haskey(constraints, :fluxes_reverse)
-
     # Create directional constraints using hierarchical composition
     constraints *= :directional_flux_balance^COBREXA.sign_split_constraints(
         positive=constraints.fluxes_forward,
         negative=constraints.fluxes_reverse,
         signed=constraints.fluxes,
     )
-
-    # DIAGNOSTIC: Track variable indices after directional constraints
-    after_directional_var_count = C.variable_count(constraints)
-    @debug "After directional constraints" var_count = after_directional_var_count
 
     # Functional variable substitution and pruning
     subst_vals = [C.variable(; idx).value for idx = 1:C.variable_count(constraints)]
@@ -233,43 +60,9 @@ function create_unidirectional_constraints(
         C.Constraint(subst_value) # bidirectional bound is dropped
     end
 
-    # DIAGNOSTIC: Track variable indices after substitution preparation
-    after_subst_prep_var_count = C.variable_count(constraints)
-    @debug "After substitution preparation" var_count = after_subst_prep_var_count
-
     # Apply optimized substitution and pruning
-    @debug "Applying substitution and pruning - THIS IS WHERE INDEX RENUMBERING HAPPENS"
     constraints_before_pruning = C.substitute(constraints, subst_vals)
-    before_pruning_var_count = C.variable_count(constraints_before_pruning)
-    @debug "After substitution, before pruning" var_count = before_pruning_var_count
-
-    # Sample flux constraints before pruning
-    for rxn_id in sample_rxn_ids
-        if haskey(constraints_before_pruning.fluxes, rxn_id)
-            flux_constraint = constraints_before_pruning.fluxes[rxn_id]
-            @debug "Before pruning flux constraint" rxn_id constraint_type = typeof(flux_constraint)
-            if hasfield(typeof(flux_constraint), :value) && isa(flux_constraint.value, C.LinearValue)
-                @debug "Before pruning constraint details" rxn_id var_indices = flux_constraint.value.idxs weights = flux_constraint.value.weights
-            end
-        end
-    end
-
     constraints = C.prune_variables(constraints_before_pruning)
-
-    # DIAGNOSTIC: Track variable indices after pruning - INDEX RENUMBERING COMPLETE
-    final_var_count = C.variable_count(constraints)
-    @debug "AFTER PRUNING (INDEX RENUMBERING COMPLETE)" var_count = final_var_count
-
-    # Sample flux constraints after pruning to see the renumbered indices
-    for rxn_id in sample_rxn_ids
-        if haskey(constraints.fluxes, rxn_id)
-            flux_constraint = constraints.fluxes[rxn_id]
-            @debug "After pruning flux constraint" rxn_id constraint_type = typeof(flux_constraint)
-            if hasfield(typeof(flux_constraint), :value) && isa(flux_constraint.value, C.LinearValue)
-                @debug "AFTER PRUNING constraint details" rxn_id var_indices = flux_constraint.value.idxs weights = flux_constraint.value.weights
-            end
-        end
-    end
 
     # All reactions were split since we applied splitting to all fluxes
     rxn_ids = Symbol.(AbstractFBCModels.reactions(model))
@@ -304,209 +97,156 @@ function concordance_constraints(
         constraints = mod(constraints)
     end
 
-    # Get the reaction IDs that will be used consistently
-    # Use the actual constraint system IDs, not the original model IDs
-    constraint_rxn_ids = collect(keys(constraints.fluxes))
-
-    # Build incidence matrix using the SAME reaction ordering
-    complexes, A_matrix, complex_dict = extract_complexes_and_incidence(model;
-        use_shared_arrays, min_size_for_sharing)
-
-    # Create complex activity expressions using functional patterns
-    @debug "Building complex activities" n_complexes = length(complexes) n_constraint_rxns = length(constraint_rxn_ids)
-
-    # DIAGNOSTIC: Check the structure of the flux constraints after transformations
-    @debug "Flux constraint structure after transformations"
-    sample_rxn_ids = constraint_rxn_ids[1:min(3, end)]
-    for rxn_id in sample_rxn_ids
-        if haskey(constraints.fluxes, rxn_id)
-            flux_constraint = constraints.fluxes[rxn_id]
-            @debug "Sample flux constraint" rxn_id constraint_type = typeof(flux_constraint) has_value = hasfield(typeof(flux_constraint), :value)
-            if hasfield(typeof(flux_constraint), :value)
-                @debug "Constraint value details" rxn_id value_type = typeof(flux_constraint.value)
-                if isa(flux_constraint.value, C.LinearValue)
-                    @debug "LinearValue details" rxn_id var_indices = flux_constraint.value.idxs weights = flux_constraint.value.weights
-                end
-            end
-        end
-    end
-
-    # DIAGNOSTIC: Check variable count consistency
-    constraint_var_count = C.variable_count(constraints)
-    flux_constraint_var_count = C.variable_count(constraints.fluxes)
-    @debug "Variable count consistency check" constraint_var_count flux_constraint_var_count
-
-    complex_activities = build_complex_activities_functional(
-        complexes, A_matrix, constraints.fluxes, constraint_rxn_ids
-    )
-    @debug "Complex activities built" n_complex_activities = length(complex_activities)
-
-    # Hierarchically compose the complete constraint system
-    @debug "Adding complex activities to constraint tree"
-    constraints = constraints * (:concordance_analysis^(
-        :complexes^complex_activities
-    ))
-
-    # Verify the structure was added correctly
-    @debug "Constraint tree structure after adding complexes" has_concordance_analysis = haskey(constraints, :concordance_analysis)
-    if haskey(constraints, :concordance_analysis)
-        @debug "Concordance analysis structure" has_complexes = haskey(constraints.concordance_analysis, :complexes) n_complexes_in_tree = length(constraints.concordance_analysis.complexes)
-    end
-
+    # Build complex activities using C.sum pattern
+    constraints = add_complex_activities_to_constraints(model, constraints)
+    #verify_complex_relationships(model, constraints)
     return constraints
 end
 
 """
 $(TYPEDSIGNATURES)
 
-Build complex activities using functional C patterns.
-More compositional and efficient than manual iteration.
+Convert a ConstraintTrees.LinearValue to a JuMP expression.
 """
-function build_complex_activities_functional(
-    complexes::Vector{Complex},
-    A_matrix::Union{SparseIncidenceMatrix,SharedSparseMatrix},
-    flux_constraints::C.ConstraintTree,
-    constraint_rxn_ids::Vector{Symbol}
-)
-    # Convert to sparse matrix for efficient operations
-    A_sparse = isa(A_matrix, SharedSparseMatrix) ? sparse(A_matrix) : sparse(A_matrix)
-
-    # Build complex activities using functional patterns
-    complex_activities = C.ConstraintTree()
-
-    # Process complexes in batches for memory efficiency
-    n_complexes = length(complexes)
-    batch_size = min(1000, n_complexes)
-
-    for batch_start in 1:batch_size:n_complexes
-        batch_end = min(batch_start + batch_size - 1, n_complexes)
-
-        # Use functional approach for batch processing
-        batch_activities = map(batch_start:batch_end) do cidx
-            complex = complexes[cidx]
-
-            # Build activity expression functionally
-            activity_terms = build_activity_expression(
-                A_sparse, cidx, constraint_rxn_ids, flux_constraints
-            )
-
-            # Return as constraint with appropriate bounds
-            complex.id => C.Constraint(
-                value=activity_terms,
-                bound=C.Between(-Inf, Inf)
-            )
-        end
-
-        # Add batch to constraint tree
-        for (complex_id, constraint) in batch_activities
-            complex_activities[complex_id] = constraint
-        end
-
-        GC.safepoint()
-    end
-
-    return complex_activities
+function linear_value_to_jump_expr(linear_value::C.LinearValue, x::Vector{JuMP.VariableRef})
+    return sum(
+        linear_value.weights[i] * x[linear_value.idxs[i]]
+        for i in eachindex(linear_value.idxs)
+    )
 end
 
 """
 $(TYPEDSIGNATURES)
 
-Build a single complex activity expression using functional composition.
+Data structure to track complex information.
 """
-function build_activity_expression(
-    A_sparse::SparseMatrixCSC,
-    complex_idx::Int,
-    constraint_rxn_ids::Vector{Symbol},
-    flux_constraints::C.ConstraintTree
-)
-    # Get actual variable indices from the constraint tree
-    idxs = Vector{Int}()
-    weights = Vector{Float64}()
+struct ComplexInfo
+    metabolites::Vector{Tuple{Symbol,Float64}}  # (metabolite_id, stoichiometry)
+    reaction_contributions::Dict{Symbol,Float64}  # reaction_id -> contribution (+1 produced, -1 consumed)
+end
 
-    @debug "Building activity for complex $complex_idx" n_reactions = length(constraint_rxn_ids)
+"""
+$(TYPEDSIGNATURES)
 
-    # DIAGNOSTIC: Check the total variable count in the constraint tree
-    total_var_count = C.variable_count(flux_constraints)
-    @debug "Constraint tree variable count during activity building" total_vars = total_var_count
+Extract all unique complexes from the model.
+A complex is the sum of metabolites on the substrate (left-hand) or product (right-hand) side of a reaction.
+Identical complexes from different reactions are grouped together.
+"""
+function extract_complexes_from_model(model::AbstractFBCModels.AbstractFBCModel)
+    complexes = Dict{Symbol,ComplexInfo}()
 
-    # Iterate through all columns to find non-zero elements in row complex_idx
-    for j_idx in eachindex(constraint_rxn_ids)
-        if j_idx <= size(A_sparse, 2)
-            coeff = A_sparse[complex_idx, j_idx]
-            if abs(coeff) > 1e-12
-                rxn_id = constraint_rxn_ids[j_idx]
-                if haskey(flux_constraints, rxn_id)
-                    # Get the actual variable index from the constraint tree
-                    flux_constraint = flux_constraints[rxn_id]
+    # Get stoichiometry matrix and model components
+    S = AbstractFBCModels.stoichiometry(model)
+    reactions = AbstractFBCModels.reactions(model)
+    metabolites = AbstractFBCModels.metabolites(model)
 
-                    @debug "Processing reaction $rxn_id" coeff constraint_type = typeof(flux_constraint)
+    # For each reaction, extract substrate and product complexes
+    for (rxn_idx, rxn_id) in enumerate(reactions)
+        rxn_symbol = Symbol(rxn_id)
+        rxn_col = S[:, rxn_idx]
 
-                    # Handle different constraint types after transformations
-                    if isa(flux_constraint, C.Constraint)
-                        # After substitution, constraints might be C.Constraint objects
-                        value = flux_constraint.value
-                        if isa(value, C.LinearValue)
-                            # DIAGNOSTIC: Check variable indices are valid
-                            @debug "LinearValue found" rxn_id var_indices = value.idxs weights = value.weights
-
-                            # Extract variable indices from the LinearValue
-                            for (var_idx, var_coeff) in zip(value.idxs, value.weights)
-                                # CRITICAL: Validate variable index is within bounds
-                                if var_idx <= 0 || var_idx > total_var_count
-                                    @error "INVALID VARIABLE INDEX DETECTED" rxn_id var_idx total_var_count
-                                    error("Variable index $var_idx is out of bounds (total variables: $total_var_count)")
-                                end
-
-                                push!(idxs, var_idx)
-                                push!(weights, coeff * var_coeff)
-                            end
-                            @debug "Added linear terms" rxn_id n_new_terms = length(value.idxs)
-                        elseif isa(value, C.Variable)
-                            # Single variable constraint
-                            var_idx = value.idx
-
-                            # CRITICAL: Validate variable index is within bounds
-                            if var_idx <= 0 || var_idx > total_var_count
-                                @error "INVALID VARIABLE INDEX DETECTED" rxn_id var_idx total_var_count
-                                error("Variable index $var_idx is out of bounds (total variables: $total_var_count)")
-                            end
-
-                            push!(idxs, var_idx)
-                            push!(weights, coeff)
-                            @debug "Added single variable" rxn_id var_idx
-                        else
-                            @error "Unsupported flux constraint value type" rxn_id value_type = typeof(value)
-                        end
-                    else
-                        @error "Unexpected flux constraint type" rxn_id constraint_type = typeof(flux_constraint)
-                    end
-                else
-                    @warn "Reaction $rxn_id not found in flux constraints"
-                end
+        # Extract substrate complex (negative coefficients)
+        substrate_mets = Tuple{Symbol,Float64}[]
+        for (met_idx, coeff) in enumerate(rxn_col)
+            if coeff < -1e-12  # Negative coefficient means substrate
+                met_id = Symbol(metabolites[met_idx])
+                push!(substrate_mets, (met_id, -coeff))  # Store as positive stoichiometry
             end
         end
-    end
 
-    @debug "Built activity expression for complex $complex_idx" n_terms = length(idxs) unique_variables = length(unique(idxs))
+        if !isempty(substrate_mets)
+            complex_id = generate_complex_id(substrate_mets, "sub")
+            if !haskey(complexes, complex_id)
+                complexes[complex_id] = ComplexInfo(substrate_mets, Dict{Symbol,Float64}())
+            end
+            # Complex is consumed when reaction runs forward
+            complexes[complex_id].reaction_contributions[rxn_symbol] = -1.0
+        end
 
-    if isempty(idxs)
-        @error "No terms found for complex $complex_idx - this indicates a constraint building issue"
-    end
+        # Extract product complex (positive coefficients)
+        product_mets = Tuple{Symbol,Float64}[]
+        for (met_idx, coeff) in enumerate(rxn_col)
+            if coeff > 1e-12  # Positive coefficient means product
+                met_id = Symbol(metabolites[met_idx])
+                push!(product_mets, (met_id, coeff))
+            end
+        end
 
-    # DIAGNOSTIC: Final validation of the LinearValue about to be created
-    if !isempty(idxs)
-        max_idx = maximum(idxs)
-        min_idx = minimum(idxs)
-        @debug "LinearValue validation" complex_idx min_idx max_idx total_var_count valid_range = (min_idx >= 1 && max_idx <= total_var_count)
-
-        if min_idx < 1 || max_idx > total_var_count
-            @error "CRITICAL: LinearValue contains invalid variable indices" complex_idx min_idx max_idx total_var_count
-            error("Invalid variable indices detected in LinearValue construction")
+        if !isempty(product_mets)
+            complex_id = generate_complex_id(product_mets, "prod")
+            if !haskey(complexes, complex_id)
+                complexes[complex_id] = ComplexInfo(product_mets, Dict{Symbol,Float64}())
+            end
+            # Complex is produced when reaction runs forward
+            complexes[complex_id].reaction_contributions[rxn_symbol] = +1.0
         end
     end
 
-    return C.LinearValue(idxs=idxs, weights=weights)
+    return complexes
 end
+
+"""
+$(TYPEDSIGNATURES)
+
+Generate a unique complex ID from metabolite composition.
+Identical complexes get the same ID regardless of which reaction they appear in.
+"""
+function generate_complex_id(metabolites::Vector{Tuple{Symbol,Float64}}, side::String)
+    # Sort for canonical ordering
+    sorted_mets = sort(metabolites, by=x -> x[1])
+
+    # Build name from stoichiometry
+    parts = [
+        "$(isinteger(coeff) ? Int(coeff) : coeff)_$(met_id)"
+        for (met_id, coeff) in sorted_mets
+    ]
+
+    complex_name = join(parts, "+")
+    return Symbol("$(side)_$(complex_name)")
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Add complex activity variables and constraints to base constraints using C.sum pattern.
+Uses the flux variables from base_constraints to ensure consistency.
+"""
+function add_complex_activities_to_constraints(
+    model::AbstractFBCModels.AbstractFBCModel,
+    base_constraints::C.ConstraintTree
+)
+    # Extract complexes from the model
+    complexes = extract_complexes_from_model(model)
+
+    # Create complex activity variables and add them to base constraints
+    complex_vars = C.variables(
+        keys=collect(keys(complexes)),
+        bounds=C.Between(-Inf, Inf)
+    )
+
+    # Add complex variables to base constraints first
+    constraints_with_complexes = base_constraints + (:complexes^complex_vars)
+
+    # Build complex activity constraints using the combined constraint tree
+    complex_activity_constraints = C.ConstraintTree(
+        complex_id => C.Constraint(
+            value=constraints_with_complexes.complexes[complex_id].value - C.sum(
+                (
+                    contribution * constraints_with_complexes.fluxes[Symbol(rxn_id)].value
+                    for (rxn_id, contribution) in complex_info.reaction_contributions
+                    if haskey(constraints_with_complexes.fluxes, Symbol(rxn_id))
+                ),
+                init=zero(C.LinearValue)
+            ),
+            bound=C.EqualTo(0.0)
+        ) for (complex_id, complex_info) in complexes
+    )
+
+    # Add the complex relationships to the constraints
+    return constraints_with_complexes * (:complex_relationships^complex_activity_constraints)
+end
+
+
 
 """
 $(TYPEDSIGNATURES)
@@ -810,3 +550,240 @@ function setup_concordance_testing(
     return template
 end
 
+
+
+#  julia> complex_vars = C.variables(keys = [:ATP_F6P_complex], bounds = C.Between(-Inf, Inf))
+#   ConstraintTrees.ConstraintTree with 1 element:
+#     :ATP_F6P_complex => ConstraintTrees.Constraint(ConstraintTrees.LinearValue(#= ... =#), 
+#   ConstraintTrees.Between(-Inf, Inf))
+
+#   julia> constraints = base_constraints + (:complexes^complex_vars)
+
+#          # 3. Create the relationship constraint
+#          # ATP_F6P_complex_activity = -R_PFK_flux (consumed in PFK reaction)
+#          # (Add other reactions where this complex appears if any)
+#   ConstraintTrees.ConstraintTree with 5 elements:
+#     :complexes          => ConstraintTrees.ConstraintTree(#= 1 element =#)
+#     :coupling           => ConstraintTrees.ConstraintTree(#= 0 elements =#)
+#     :flux_stoichiometry => ConstraintTrees.ConstraintTree(#= 72 elements =#)
+#     :fluxes             => ConstraintTrees.ConstraintTree(#= 95 elements =#)
+#     :objective          => ConstraintTrees.Constraint(ConstraintTrees.LinearValue(#= ... =#))
+
+#   julia> relationship = :ATP_F6P_complex^C.Constraint(
+#              value = constraints.complexes.ATP_F6P_complex.value +
+#                      constraints.fluxes.R_PFK.value,  # activity = -flux (consumption)
+#              bound = C.EqualTo(0.0)
+#          )
+
+#          # 4. Add the relationship to the constraint system
+#   ConstraintTrees.ConstraintTree with 1 element:
+#     :ATP_F6P_complex => ConstraintTrees.Constraint(ConstraintTrees.LinearValue(#= ... =#), 
+#   ConstraintTrees.EqualTo(0.0))
+
+#   julia> constraints *= (:complex_relationships^relationship)
+#   ConstraintTrees.ConstraintTree with 6 elements:
+#     :complex_relationships => ConstraintTrees.ConstraintTree(#= 1 element =#)
+#     :complexes             => ConstraintTrees.ConstraintTree(#= 1 element =#)
+#     :coupling              => ConstraintTrees.ConstraintTree(#= 0 elements =#)
+#     :flux_stoichiometry    => ConstraintTrees.ConstraintTree(#= 72 elements =#)
+#     :fluxes                => ConstraintTrees.ConstraintTree(#= 95 elements =#)
+#     :objective             => ConstraintTrees.Constraint(ConstraintTrees.LinearValue(#= ... =#))
+
+#   julia> C.pretty(constraints)
+#   ┬─complex_relationships
+#   │ ╰───ATP_F6P_complex: 1.0*x[72] + 1.0*x[96] = 0.0
+#   ├─complexes
+#   │ ╰───ATP_F6P_complex: 1.0*x[96] ∈ [-Inf, Inf]
+#   ├─coupling
+#   ├─flux_stoichiometry
+#   │ ╰─┬─M_13dpg_c: 1.0*x[49] + 1.0*x[75] = 0.0
+#   │   ├─M_2pg_c: -1.0*x[18] + -1.0*x[77] = 0.0
+#   │   ├─M_3pg_c: -1.496*x[13] + -1.0*x[75] + 1.0*x[77] = 0.0
+#   │   ├─M_6pgc_c: -1.0*x[57] + 1.0*x[76] = 0.0
+#   │   ├─M_6pgl_c: 1.0*x[48] + -1.0*x[76] = 0.0
+#   │   ├─M_ac_c: -1.0*x[3] + 1.0*x[6] = 0.0
+#   │   ├─M_ac_e: -1.0*x[6] + -1.0*x[20] = 0.0
+#   │   ├─M_acald_c: -1.0*x[1] + 1.0*x[2] + 1.0*x[10] = 0.0
+#   │   ├─M_acald_e: -1.0*x[2] + -1.0*x[21] = 0.0
+#   │   ├─M_accoa_c: 1.0*x[1] + -3.7478*x[13] + -1.0*x[15] + -1.0*x[62] + 1.0*x[71] + 1.0*x[73] + 
+#   -1.0*x[82] = 0.0
+#   │   ├─M_acon_C_c: 1.0*x[4] + -1.0*x[5] = 0.0
+#   │   ├─M_actp_c: 1.0*x[3] + 1.0*x[82] = 0.0
+#   │   ├─M_adp_c: 1.0*x[3] + 2.0*x[7] + 1.0*x[11] + -1.0*x[12] + 59.81*x[13] + 1.0*x[51] + 1.0*x[52] + 
+#   1.0*x[72] + 1.0*x[75] + 1.0*x[80] + -1.0*x[83] + 1.0*x[90] = 0.0
+#   │   ├─M_akg_c: -1.0*x[8] + 1.0*x[9] + 4.1182*x[13] + 1.0*x[53] + -1.0*x[55] + 1.0*x[59] = 0.0
+#   │   ├─M_akg_e: -1.0*x[9] + -1.0*x[22] = 0.0
+#   │   ├─M_amp_c: -1.0*x[7] + 1.0*x[81] = 0.0
+#   │   ├─M_atp_c: -1.0*x[3] + -1.0*x[7] + -1.0*x[11] + 1.0*x[12] + -59.81*x[13] + -1.0*x[51] + 
+#   -1.0*x[52] + -1.0*x[72] + -1.0*x[75] + -1.0*x[80] + -1.0*x[81] + 1.0*x[83] + -1.0*x[90] = 0.0
+#   │   ├─M_cit_c: -1.0*x[4] + 1.0*x[15] = 0.0
+#   │   ├─M_co2_c: 1.0*x[8] + 1.0*x[14] + 1.0*x[57] + 1.0*x[59] + 1.0*x[65] + 1.0*x[66] + 1.0*x[71] + 
+#   -1.0*x[79] + 1.0*x[80] = 0.0
+#   │   ├─M_co2_e: -1.0*x[14] + -1.0*x[23] = 0.0
+#   │   ├─M_coa_c: -1.0*x[1] + -1.0*x[8] + 3.7478*x[13] + 1.0*x[15] + 1.0*x[62] + -1.0*x[71] + -1.0*x[73]
+#    + 1.0*x[82] + -1.0*x[90] = 0.0
+#   │   ├─M_dhap_c: 1.0*x[40] + -1.0*x[95] = 0.0
+#   │   ├─M_e4p_c: -0.361*x[13] + 1.0*x[91] + -1.0*x[94] = 0.0
+#   │   ├─M_etoh_c: -1.0*x[10] + 1.0*x[19] = 0.0
+#   │   ├─M_etoh_e: -1.0*x[19] + -1.0*x[24] = 0.0
+#   │   ├─M_f6p_c: -0.0709*x[13] + 1.0*x[41] + 1.0*x[45] + -1.0*x[72] + 1.0*x[74] + 1.0*x[91] + 1.0*x[94]
+#    = 0.0
+#   │   ├─M_fdp_c: -1.0*x[40] + -1.0*x[41] + 1.0*x[72] = 0.0
+#   │   ├─M_for_c: 1.0*x[42] + 1.0*x[43] + 1.0*x[73] = 0.0
+#   │   ├─M_for_e: -1.0*x[25] + -1.0*x[42] + -1.0*x[43] = 0.0
+#   │   ├─M_fru_e: -1.0*x[26] + -1.0*x[45] = 0.0
+#   │   ├─M_fum_c: -1.0*x[44] + -1.0*x[46] + 1.0*x[47] + 1.0*x[89] = 0.0
+#   │   ├─M_fum_e: -1.0*x[27] + -1.0*x[47] = 0.0
+#   │   ├─M_g3p_c: -0.129*x[13] + 1.0*x[40] + -1.0*x[49] + -1.0*x[91] + 1.0*x[93] + 1.0*x[94] + 1.0*x[95]
+#    = 0.0
+#   │   ├─M_g6p_c: -0.205*x[13] + -1.0*x[48] + 1.0*x[50] + -1.0*x[74] = 0.0
+#   │   ├─M_glc__D_e: -1.0*x[28] + -1.0*x[50] = 0.0
+#   │   ├─M_gln__L_c: -0.2557*x[13] + 1.0*x[51] + 1.0*x[52] + -1.0*x[54] + -1.0*x[55] = 0.0
+#   │   ├─M_gln__L_e: -1.0*x[29] + -1.0*x[52] = 0.0
+#   │   ├─M_glu__L_c: -4.9414*x[13] + -1.0*x[51] + -1.0*x[53] + 1.0*x[54] + 2.0*x[55] + 1.0*x[56] = 0.0
+#   │   ├─M_glu__L_e: -1.0*x[30] + -1.0*x[56] = 0.0
+#   │   ├─M_glx_c: 1.0*x[60] + -1.0*x[62] = 0.0
+#   │   ├─M_h2o_c: 1.0*x[4] + -1.0*x[5] + -1.0*x[11] + 1.0*x[12] + -59.81*x[13] + -1.0*x[15] + 1.0*x[16] 
+#   + 1.0*x[18] + -1.0*x[41] + -1.0*x[46] + -1.0*x[52] + -1.0*x[53] + -1.0*x[54] + 1.0*x[58] + -1.0*x[62]
+#    + -1.0*x[76] + -1.0*x[79] + -1.0*x[81] = 0.0
+#   │   ├─M_h2o_e: -1.0*x[31] + -1.0*x[58] = 0.0
+#   │   ├─M_h_c: 1.0*x[1] + 1.0*x[6] + 1.0*x[9] + 1.0*x[10] + 1.0*x[11] + 3.0*x[12] + 59.81*x[13] + 
+#   1.0*x[15] + -2.0*x[16] + 1.0*x[17] + 1.0*x[19] + 1.0*x[43] + 2.0*x[47] + 1.0*x[48] + 1.0*x[49] + 
+#   1.0*x[51] + 1.0*x[52] + 1.0*x[53] + -1.0*x[55] + 1.0*x[56] + 1.0*x[61] + 1.0*x[62] + 2.0*x[63] + 
+#   1.0*x[64] + -4.0*x[67] + 1.0*x[72] + 1.0*x[76] + 1.0*x[78] + 1.0*x[79] + 2.0*x[81] + -1.0*x[83] + 
+#   1.0*x[84] + 2.0*x[87] + 1.0*x[88] + 2.0*x[92] = 0.0
+#   │   ├─M_h_e: -1.0*x[6] + -1.0*x[9] + -4.0*x[12] + 2.0*x[16] + -1.0*x[17] + -1.0*x[19] + -1.0*x[32] + 
+#   -1.0*x[43] + -2.0*x[47] + -1.0*x[56] + -2.0*x[63] + 3.0*x[67] + -1.0*x[78] + -1.0*x[84] + -2.0*x[87] 
+#   + -1.0*x[88] + -2.0*x[92] = 0.0
+#   │   ├─M_icit_c: 1.0*x[5] + -1.0*x[59] + -1.0*x[60] = 0.0
+#   │   ├─M_lac__D_c: 1.0*x[17] + -1.0*x[61] = 0.0
+#   │   ├─M_lac__D_e: -1.0*x[17] + -1.0*x[33] = 0.0
+#   │   ├─M_mal__L_c: 1.0*x[46] + 1.0*x[62] + 1.0*x[63] + -1.0*x[64] + -1.0*x[65] + -1.0*x[66] = 0.0
+#   │   ├─M_mal__L_e: -1.0*x[34] + -1.0*x[63] = 0.0
+#   │   ├─M_nad_c: -1.0*x[1] + -1.0*x[8] + -1.0*x[10] + -3.547*x[13] + -1.0*x[49] + -1.0*x[61] + 
+#   -1.0*x[64] + -1.0*x[65] + 1.0*x[67] + -1.0*x[68] + -1.0*x[71] + 1.0*x[92] = 0.0
+#   │   ├─M_nadh_c: 1.0*x[1] + 1.0*x[8] + 1.0*x[10] + 3.547*x[13] + 1.0*x[49] + 1.0*x[61] + 1.0*x[64] + 
+#   1.0*x[65] + -1.0*x[67] + 1.0*x[68] + 1.0*x[71] + -1.0*x[92] = 0.0
+#   │   ├─M_nadp_c: 13.0279*x[13] + -1.0*x[48] + -1.0*x[53] + 1.0*x[55] + -1.0*x[57] + -1.0*x[59] + 
+#   -1.0*x[66] + 1.0*x[68] + -1.0*x[92] = 0.0
+#   │   ├─M_nadph_c: -13.0279*x[13] + 1.0*x[48] + 1.0*x[53] + -1.0*x[55] + 1.0*x[57] + 1.0*x[59] + 
+#   1.0*x[66] + -1.0*x[68] + 1.0*x[92] = 0.0
+#   │   ├─M_nh4_c: -1.0*x[51] + 1.0*x[53] + 1.0*x[54] + 1.0*x[69] = 0.0
+#   │   ├─M_nh4_e: -1.0*x[35] + -1.0*x[69] = 0.0
+#   │   ├─M_o2_c: -0.5*x[16] + 1.0*x[70] = 0.0
+#   │   ├─M_o2_e: -1.0*x[36] + -1.0*x[70] = 0.0
+#   │   ├─M_oaa_c: -1.7867*x[13] + -1.0*x[15] + 1.0*x[64] + 1.0*x[79] + -1.0*x[80] = 0.0
+#   │   ├─M_pep_c: -0.5191*x[13] + 1.0*x[18] + -1.0*x[45] + -1.0*x[50] + -1.0*x[79] + 1.0*x[80] + 
+#   1.0*x[81] + -1.0*x[83] = 0.0
+#   │   ├─M_pi_c: 1.0*x[11] + -1.0*x[12] + 59.81*x[13] + 1.0*x[41] + -1.0*x[49] + 1.0*x[51] + 1.0*x[52] +
+#    1.0*x[78] + 1.0*x[79] + 1.0*x[81] + -1.0*x[82] + 1.0*x[90] = 0.0
+#   │   ├─M_pi_e: -1.0*x[37] + -1.0*x[78] = 0.0
+#   │   ├─M_pyr_c: -2.8328*x[13] + 1.0*x[45] + 1.0*x[50] + 1.0*x[61] + 1.0*x[65] + 1.0*x[66] + -1.0*x[71]
+#    + -1.0*x[73] + -1.0*x[81] + 1.0*x[83] + 1.0*x[84] = 0.0
+#   │   ├─M_pyr_e: -1.0*x[38] + -1.0*x[84] = 0.0
+#   │   ├─M_q8_c: 1.0*x[16] + 1.0*x[44] + -1.0*x[67] + -1.0*x[89] = 0.0
+#   │   ├─M_q8h2_c: -1.0*x[16] + -1.0*x[44] + 1.0*x[67] + 1.0*x[89] = 0.0
+#   │   ├─M_r5p_c: -0.8977*x[13] + -1.0*x[86] + -1.0*x[93] = 0.0
+#   │   ├─M_ru5p__D_c: 1.0*x[57] + -1.0*x[85] + 1.0*x[86] = 0.0
+#   │   ├─M_s7p_c: -1.0*x[91] + 1.0*x[93] = 0.0
+#   │   ├─M_succ_c: 1.0*x[44] + 1.0*x[60] + 1.0*x[87] + -1.0*x[88] + -1.0*x[89] + -1.0*x[90] = 0.0
+#   │   ├─M_succ_e: -1.0*x[39] + -1.0*x[87] + 1.0*x[88] = 0.0
+#   │   ├─M_succoa_c: 1.0*x[8] + 1.0*x[90] = 0.0
+#   │   ╰─M_xu5p__D_c: 1.0*x[85] + -1.0*x[93] + -1.0*x[94] = 0.0
+#   ├─fluxes
+#   │ ╰─┬─R_ACALD: 1.0*x[1] ∈ [-1000.0, 1000.0]
+#   │   ├─R_ACALDt: 1.0*x[2] ∈ [-1000.0, 1000.0]
+#   │   ├─R_ACKr: 1.0*x[3] ∈ [-1000.0, 1000.0]
+#   │   ├─R_ACONTa: 1.0*x[4] ∈ [-1000.0, 1000.0]
+#   │   ├─R_ACONTb: 1.0*x[5] ∈ [-1000.0, 1000.0]
+#   │   ├─R_ACt2r: 1.0*x[6] ∈ [-1000.0, 1000.0]
+#   │   ├─R_ADK1: 1.0*x[7] ∈ [-1000.0, 1000.0]
+#   │   ├─R_AKGDH: 1.0*x[8] ∈ [0.0, 1000.0]
+#   │   ├─R_AKGt2r: 1.0*x[9] ∈ [-1000.0, 1000.0]
+#   │   ├─R_ALCD2x: 1.0*x[10] ∈ [-1000.0, 1000.0]
+#   │   ├─R_ATPM: 1.0*x[11] ∈ [8.39, 1000.0]
+#   │   ├─R_ATPS4r: 1.0*x[12] ∈ [-1000.0, 1000.0]
+#   │   ├─R_BIOMASS_Ecoli_core_w_GAM: 1.0*x[13] ∈ [0.0, 1000.0]
+#   │   ├─R_CO2t: 1.0*x[14] ∈ [-1000.0, 1000.0]
+#   │   ├─R_CS: 1.0*x[15] ∈ [0.0, 1000.0]
+#   │   ├─R_CYTBD: 1.0*x[16] ∈ [0.0, 1000.0]
+#   │   ├─R_D_LACt2: 1.0*x[17] ∈ [-1000.0, 1000.0]
+#   │   ├─R_ENO: 1.0*x[18] ∈ [-1000.0, 1000.0]
+#   │   ├─R_ETOHt2r: 1.0*x[19] ∈ [-1000.0, 1000.0]
+#   │   ├─R_EX_ac_e: 1.0*x[20] ∈ [0.0, 1000.0]
+#   │   ├─R_EX_acald_e: 1.0*x[21] ∈ [0.0, 1000.0]
+#   │   ├─R_EX_akg_e: 1.0*x[22] ∈ [0.0, 1000.0]
+#   │   ├─R_EX_co2_e: 1.0*x[23] ∈ [-1000.0, 1000.0]
+#   │   ├─R_EX_etoh_e: 1.0*x[24] ∈ [0.0, 1000.0]
+#   │   ├─R_EX_for_e: 1.0*x[25] ∈ [0.0, 1000.0]
+#   │   ├─R_EX_fru_e: 1.0*x[26] ∈ [0.0, 1000.0]
+#   │   ├─R_EX_fum_e: 1.0*x[27] ∈ [0.0, 1000.0]
+#   │   ├─R_EX_glc__D_e: 1.0*x[28] ∈ [-10.0, 1000.0]
+#   │   ├─R_EX_gln__L_e: 1.0*x[29] ∈ [0.0, 1000.0]
+#   │   ├─R_EX_glu__L_e: 1.0*x[30] ∈ [0.0, 1000.0]
+#   │   ├─R_EX_h2o_e: 1.0*x[31] ∈ [-1000.0, 1000.0]
+#   │   ├─R_EX_h_e: 1.0*x[32] ∈ [-1000.0, 1000.0]
+#   │   ├─R_EX_lac__D_e: 1.0*x[33] ∈ [0.0, 1000.0]
+#   │   ├─R_EX_mal__L_e: 1.0*x[34] ∈ [0.0, 1000.0]
+#   │   ├─R_EX_nh4_e: 1.0*x[35] ∈ [-1000.0, 1000.0]
+#   │   ├─R_EX_o2_e: 1.0*x[36] ∈ [-1000.0, 1000.0]
+#   │   ├─R_EX_pi_e: 1.0*x[37] ∈ [-1000.0, 1000.0]
+#   │   ├─R_EX_pyr_e: 1.0*x[38] ∈ [0.0, 1000.0]
+#   │   ├─R_EX_succ_e: 1.0*x[39] ∈ [0.0, 1000.0]
+#   │   ├─R_FBA: 1.0*x[40] ∈ [-1000.0, 1000.0]
+#   │   ├─R_FBP: 1.0*x[41] ∈ [0.0, 1000.0]
+#   │   ├─R_FORt: 1.0*x[42] ∈ [-1000.0, 0.0]
+#   │   ├─R_FORt2: 1.0*x[43] ∈ [0.0, 1000.0]
+#   │   ├─R_FRD7: 1.0*x[44] ∈ [0.0, 1000.0]
+#   │   ├─R_FRUpts2: 1.0*x[45] ∈ [0.0, 1000.0]
+#   │   ├─R_FUM: 1.0*x[46] ∈ [-1000.0, 1000.0]
+#   │   ├─R_FUMt2_2: 1.0*x[47] ∈ [0.0, 1000.0]
+#   │   ├─R_G6PDH2r: 1.0*x[48] ∈ [-1000.0, 1000.0]
+#   │   ├─R_GAPD: 1.0*x[49] ∈ [-1000.0, 1000.0]
+#   │   ├─R_GLCpts: 1.0*x[50] ∈ [0.0, 1000.0]
+#   │   ├─R_GLNS: 1.0*x[51] ∈ [0.0, 1000.0]
+#   │   ├─R_GLNabc: 1.0*x[52] ∈ [0.0, 1000.0]
+#   │   ├─R_GLUDy: 1.0*x[53] ∈ [-1000.0, 1000.0]
+#   │   ├─R_GLUN: 1.0*x[54] ∈ [0.0, 1000.0]
+#   │   ├─R_GLUSy: 1.0*x[55] ∈ [0.0, 1000.0]
+#   │   ├─R_GLUt2r: 1.0*x[56] ∈ [-1000.0, 1000.0]
+#   │   ├─R_GND: 1.0*x[57] ∈ [0.0, 1000.0]
+#   │   ├─R_H2Ot: 1.0*x[58] ∈ [-1000.0, 1000.0]
+#   │   ├─R_ICDHyr: 1.0*x[59] ∈ [-1000.0, 1000.0]
+#   │   ├─R_ICL: 1.0*x[60] ∈ [0.0, 1000.0]
+#   │   ├─R_LDH_D: 1.0*x[61] ∈ [-1000.0, 1000.0]
+#   │   ├─R_MALS: 1.0*x[62] ∈ [0.0, 1000.0]
+#   │   ├─R_MALt2_2: 1.0*x[63] ∈ [0.0, 1000.0]
+#   │   ├─R_MDH: 1.0*x[64] ∈ [-1000.0, 1000.0]
+#   │   ├─R_ME1: 1.0*x[65] ∈ [0.0, 1000.0]
+#   │   ├─R_ME2: 1.0*x[66] ∈ [0.0, 1000.0]
+#   │   ├─R_NADH16: 1.0*x[67] ∈ [0.0, 1000.0]
+#   │   ├─R_NADTRHD: 1.0*x[68] ∈ [0.0, 1000.0]
+#   │   ├─R_NH4t: 1.0*x[69] ∈ [-1000.0, 1000.0]
+#   │   ├─R_O2t: 1.0*x[70] ∈ [-1000.0, 1000.0]
+#   │   ├─R_PDH: 1.0*x[71] ∈ [0.0, 1000.0]
+#   │   ├─R_PFK: 1.0*x[72] ∈ [0.0, 1000.0]
+#   │   ├─R_PFL: 1.0*x[73] ∈ [0.0, 1000.0]
+#   │   ├─R_PGI: 1.0*x[74] ∈ [-1000.0, 1000.0]
+#   │   ├─R_PGK: 1.0*x[75] ∈ [-1000.0, 1000.0]
+#   │   ├─R_PGL: 1.0*x[76] ∈ [0.0, 1000.0]
+#   │   ├─R_PGM: 1.0*x[77] ∈ [-1000.0, 1000.0]
+#   │   ├─R_PIt2r: 1.0*x[78] ∈ [-1000.0, 1000.0]
+#   │   ├─R_PPC: 1.0*x[79] ∈ [0.0, 1000.0]
+#   │   ├─R_PPCK: 1.0*x[80] ∈ [0.0, 1000.0]
+#   │   ├─R_PPS: 1.0*x[81] ∈ [0.0, 1000.0]
+#   │   ├─R_PTAr: 1.0*x[82] ∈ [-1000.0, 1000.0]
+#   │   ├─R_PYK: 1.0*x[83] ∈ [0.0, 1000.0]
+#   │   ├─R_PYRt2: 1.0*x[84] ∈ [-1000.0, 1000.0]
+#   │   ├─R_RPE: 1.0*x[85] ∈ [-1000.0, 1000.0]
+#   │   ├─R_RPI: 1.0*x[86] ∈ [-1000.0, 1000.0]
+#   │   ├─R_SUCCt2_2: 1.0*x[87] ∈ [0.0, 1000.0]
+#   │   ├─R_SUCCt3: 1.0*x[88] ∈ [0.0, 1000.0]
+#   │   ├─R_SUCDi: 1.0*x[89] ∈ [0.0, 1000.0]
+#   │   ├─R_SUCOAS: 1.0*x[90] ∈ [-1000.0, 1000.0]
+#   │   ├─R_TALA: 1.0*x[91] ∈ [-1000.0, 1000.0]
+#   │   ├─R_THD2: 1.0*x[92] ∈ [0.0, 1000.0]
+#   │   ├─R_TKT1: 1.0*x[93] ∈ [-1000.0, 1000.0]
+#   │   ├─R_TKT2: 1.0*x[94] ∈ [-1000.0, 1000.0]
+#   │   ╰─R_TPI: 1.0*x[95] ∈ [-1000.0, 1000.0]
+#   ╰─objective: 1.0*x[13]

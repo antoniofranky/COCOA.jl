@@ -583,6 +583,9 @@ function streaming_filter(
 
     # Use exactly the number of warmup points we need for the target sample count
     # This ensures we get exactly target_samples_per_chain samples per chain
+    # NOTE: The sort(randperm(rng, ...)) pattern ensures deterministic warmup selection
+    # when given the same seed, as randperm uses the seeded RNG and sort provides
+    # consistent ordering of the selected indices
     if size(warmup, 1) > n_warmup_points_per_chain
         selected_indices = sort(randperm(rng, size(warmup, 1))[1:n_warmup_points_per_chain])
         limited_warmup = warmup[selected_indices, :]

@@ -410,7 +410,7 @@ function process_concordance_batch(
 )
     # Optimize constraint trees by pruning unused variables
     pruned_constraints = C.prune_variables(constraints)
-
+    # pruned_constraints = constraints  # Use original constraints for now
     # Extract activity lookup from pre-computed ConstraintTrees
     activity_lookup = Dict{Symbol,C.LinearValue}()
 
@@ -534,8 +534,13 @@ function process_concordance_batch(
     # Process batch results back to individual concordance test results
     results = []
 
+    # Ensure deterministic ordering by sorting results with their original indices
+    # This maintains determinism even when parallel workers complete in different orders
+    indexed_results = [(i, test_results) for (i, test_results) in enumerate(batch_results)]
+    sort!(indexed_results, by=x -> x[1])  # Sort by original index for determinism
+
     # batch_results contains results for each test, with each test processed for both MIN and MAX
-    for (i, test_results) in enumerate(batch_results)
+    for (i, test_results) in indexed_results
         c1_idx, c2_idx, direction = pair_mappings[i]
 
         # Extract min and max values from the test results
@@ -567,11 +572,16 @@ function process_concordance_batch(
 
     # Check if all required directions are concordant
     final_results = []
-    for ((c1_idx, c2_idx), dir_results) in pair_results
+
+    # Sort pairs by indices to ensure deterministic iteration order
+    sorted_pairs = sort(collect(pair_results), by=x -> x[1])
+
+    for ((c1_idx, c2_idx), dir_results) in sorted_pairs
         all_concordant = all(r[1] for r in values(dir_results))
-        # Get lambda from any concordant direction
+        # Get lambda from any concordant direction (deterministic ordering)
         lambda = nothing
-        for (is_conc, lam) in values(dir_results)
+        for direction in sort(collect(keys(dir_results)))  # Sort directions for determinism
+            is_conc, lam = dir_results[direction]
             if is_conc && !isnothing(lam)
                 lambda = lam
                 break
@@ -604,7 +614,6 @@ Main concordance analysis function optimized for large models and HPC execution.
 - `use_shared_arrays=true`: Enable SharedArrays for parallel processing
 - `min_size_for_sharing=1_000_000`: Minimum array size for shared memory
 - `min_valid_samples=30`: Minimum samples required for correlation
-- `max_correlation_pairs=500_000`: Maximum correlation pairs to evaluate
 - `seed=42`: Master random seed for hierarchical reproducible RNG. Uses StableRNGs for cross-platform reproducibility and generates deterministic seeds for different analysis components (warmup generation, batch coordination, etc.)
 - `use_unidirectional_constraints=true`: Split reversible reactions
 - `filter=[:cv, :cor]`: Filtering methods to use. Can contain `:cv` for coefficient of variation filtering, `:cor` for correlation filtering, or both
@@ -629,15 +638,17 @@ function concordance_analysis(
     use_shared_arrays::Bool=true,
     min_size_for_sharing::Int=1_000_000,
     min_valid_samples::Int=30,
-    max_correlation_pairs::Int=500_000,
     seed::Union{Int,Nothing}=42,
     use_unidirectional_constraints::Bool=true,
     # Filtering parameters
-    filter::Vector{Symbol}=[:cv, :cor],
+    filter::Union{Symbol,Vector{Symbol}}=[:cv, :cor],
     cv_threshold::Float64=0.01,
     cv_epsilon::Float64=1e-12,
 )
     start_time = time()
+
+    # Normalize filter parameter to vector
+    filter_vec = isa(filter, Symbol) ? [filter] : filter
 
     # Use COBREXA's efficient model conversion
     model = if !isa(model, AbstractFBCModels.CanonicalModel.Model)
@@ -650,7 +661,7 @@ function concordance_analysis(
     # Scale batch sizes with number of workers for better utilization
     n_workers = length(workers)
     effective_batch_size = max(batch_size, 50 * n_workers)  # At least 50 tasks per worker
-    effective_stage_size = max(stage_size, 200 * n_workers)  # Scale stage size accordingly
+    effective_stage_size = max(stage_size, 100 * n_workers)  # Scale stage size accordingly
 
     @info "Starting concordance analysis" n_workers tolerance early_correlation_threshold correlation_threshold sample_size use_unidirectional_constraints effective_batch_size effective_stage_size
 
@@ -659,8 +670,7 @@ function concordance_analysis(
         concordance_constraints(model; modifications, use_unidirectional_constraints, use_shared_arrays, min_size_for_sharing)
 
     # Extract complexes with potential shared memory 
-    complexes, A_matrix, _ =
-        extract_complexes_and_incidence(model; use_shared_arrays, min_size_for_sharing)
+    complexes = extract_complexes_from_model(model)
     n_complexes = length(complexes)
     complex_ids = [c.id for c in complexes]
 
@@ -853,12 +863,11 @@ function concordance_analysis(
         correlation_threshold=correlation_threshold,
         sample_size=sample_size,
         min_valid_samples=min_valid_samples,
-        max_correlation_pairs=max_correlation_pairs,
         early_correlation_threshold=early_correlation_threshold,
         workers=workers,
         seed=seed,
         # Filtering parameters
-        filter=filter,
+        filter=filter_vec,
         cv_threshold=cv_threshold,
         cv_epsilon=cv_epsilon,
     )
@@ -1057,4 +1066,67 @@ function get_module_id(complex_id::Symbol, modules::Dict{Symbol,Set{Symbol}})
         end
     end
     return "none"
+end
+
+"""
+Find trivially balanced complexes (containing metabolites that appear in only one complex).
+"""
+function find_trivially_balanced_complexes(
+    complexes::Vector{Complex}
+)::Set{Symbol}
+    # Build metabolite participation mapping
+    metabolite_participation = Dict{Int,Vector{Int}}()
+
+    for (cidx, complex) in enumerate(complexes)
+        for met_idx in complex.metabolite_indices
+            if !haskey(metabolite_participation, met_idx)
+                metabolite_participation[met_idx] = Int[]
+            end
+            push!(metabolite_participation[met_idx], cidx)
+        end
+    end
+
+    balanced_complexes = Set{Symbol}()
+
+    # Find metabolites that appear in only one complex
+    for (met_idx, complex_indices) in metabolite_participation
+        if length(complex_indices) == 1
+            complex_idx = complex_indices[1]
+            push!(balanced_complexes, complexes[complex_idx].id)
+        end
+    end
+
+    return balanced_complexes
+end
+
+"""
+Find trivially concordant complexes based on shared metabolites.
+Two complexes are trivially concordant if they share a metabolite that 
+appears in exactly those two complexes.
+"""
+function find_trivially_concordant_pairs(complexes::Vector{Complex})::Set{Tuple{Int,Int}}
+    # Build metabolite participation mapping
+    metabolite_participation = Dict{Int,Vector{Int}}()
+
+    for (cidx, complex) in enumerate(complexes)
+        for met_idx in complex.metabolite_indices
+            if !haskey(metabolite_participation, met_idx)
+                metabolite_participation[met_idx] = Int[]
+            end
+            push!(metabolite_participation[met_idx], cidx)
+        end
+    end
+
+    concordant_pairs = Set{Tuple{Int,Int}}()
+
+    # Find metabolites that appear in exactly two complexes
+    for (met_idx, complex_indices) in metabolite_participation
+        if length(complex_indices) == 2
+            c1, c2 = complex_indices
+            pair = c1 < c2 ? (c1, c2) : (c2, c1)
+            push!(concordant_pairs, pair)
+        end
+    end
+
+    return concordant_pairs
 end
