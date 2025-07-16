@@ -129,8 +129,8 @@ end
 $(TYPEDSIGNATURES)
 
 Extract all unique complexes from the model.
-A complex is the sum of metabolites on the substrate (left-hand) or product (right-hand) side of a reaction.
-Identical complexes from different reactions are grouped together.
+A complex is the sum of metabolites that appear together in reactions.
+Identical complexes are unified regardless of whether they appear as substrates or products.
 """
 function extract_complexes_from_model(model::AbstractFBCModels.AbstractFBCModel)
     complexes = Dict{Symbol,ComplexInfo}()
@@ -155,11 +155,11 @@ function extract_complexes_from_model(model::AbstractFBCModels.AbstractFBCModel)
         end
 
         if !isempty(substrate_mets)
-            complex_id = generate_complex_id(substrate_mets, "sub")
+            complex_id = generate_complex_id(substrate_mets)
             if !haskey(complexes, complex_id)
                 complexes[complex_id] = ComplexInfo(substrate_mets, Dict{Symbol,Float64}())
             end
-            # Complex is consumed when reaction runs forward
+            # Complex is consumed when reaction runs forward (negative contribution)
             complexes[complex_id].reaction_contributions[rxn_symbol] = -1.0
         end
 
@@ -173,12 +173,19 @@ function extract_complexes_from_model(model::AbstractFBCModels.AbstractFBCModel)
         end
 
         if !isempty(product_mets)
-            complex_id = generate_complex_id(product_mets, "prod")
+            complex_id = generate_complex_id(product_mets)
             if !haskey(complexes, complex_id)
                 complexes[complex_id] = ComplexInfo(product_mets, Dict{Symbol,Float64}())
             end
-            # Complex is produced when reaction runs forward
-            complexes[complex_id].reaction_contributions[rxn_symbol] = +1.0
+            # Add to existing reaction contributions if complex already exists
+            if haskey(complexes[complex_id].reaction_contributions, rxn_symbol)
+                # If the same complex appears as both substrate and product in the same reaction,
+                # add the contributions (this handles cases like isomerization)
+                complexes[complex_id].reaction_contributions[rxn_symbol] += 1.0
+            else
+                # Complex is produced when reaction runs forward (positive contribution)
+                complexes[complex_id].reaction_contributions[rxn_symbol] = 1.0
+            end
         end
     end
 
@@ -189,9 +196,9 @@ end
 $(TYPEDSIGNATURES)
 
 Generate a unique complex ID from metabolite composition.
-Identical complexes get the same ID regardless of which reaction they appear in.
+Identical complexes get the same ID regardless of which reaction they appear in or their role (substrate/product).
 """
-function generate_complex_id(metabolites::Vector{Tuple{Symbol,Float64}}, side::String)
+function generate_complex_id(metabolites::Vector{Tuple{Symbol,Float64}})
     # Sort for canonical ordering
     sorted_mets = sort(metabolites, by=x -> x[1])
 
@@ -202,7 +209,7 @@ function generate_complex_id(metabolites::Vector{Tuple{Symbol,Float64}}, side::S
     ]
 
     complex_name = join(parts, "+")
-    return Symbol("$(side)_$(complex_name)")
+    return Symbol(complex_name)
 end
 
 """
