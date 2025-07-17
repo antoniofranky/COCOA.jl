@@ -110,17 +110,6 @@ function concordance_constraints(
 
 end
 
-"""
-$(TYPEDSIGNATURES)
-
-Convert a ConstraintTrees.LinearValue to a JuMP expression.
-"""
-function linear_value_to_jump_expr(linear_value::C.LinearValue, x::Vector{JuMP.VariableRef})
-    return sum(
-        linear_value.weights[i] * x[linear_value.idxs[i]]
-        for i in eachindex(linear_value.idxs)
-    )
-end
 
 """
 $(TYPEDSIGNATURES)
