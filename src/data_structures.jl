@@ -79,24 +79,6 @@ function ensure_buffer_capacity!(buffers::AnalysisBuffers, required_batch_size::
     end
 end
 
-"""
-Internal representation of a complex with memory-efficient storage.
-"""
-struct Complex
-    id::Symbol
-    metabolite_indices::Vector{Int32}
-    stoichiometry::Vector{Float32}
-    hash::UInt64
-
-    function Complex(id::Symbol, met_idxs::Vector{<:Integer}, stoich::Vector{<:Real})
-        # Ensure canonical ordering
-        perm = sortperm(met_idxs)
-        sorted_idxs = Int32.(met_idxs[perm])
-        sorted_stoich = Float32.(stoich[perm])
-        h = hash((sorted_idxs, sorted_stoich))
-        new(id, sorted_idxs, sorted_stoich, h)
-    end
-end
 
 """
 Shared sparse matrix structure optimized for single-node parallelism.

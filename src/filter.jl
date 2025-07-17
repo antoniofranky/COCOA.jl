@@ -606,7 +606,7 @@ function streaming_filter(
     all_samples = COBREXA.sample_constraints(
         COBREXA.sample_chain_achr,
         constraints;
-        output=constraints.concordance_analysis.complexes,
+        output=constraints.activities,
         start_variables=limited_warmup,
         seed=rand(rng, UInt64),
         n_chains=n_chains,

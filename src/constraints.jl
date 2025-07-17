@@ -78,6 +78,7 @@ Memory-efficient concordance constraints that work with large models.
 """
 function concordance_constraints(
     model::AbstractFBCModels.AbstractFBCModel;
+    return_complexes::Bool=false,
     modifications=Function[],
     interface=nothing,
     use_unidirectional_constraints::Bool=true,
@@ -97,10 +98,16 @@ function concordance_constraints(
         constraints = mod(constraints)
     end
 
-    # Build complex activities using C.sum pattern
-    constraints = add_complex_activities_to_constraints(model, constraints)
-    #verify_complex_relationships(model, constraints)
-    return constraints
+    # Build complex activities using C.sum pattern and extract complexes
+    constraints, complexes = add_complex_activities_to_constraints(model, constraints)
+
+    if return_complexes
+        return constraints, complexes
+    else
+        # If complexes are not needed, we can return just the constraints
+        return constraints
+    end
+
 end
 
 """
@@ -120,9 +127,16 @@ $(TYPEDSIGNATURES)
 
 Data structure to track complex information.
 """
-struct ComplexInfo
+struct MetabolicComplex
+    id::Symbol
     metabolites::Vector{Tuple{Symbol,Float64}}  # (metabolite_id, stoichiometry)
     reaction_contributions::Dict{Symbol,Float64}  # reaction_id -> contribution (+1 produced, -1 consumed)
+
+    function MetabolicComplex(id::Symbol, metabolites::Vector{Tuple{Symbol,Float64}}, reaction_contributions::Dict{Symbol,Float64})
+        # Ensure canonical ordering by sorting metabolites by their Symbol names
+        sorted_metabolites = sort(metabolites, by=x -> x[1])
+        new(id, sorted_metabolites, reaction_contributions)
+    end
 end
 
 """
@@ -133,7 +147,7 @@ A complex is the sum of metabolites that appear together in reactions.
 Identical complexes are unified regardless of whether they appear as substrates or products.
 """
 function extract_complexes_from_model(model::AbstractFBCModels.AbstractFBCModel)
-    complexes = Dict{Symbol,ComplexInfo}()
+    complexes = Dict{Symbol,MetabolicComplex}()
 
     # Get stoichiometry matrix and model components
     S = AbstractFBCModels.stoichiometry(model)
@@ -157,7 +171,7 @@ function extract_complexes_from_model(model::AbstractFBCModels.AbstractFBCModel)
         if !isempty(substrate_mets)
             complex_id = generate_complex_id(substrate_mets)
             if !haskey(complexes, complex_id)
-                complexes[complex_id] = ComplexInfo(substrate_mets, Dict{Symbol,Float64}())
+                complexes[complex_id] = MetabolicComplex(complex_id, substrate_mets, Dict{Symbol,Float64}())
             end
             # Complex is consumed when reaction runs forward (negative contribution)
             complexes[complex_id].reaction_contributions[rxn_symbol] = -1.0
@@ -175,7 +189,7 @@ function extract_complexes_from_model(model::AbstractFBCModels.AbstractFBCModel)
         if !isempty(product_mets)
             complex_id = generate_complex_id(product_mets)
             if !haskey(complexes, complex_id)
-                complexes[complex_id] = ComplexInfo(product_mets, Dict{Symbol,Float64}())
+                complexes[complex_id] = MetabolicComplex(complex_id, product_mets, Dict{Symbol,Float64}())
             end
             # Add to existing reaction contributions if complex already exists
             if haskey(complexes[complex_id].reaction_contributions, rxn_symbol)
@@ -225,32 +239,26 @@ function add_complex_activities_to_constraints(
     # Extract complexes from the model
     complexes = extract_complexes_from_model(model)
 
-    # Create complex activity variables and add them to base constraints
-    complex_vars = C.variables(
-        keys=collect(keys(complexes)),
-        bounds=C.Between(-Inf, Inf)
-    )
-
-    # Add complex variables to base constraints first
-    constraints_with_complexes = base_constraints + (:complexes^complex_vars)
-
     # Build complex activity constraints using the combined constraint tree
     complex_activity_constraints = C.ConstraintTree(
         complex_id => C.Constraint(
-            value=constraints_with_complexes.complexes[complex_id].value - C.sum(
+            value=C.sum(
                 (
-                    contribution * constraints_with_complexes.fluxes[Symbol(rxn_id)].value
-                    for (rxn_id, contribution) in complex_info.reaction_contributions
-                    if haskey(constraints_with_complexes.fluxes, Symbol(rxn_id))
+                    contribution * base_constraints.fluxes[Symbol(rxn_id)].value
+                    for (rxn_id, contribution) in complex.reaction_contributions
+                    if haskey(base_constraints.fluxes, Symbol(rxn_id))
                 ),
                 init=zero(C.LinearValue)
             ),
-            bound=C.EqualTo(0.0)
-        ) for (complex_id, complex_info) in complexes
+            bound=C.Between(-1e9, 1e9)
+        ) for (complex_id, complex) in complexes
     )
 
     # Add the complex relationships to the constraints
-    return constraints_with_complexes * (:complex_relationships^complex_activity_constraints)
+    constraints_with_activities = base_constraints * (:activities^complex_activity_constraints)
+
+    # Return both the updated constraints and the complexes
+    return constraints_with_activities, complexes
 end
 
 
@@ -536,261 +544,3 @@ $(TYPEDSIGNATURES)
 Create and cache a Charnes-Cooper template for efficient concordance testing.
 This should be called once per analysis and reused for all concordance tests.
 """
-function setup_concordance_testing(
-    base_constraints::C.ConstraintTree,
-    all_complexes::Vector{Complex};
-    default_bounds::Tuple{Float64,Float64}=(-1000.0, 1000.0)
-)
-    # Extract all reaction indices that could be involved in any concordance test
-    all_reaction_indices = Set{Int}()
-    for complex in all_complexes
-        for idx in complex.metabolite_indices
-            push!(all_reaction_indices, Int(idx))
-        end
-    end
-
-    # Create the reusable template
-    template = create_charnes_cooper_template(
-        base_constraints, all_reaction_indices; default_bounds
-    )
-
-    return template
-end
-
-
-
-#  julia> complex_vars = C.variables(keys = [:ATP_F6P_complex], bounds = C.Between(-Inf, Inf))
-#   ConstraintTrees.ConstraintTree with 1 element:
-#     :ATP_F6P_complex => ConstraintTrees.Constraint(ConstraintTrees.LinearValue(#= ... =#), 
-#   ConstraintTrees.Between(-Inf, Inf))
-
-#   julia> constraints = base_constraints + (:complexes^complex_vars)
-
-#          # 3. Create the relationship constraint
-#          # ATP_F6P_complex_activity = -R_PFK_flux (consumed in PFK reaction)
-#          # (Add other reactions where this complex appears if any)
-#   ConstraintTrees.ConstraintTree with 5 elements:
-#     :complexes          => ConstraintTrees.ConstraintTree(#= 1 element =#)
-#     :coupling           => ConstraintTrees.ConstraintTree(#= 0 elements =#)
-#     :flux_stoichiometry => ConstraintTrees.ConstraintTree(#= 72 elements =#)
-#     :fluxes             => ConstraintTrees.ConstraintTree(#= 95 elements =#)
-#     :objective          => ConstraintTrees.Constraint(ConstraintTrees.LinearValue(#= ... =#))
-
-#   julia> relationship = :ATP_F6P_complex^C.Constraint(
-#              value = constraints.complexes.ATP_F6P_complex.value +
-#                      constraints.fluxes.R_PFK.value,  # activity = -flux (consumption)
-#              bound = C.EqualTo(0.0)
-#          )
-
-#          # 4. Add the relationship to the constraint system
-#   ConstraintTrees.ConstraintTree with 1 element:
-#     :ATP_F6P_complex => ConstraintTrees.Constraint(ConstraintTrees.LinearValue(#= ... =#), 
-#   ConstraintTrees.EqualTo(0.0))
-
-#   julia> constraints *= (:complex_relationships^relationship)
-#   ConstraintTrees.ConstraintTree with 6 elements:
-#     :complex_relationships => ConstraintTrees.ConstraintTree(#= 1 element =#)
-#     :complexes             => ConstraintTrees.ConstraintTree(#= 1 element =#)
-#     :coupling              => ConstraintTrees.ConstraintTree(#= 0 elements =#)
-#     :flux_stoichiometry    => ConstraintTrees.ConstraintTree(#= 72 elements =#)
-#     :fluxes                => ConstraintTrees.ConstraintTree(#= 95 elements =#)
-#     :objective             => ConstraintTrees.Constraint(ConstraintTrees.LinearValue(#= ... =#))
-
-#   julia> C.pretty(constraints)
-#   ┬─complex_relationships
-#   │ ╰───ATP_F6P_complex: 1.0*x[72] + 1.0*x[96] = 0.0
-#   ├─complexes
-#   │ ╰───ATP_F6P_complex: 1.0*x[96] ∈ [-Inf, Inf]
-#   ├─coupling
-#   ├─flux_stoichiometry
-#   │ ╰─┬─M_13dpg_c: 1.0*x[49] + 1.0*x[75] = 0.0
-#   │   ├─M_2pg_c: -1.0*x[18] + -1.0*x[77] = 0.0
-#   │   ├─M_3pg_c: -1.496*x[13] + -1.0*x[75] + 1.0*x[77] = 0.0
-#   │   ├─M_6pgc_c: -1.0*x[57] + 1.0*x[76] = 0.0
-#   │   ├─M_6pgl_c: 1.0*x[48] + -1.0*x[76] = 0.0
-#   │   ├─M_ac_c: -1.0*x[3] + 1.0*x[6] = 0.0
-#   │   ├─M_ac_e: -1.0*x[6] + -1.0*x[20] = 0.0
-#   │   ├─M_acald_c: -1.0*x[1] + 1.0*x[2] + 1.0*x[10] = 0.0
-#   │   ├─M_acald_e: -1.0*x[2] + -1.0*x[21] = 0.0
-#   │   ├─M_accoa_c: 1.0*x[1] + -3.7478*x[13] + -1.0*x[15] + -1.0*x[62] + 1.0*x[71] + 1.0*x[73] + 
-#   -1.0*x[82] = 0.0
-#   │   ├─M_acon_C_c: 1.0*x[4] + -1.0*x[5] = 0.0
-#   │   ├─M_actp_c: 1.0*x[3] + 1.0*x[82] = 0.0
-#   │   ├─M_adp_c: 1.0*x[3] + 2.0*x[7] + 1.0*x[11] + -1.0*x[12] + 59.81*x[13] + 1.0*x[51] + 1.0*x[52] + 
-#   1.0*x[72] + 1.0*x[75] + 1.0*x[80] + -1.0*x[83] + 1.0*x[90] = 0.0
-#   │   ├─M_akg_c: -1.0*x[8] + 1.0*x[9] + 4.1182*x[13] + 1.0*x[53] + -1.0*x[55] + 1.0*x[59] = 0.0
-#   │   ├─M_akg_e: -1.0*x[9] + -1.0*x[22] = 0.0
-#   │   ├─M_amp_c: -1.0*x[7] + 1.0*x[81] = 0.0
-#   │   ├─M_atp_c: -1.0*x[3] + -1.0*x[7] + -1.0*x[11] + 1.0*x[12] + -59.81*x[13] + -1.0*x[51] + 
-#   -1.0*x[52] + -1.0*x[72] + -1.0*x[75] + -1.0*x[80] + -1.0*x[81] + 1.0*x[83] + -1.0*x[90] = 0.0
-#   │   ├─M_cit_c: -1.0*x[4] + 1.0*x[15] = 0.0
-#   │   ├─M_co2_c: 1.0*x[8] + 1.0*x[14] + 1.0*x[57] + 1.0*x[59] + 1.0*x[65] + 1.0*x[66] + 1.0*x[71] + 
-#   -1.0*x[79] + 1.0*x[80] = 0.0
-#   │   ├─M_co2_e: -1.0*x[14] + -1.0*x[23] = 0.0
-#   │   ├─M_coa_c: -1.0*x[1] + -1.0*x[8] + 3.7478*x[13] + 1.0*x[15] + 1.0*x[62] + -1.0*x[71] + -1.0*x[73]
-#    + 1.0*x[82] + -1.0*x[90] = 0.0
-#   │   ├─M_dhap_c: 1.0*x[40] + -1.0*x[95] = 0.0
-#   │   ├─M_e4p_c: -0.361*x[13] + 1.0*x[91] + -1.0*x[94] = 0.0
-#   │   ├─M_etoh_c: -1.0*x[10] + 1.0*x[19] = 0.0
-#   │   ├─M_etoh_e: -1.0*x[19] + -1.0*x[24] = 0.0
-#   │   ├─M_f6p_c: -0.0709*x[13] + 1.0*x[41] + 1.0*x[45] + -1.0*x[72] + 1.0*x[74] + 1.0*x[91] + 1.0*x[94]
-#    = 0.0
-#   │   ├─M_fdp_c: -1.0*x[40] + -1.0*x[41] + 1.0*x[72] = 0.0
-#   │   ├─M_for_c: 1.0*x[42] + 1.0*x[43] + 1.0*x[73] = 0.0
-#   │   ├─M_for_e: -1.0*x[25] + -1.0*x[42] + -1.0*x[43] = 0.0
-#   │   ├─M_fru_e: -1.0*x[26] + -1.0*x[45] = 0.0
-#   │   ├─M_fum_c: -1.0*x[44] + -1.0*x[46] + 1.0*x[47] + 1.0*x[89] = 0.0
-#   │   ├─M_fum_e: -1.0*x[27] + -1.0*x[47] = 0.0
-#   │   ├─M_g3p_c: -0.129*x[13] + 1.0*x[40] + -1.0*x[49] + -1.0*x[91] + 1.0*x[93] + 1.0*x[94] + 1.0*x[95]
-#    = 0.0
-#   │   ├─M_g6p_c: -0.205*x[13] + -1.0*x[48] + 1.0*x[50] + -1.0*x[74] = 0.0
-#   │   ├─M_glc__D_e: -1.0*x[28] + -1.0*x[50] = 0.0
-#   │   ├─M_gln__L_c: -0.2557*x[13] + 1.0*x[51] + 1.0*x[52] + -1.0*x[54] + -1.0*x[55] = 0.0
-#   │   ├─M_gln__L_e: -1.0*x[29] + -1.0*x[52] = 0.0
-#   │   ├─M_glu__L_c: -4.9414*x[13] + -1.0*x[51] + -1.0*x[53] + 1.0*x[54] + 2.0*x[55] + 1.0*x[56] = 0.0
-#   │   ├─M_glu__L_e: -1.0*x[30] + -1.0*x[56] = 0.0
-#   │   ├─M_glx_c: 1.0*x[60] + -1.0*x[62] = 0.0
-#   │   ├─M_h2o_c: 1.0*x[4] + -1.0*x[5] + -1.0*x[11] + 1.0*x[12] + -59.81*x[13] + -1.0*x[15] + 1.0*x[16] 
-#   + 1.0*x[18] + -1.0*x[41] + -1.0*x[46] + -1.0*x[52] + -1.0*x[53] + -1.0*x[54] + 1.0*x[58] + -1.0*x[62]
-#    + -1.0*x[76] + -1.0*x[79] + -1.0*x[81] = 0.0
-#   │   ├─M_h2o_e: -1.0*x[31] + -1.0*x[58] = 0.0
-#   │   ├─M_h_c: 1.0*x[1] + 1.0*x[6] + 1.0*x[9] + 1.0*x[10] + 1.0*x[11] + 3.0*x[12] + 59.81*x[13] + 
-#   1.0*x[15] + -2.0*x[16] + 1.0*x[17] + 1.0*x[19] + 1.0*x[43] + 2.0*x[47] + 1.0*x[48] + 1.0*x[49] + 
-#   1.0*x[51] + 1.0*x[52] + 1.0*x[53] + -1.0*x[55] + 1.0*x[56] + 1.0*x[61] + 1.0*x[62] + 2.0*x[63] + 
-#   1.0*x[64] + -4.0*x[67] + 1.0*x[72] + 1.0*x[76] + 1.0*x[78] + 1.0*x[79] + 2.0*x[81] + -1.0*x[83] + 
-#   1.0*x[84] + 2.0*x[87] + 1.0*x[88] + 2.0*x[92] = 0.0
-#   │   ├─M_h_e: -1.0*x[6] + -1.0*x[9] + -4.0*x[12] + 2.0*x[16] + -1.0*x[17] + -1.0*x[19] + -1.0*x[32] + 
-#   -1.0*x[43] + -2.0*x[47] + -1.0*x[56] + -2.0*x[63] + 3.0*x[67] + -1.0*x[78] + -1.0*x[84] + -2.0*x[87] 
-#   + -1.0*x[88] + -2.0*x[92] = 0.0
-#   │   ├─M_icit_c: 1.0*x[5] + -1.0*x[59] + -1.0*x[60] = 0.0
-#   │   ├─M_lac__D_c: 1.0*x[17] + -1.0*x[61] = 0.0
-#   │   ├─M_lac__D_e: -1.0*x[17] + -1.0*x[33] = 0.0
-#   │   ├─M_mal__L_c: 1.0*x[46] + 1.0*x[62] + 1.0*x[63] + -1.0*x[64] + -1.0*x[65] + -1.0*x[66] = 0.0
-#   │   ├─M_mal__L_e: -1.0*x[34] + -1.0*x[63] = 0.0
-#   │   ├─M_nad_c: -1.0*x[1] + -1.0*x[8] + -1.0*x[10] + -3.547*x[13] + -1.0*x[49] + -1.0*x[61] + 
-#   -1.0*x[64] + -1.0*x[65] + 1.0*x[67] + -1.0*x[68] + -1.0*x[71] + 1.0*x[92] = 0.0
-#   │   ├─M_nadh_c: 1.0*x[1] + 1.0*x[8] + 1.0*x[10] + 3.547*x[13] + 1.0*x[49] + 1.0*x[61] + 1.0*x[64] + 
-#   1.0*x[65] + -1.0*x[67] + 1.0*x[68] + 1.0*x[71] + -1.0*x[92] = 0.0
-#   │   ├─M_nadp_c: 13.0279*x[13] + -1.0*x[48] + -1.0*x[53] + 1.0*x[55] + -1.0*x[57] + -1.0*x[59] + 
-#   -1.0*x[66] + 1.0*x[68] + -1.0*x[92] = 0.0
-#   │   ├─M_nadph_c: -13.0279*x[13] + 1.0*x[48] + 1.0*x[53] + -1.0*x[55] + 1.0*x[57] + 1.0*x[59] + 
-#   1.0*x[66] + -1.0*x[68] + 1.0*x[92] = 0.0
-#   │   ├─M_nh4_c: -1.0*x[51] + 1.0*x[53] + 1.0*x[54] + 1.0*x[69] = 0.0
-#   │   ├─M_nh4_e: -1.0*x[35] + -1.0*x[69] = 0.0
-#   │   ├─M_o2_c: -0.5*x[16] + 1.0*x[70] = 0.0
-#   │   ├─M_o2_e: -1.0*x[36] + -1.0*x[70] = 0.0
-#   │   ├─M_oaa_c: -1.7867*x[13] + -1.0*x[15] + 1.0*x[64] + 1.0*x[79] + -1.0*x[80] = 0.0
-#   │   ├─M_pep_c: -0.5191*x[13] + 1.0*x[18] + -1.0*x[45] + -1.0*x[50] + -1.0*x[79] + 1.0*x[80] + 
-#   1.0*x[81] + -1.0*x[83] = 0.0
-#   │   ├─M_pi_c: 1.0*x[11] + -1.0*x[12] + 59.81*x[13] + 1.0*x[41] + -1.0*x[49] + 1.0*x[51] + 1.0*x[52] +
-#    1.0*x[78] + 1.0*x[79] + 1.0*x[81] + -1.0*x[82] + 1.0*x[90] = 0.0
-#   │   ├─M_pi_e: -1.0*x[37] + -1.0*x[78] = 0.0
-#   │   ├─M_pyr_c: -2.8328*x[13] + 1.0*x[45] + 1.0*x[50] + 1.0*x[61] + 1.0*x[65] + 1.0*x[66] + -1.0*x[71]
-#    + -1.0*x[73] + -1.0*x[81] + 1.0*x[83] + 1.0*x[84] = 0.0
-#   │   ├─M_pyr_e: -1.0*x[38] + -1.0*x[84] = 0.0
-#   │   ├─M_q8_c: 1.0*x[16] + 1.0*x[44] + -1.0*x[67] + -1.0*x[89] = 0.0
-#   │   ├─M_q8h2_c: -1.0*x[16] + -1.0*x[44] + 1.0*x[67] + 1.0*x[89] = 0.0
-#   │   ├─M_r5p_c: -0.8977*x[13] + -1.0*x[86] + -1.0*x[93] = 0.0
-#   │   ├─M_ru5p__D_c: 1.0*x[57] + -1.0*x[85] + 1.0*x[86] = 0.0
-#   │   ├─M_s7p_c: -1.0*x[91] + 1.0*x[93] = 0.0
-#   │   ├─M_succ_c: 1.0*x[44] + 1.0*x[60] + 1.0*x[87] + -1.0*x[88] + -1.0*x[89] + -1.0*x[90] = 0.0
-#   │   ├─M_succ_e: -1.0*x[39] + -1.0*x[87] + 1.0*x[88] = 0.0
-#   │   ├─M_succoa_c: 1.0*x[8] + 1.0*x[90] = 0.0
-#   │   ╰─M_xu5p__D_c: 1.0*x[85] + -1.0*x[93] + -1.0*x[94] = 0.0
-#   ├─fluxes
-#   │ ╰─┬─R_ACALD: 1.0*x[1] ∈ [-1000.0, 1000.0]
-#   │   ├─R_ACALDt: 1.0*x[2] ∈ [-1000.0, 1000.0]
-#   │   ├─R_ACKr: 1.0*x[3] ∈ [-1000.0, 1000.0]
-#   │   ├─R_ACONTa: 1.0*x[4] ∈ [-1000.0, 1000.0]
-#   │   ├─R_ACONTb: 1.0*x[5] ∈ [-1000.0, 1000.0]
-#   │   ├─R_ACt2r: 1.0*x[6] ∈ [-1000.0, 1000.0]
-#   │   ├─R_ADK1: 1.0*x[7] ∈ [-1000.0, 1000.0]
-#   │   ├─R_AKGDH: 1.0*x[8] ∈ [0.0, 1000.0]
-#   │   ├─R_AKGt2r: 1.0*x[9] ∈ [-1000.0, 1000.0]
-#   │   ├─R_ALCD2x: 1.0*x[10] ∈ [-1000.0, 1000.0]
-#   │   ├─R_ATPM: 1.0*x[11] ∈ [8.39, 1000.0]
-#   │   ├─R_ATPS4r: 1.0*x[12] ∈ [-1000.0, 1000.0]
-#   │   ├─R_BIOMASS_Ecoli_core_w_GAM: 1.0*x[13] ∈ [0.0, 1000.0]
-#   │   ├─R_CO2t: 1.0*x[14] ∈ [-1000.0, 1000.0]
-#   │   ├─R_CS: 1.0*x[15] ∈ [0.0, 1000.0]
-#   │   ├─R_CYTBD: 1.0*x[16] ∈ [0.0, 1000.0]
-#   │   ├─R_D_LACt2: 1.0*x[17] ∈ [-1000.0, 1000.0]
-#   │   ├─R_ENO: 1.0*x[18] ∈ [-1000.0, 1000.0]
-#   │   ├─R_ETOHt2r: 1.0*x[19] ∈ [-1000.0, 1000.0]
-#   │   ├─R_EX_ac_e: 1.0*x[20] ∈ [0.0, 1000.0]
-#   │   ├─R_EX_acald_e: 1.0*x[21] ∈ [0.0, 1000.0]
-#   │   ├─R_EX_akg_e: 1.0*x[22] ∈ [0.0, 1000.0]
-#   │   ├─R_EX_co2_e: 1.0*x[23] ∈ [-1000.0, 1000.0]
-#   │   ├─R_EX_etoh_e: 1.0*x[24] ∈ [0.0, 1000.0]
-#   │   ├─R_EX_for_e: 1.0*x[25] ∈ [0.0, 1000.0]
-#   │   ├─R_EX_fru_e: 1.0*x[26] ∈ [0.0, 1000.0]
-#   │   ├─R_EX_fum_e: 1.0*x[27] ∈ [0.0, 1000.0]
-#   │   ├─R_EX_glc__D_e: 1.0*x[28] ∈ [-10.0, 1000.0]
-#   │   ├─R_EX_gln__L_e: 1.0*x[29] ∈ [0.0, 1000.0]
-#   │   ├─R_EX_glu__L_e: 1.0*x[30] ∈ [0.0, 1000.0]
-#   │   ├─R_EX_h2o_e: 1.0*x[31] ∈ [-1000.0, 1000.0]
-#   │   ├─R_EX_h_e: 1.0*x[32] ∈ [-1000.0, 1000.0]
-#   │   ├─R_EX_lac__D_e: 1.0*x[33] ∈ [0.0, 1000.0]
-#   │   ├─R_EX_mal__L_e: 1.0*x[34] ∈ [0.0, 1000.0]
-#   │   ├─R_EX_nh4_e: 1.0*x[35] ∈ [-1000.0, 1000.0]
-#   │   ├─R_EX_o2_e: 1.0*x[36] ∈ [-1000.0, 1000.0]
-#   │   ├─R_EX_pi_e: 1.0*x[37] ∈ [-1000.0, 1000.0]
-#   │   ├─R_EX_pyr_e: 1.0*x[38] ∈ [0.0, 1000.0]
-#   │   ├─R_EX_succ_e: 1.0*x[39] ∈ [0.0, 1000.0]
-#   │   ├─R_FBA: 1.0*x[40] ∈ [-1000.0, 1000.0]
-#   │   ├─R_FBP: 1.0*x[41] ∈ [0.0, 1000.0]
-#   │   ├─R_FORt: 1.0*x[42] ∈ [-1000.0, 0.0]
-#   │   ├─R_FORt2: 1.0*x[43] ∈ [0.0, 1000.0]
-#   │   ├─R_FRD7: 1.0*x[44] ∈ [0.0, 1000.0]
-#   │   ├─R_FRUpts2: 1.0*x[45] ∈ [0.0, 1000.0]
-#   │   ├─R_FUM: 1.0*x[46] ∈ [-1000.0, 1000.0]
-#   │   ├─R_FUMt2_2: 1.0*x[47] ∈ [0.0, 1000.0]
-#   │   ├─R_G6PDH2r: 1.0*x[48] ∈ [-1000.0, 1000.0]
-#   │   ├─R_GAPD: 1.0*x[49] ∈ [-1000.0, 1000.0]
-#   │   ├─R_GLCpts: 1.0*x[50] ∈ [0.0, 1000.0]
-#   │   ├─R_GLNS: 1.0*x[51] ∈ [0.0, 1000.0]
-#   │   ├─R_GLNabc: 1.0*x[52] ∈ [0.0, 1000.0]
-#   │   ├─R_GLUDy: 1.0*x[53] ∈ [-1000.0, 1000.0]
-#   │   ├─R_GLUN: 1.0*x[54] ∈ [0.0, 1000.0]
-#   │   ├─R_GLUSy: 1.0*x[55] ∈ [0.0, 1000.0]
-#   │   ├─R_GLUt2r: 1.0*x[56] ∈ [-1000.0, 1000.0]
-#   │   ├─R_GND: 1.0*x[57] ∈ [0.0, 1000.0]
-#   │   ├─R_H2Ot: 1.0*x[58] ∈ [-1000.0, 1000.0]
-#   │   ├─R_ICDHyr: 1.0*x[59] ∈ [-1000.0, 1000.0]
-#   │   ├─R_ICL: 1.0*x[60] ∈ [0.0, 1000.0]
-#   │   ├─R_LDH_D: 1.0*x[61] ∈ [-1000.0, 1000.0]
-#   │   ├─R_MALS: 1.0*x[62] ∈ [0.0, 1000.0]
-#   │   ├─R_MALt2_2: 1.0*x[63] ∈ [0.0, 1000.0]
-#   │   ├─R_MDH: 1.0*x[64] ∈ [-1000.0, 1000.0]
-#   │   ├─R_ME1: 1.0*x[65] ∈ [0.0, 1000.0]
-#   │   ├─R_ME2: 1.0*x[66] ∈ [0.0, 1000.0]
-#   │   ├─R_NADH16: 1.0*x[67] ∈ [0.0, 1000.0]
-#   │   ├─R_NADTRHD: 1.0*x[68] ∈ [0.0, 1000.0]
-#   │   ├─R_NH4t: 1.0*x[69] ∈ [-1000.0, 1000.0]
-#   │   ├─R_O2t: 1.0*x[70] ∈ [-1000.0, 1000.0]
-#   │   ├─R_PDH: 1.0*x[71] ∈ [0.0, 1000.0]
-#   │   ├─R_PFK: 1.0*x[72] ∈ [0.0, 1000.0]
-#   │   ├─R_PFL: 1.0*x[73] ∈ [0.0, 1000.0]
-#   │   ├─R_PGI: 1.0*x[74] ∈ [-1000.0, 1000.0]
-#   │   ├─R_PGK: 1.0*x[75] ∈ [-1000.0, 1000.0]
-#   │   ├─R_PGL: 1.0*x[76] ∈ [0.0, 1000.0]
-#   │   ├─R_PGM: 1.0*x[77] ∈ [-1000.0, 1000.0]
-#   │   ├─R_PIt2r: 1.0*x[78] ∈ [-1000.0, 1000.0]
-#   │   ├─R_PPC: 1.0*x[79] ∈ [0.0, 1000.0]
-#   │   ├─R_PPCK: 1.0*x[80] ∈ [0.0, 1000.0]
-#   │   ├─R_PPS: 1.0*x[81] ∈ [0.0, 1000.0]
-#   │   ├─R_PTAr: 1.0*x[82] ∈ [-1000.0, 1000.0]
-#   │   ├─R_PYK: 1.0*x[83] ∈ [0.0, 1000.0]
-#   │   ├─R_PYRt2: 1.0*x[84] ∈ [-1000.0, 1000.0]
-#   │   ├─R_RPE: 1.0*x[85] ∈ [-1000.0, 1000.0]
-#   │   ├─R_RPI: 1.0*x[86] ∈ [-1000.0, 1000.0]
-#   │   ├─R_SUCCt2_2: 1.0*x[87] ∈ [0.0, 1000.0]
-#   │   ├─R_SUCCt3: 1.0*x[88] ∈ [0.0, 1000.0]
-#   │   ├─R_SUCDi: 1.0*x[89] ∈ [0.0, 1000.0]
-#   │   ├─R_SUCOAS: 1.0*x[90] ∈ [-1000.0, 1000.0]
-#   │   ├─R_TALA: 1.0*x[91] ∈ [-1000.0, 1000.0]
-#   │   ├─R_THD2: 1.0*x[92] ∈ [0.0, 1000.0]
-#   │   ├─R_TKT1: 1.0*x[93] ∈ [-1000.0, 1000.0]
-#   │   ├─R_TKT2: 1.0*x[94] ∈ [-1000.0, 1000.0]
-#   │   ╰─R_TPI: 1.0*x[95] ∈ [-1000.0, 1000.0]
-#   ╰─objective: 1.0*x[13]
