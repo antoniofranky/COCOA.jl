@@ -413,7 +413,7 @@ Returns a vector of tuples (i, j, cv_value) for pairs meeting the threshold.
 """
 function coefficient_of_variation_filter(
     activity_refs::Dict{Symbol,Vector{Float64}},
-    valid_complexes::Vector{Complex},
+    valid_complexes::Vector{MetabolicComplex},
     cv_threshold::Float64,
     cv_epsilon::Float64
 )
@@ -473,7 +473,7 @@ Perform streaming correlation analysis for complex concordance with direct matri
 - Returns PairPriority objects for high-correlation candidates
 """
 function streaming_filter(
-    complexes::Vector{Complex},
+    complexes::Vector{MetabolicComplex},
     balanced_complexes::Set{Symbol},
     positive_complexes::Set{Int},
     negative_complexes::Set{Int},

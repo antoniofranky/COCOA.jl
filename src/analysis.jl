@@ -32,9 +32,8 @@ This exploits the clustering tendency of concordant complexes to dramatically im
 """
 function process_in_stages(
     constraints::C.ConstraintTree,
-    complexes::Vector{Complex},
+    complexes::Dict{Symbol,MetabolicComplex},
     candidate_priorities::Vector{PairPriority},
-    A_matrix::Union{SparseIncidenceMatrix,SharedSparseMatrix},
     concordance_tracker::Union{ConcordanceTracker,SharedConcordanceTracker};
     optimizer,
     settings=[],
@@ -43,6 +42,10 @@ function process_in_stages(
     batch_size::Int=100,
     tolerance::Float64=1e-12
 )
+    # Create index to complex mapping for efficient lookups
+    complex_vector = collect(values(complexes))
+    idx_to_complex = Dict(i => complex_vector[i] for i in 1:length(complex_vector))
+
     stage_results = Dict{String,Any}(
         "stages_completed" => 0,
         "pairs_processed" => 0,
@@ -58,6 +61,10 @@ function process_in_stages(
 
     # Convert to simple format for processing
     remaining_pairs = [(p.c1_idx, p.c2_idx, p.directions) for p in sorted_pairs]
+
+    # Create index to complex mapping for efficient lookups
+    complex_vector = collect(values(complexes))
+    idx_to_complex = Dict(i => complex_vector[i] for i in 1:length(complex_vector))
 
     stage_count = 0
     total_pairs = length(remaining_pairs)
@@ -90,7 +97,7 @@ function process_in_stages(
         # Filter out pairs that can be inferred by transitivity
         filtered_pairs, skipped_count = filter_transitive_pairs(
             remaining_pairs,
-            complexes,
+            idx_to_complex,
             concordance_tracker
         )
         stage_results["skipped_by_transitivity"] += skipped_count
@@ -120,7 +127,7 @@ function process_in_stages(
 
             # Process batch
             batch_results = process_concordance_batch(
-                template, constraints, complexes, batch_pairs, A_matrix;
+                constraints, complexes, batch_pairs, idx_to_complex;
                 optimizer=optimizer,
                 settings=settings,
                 workers=workers,
@@ -151,13 +158,13 @@ function process_in_stages(
             c1_idx, c2_idx, direction, is_concordant, lambda = result
 
             # Get tracker indices
-            tracker_idx1 = concordance_tracker.id_to_idx[complexes[c1_idx].id]
-            tracker_idx2 = concordance_tracker.id_to_idx[complexes[c2_idx].id]
+            tracker_idx1 = concordance_tracker.id_to_idx[idx_to_complex[c1_idx].id]
+            tracker_idx2 = concordance_tracker.id_to_idx[idx_to_complex[c2_idx].id]
 
             if is_concordant
                 union_sets!(concordance_tracker, tracker_idx1, tracker_idx2)
                 push!(stage_results["concordant_pairs"], (c1_idx, c2_idx))
-                push!(newly_concordant, (complexes[c1_idx].id, complexes[c2_idx].id))
+                push!(newly_concordant, (idx_to_complex[c1_idx].id, idx_to_complex[c2_idx].id))
                 stage_concordant_count += 1
 
                 if !isnothing(lambda)
@@ -177,7 +184,7 @@ function process_in_stages(
             remaining_pairs = apply_transitivity_elimination(
                 remaining_pairs,
                 newly_concordant,
-                complexes,
+                idx_to_complex,
                 concordance_tracker
             )
             pairs_eliminated = prev_num_pairs - length(remaining_pairs)
@@ -200,7 +207,7 @@ function process_in_stages(
 
             # Count prioritized pairs (those involving concordant complexes)
             for (c1_idx, c2_idx, _) in remaining_pairs
-                if (complexes[c1_idx].id in all_concordant_complexes) || (complexes[c2_idx].id in all_concordant_complexes)
+                if (idx_to_complex[c1_idx].id in all_concordant_complexes) || (idx_to_complex[c2_idx].id in all_concordant_complexes)
                     stage_prioritized_count += 1
                 end
             end
@@ -240,7 +247,7 @@ Filter out pairs that can be inferred by transitivity to avoid redundant testing
 """
 function filter_transitive_pairs(
     remaining_pairs::Vector{Tuple{Int,Int,Set{Symbol}}},
-    complexes::Vector{Complex},
+    idx_to_complex::Dict{Int,MetabolicComplex},
     concordance_tracker::Union{ConcordanceTracker,SharedConcordanceTracker}
 )
     filtered_pairs = Tuple{Int,Int,Set{Symbol}}[]
@@ -248,8 +255,8 @@ function filter_transitive_pairs(
 
     for (c1_idx, c2_idx, directions) in remaining_pairs
         # Get tracker indices
-        tracker_idx1 = concordance_tracker.id_to_idx[complexes[c1_idx].id]
-        tracker_idx2 = concordance_tracker.id_to_idx[complexes[c2_idx].id]
+        tracker_idx1 = concordance_tracker.id_to_idx[idx_to_complex[c1_idx].id]
+        tracker_idx2 = concordance_tracker.id_to_idx[idx_to_complex[c2_idx].id]
 
         # Skip if already concordant
         if are_concordant(concordance_tracker, tracker_idx1, tracker_idx2)
@@ -293,8 +300,8 @@ function reprioritize_by_concordant_complexes(
     regular_pairs = Vector{Tuple{Int,Int,Set{Symbol}}}()
 
     for (c1_idx, c2_idx, directions) in remaining_pairs
-        c1_id = complexes[c1_idx].id
-        c2_id = complexes[c2_idx].id
+        c1_id = idx_to_complex[c1_idx].id
+        c2_id = idx_to_complex[c2_idx].id
 
         if c1_id in concordant_complexes || c2_id in concordant_complexes
             push!(priority_pairs, (c1_idx, c2_idx, directions))
@@ -326,7 +333,7 @@ based on already discovered concordant pairs.
 function apply_transitivity_elimination(
     remaining_pairs::Vector{Tuple{Int,Int,Set{Symbol}}},
     newly_concordant::Vector{Tuple{Symbol,Symbol}},
-    complexes::Vector{Complex},
+    idx_to_complex::Dict{Int,MetabolicComplex},
     concordance_tracker::Union{ConcordanceTracker,SharedConcordanceTracker}
 )
     if isempty(newly_concordant)
@@ -335,8 +342,8 @@ function apply_transitivity_elimination(
 
     # Filter out pairs that are now transitively concordant or non-concordant
     filtered_pairs = filter(remaining_pairs) do (c1_idx, c2_idx, directions)
-        tracker_idx1 = concordance_tracker.id_to_idx[complexes[c1_idx].id]
-        tracker_idx2 = concordance_tracker.id_to_idx[complexes[c2_idx].id]
+        tracker_idx1 = concordance_tracker.id_to_idx[idx_to_complex[c1_idx].id]
+        tracker_idx2 = concordance_tracker.id_to_idx[idx_to_complex[c2_idx].id]
 
         # Keep pair if it's not transitively determined
         !are_concordant(concordance_tracker, tracker_idx1, tracker_idx2) &&
@@ -360,14 +367,14 @@ $(TYPEDSIGNATURES)
 
 Pre-compute reaction indices for all expanded pairs to avoid repeated union operations.
 """
-function precompute_reaction_indices(expanded_pairs, activity_lookup, complexes)
+function precompute_reaction_indices(expanded_pairs, activity_lookup, idx_to_complex)
     reaction_indices_cache = Dict{Tuple{Int,Int},Set{Int}}()
 
     for (c1_idx, c2_idx, _) in expanded_pairs
         key = (c1_idx, c2_idx)
         if !haskey(reaction_indices_cache, key)
-            c1_activity = activity_lookup[complexes[c1_idx].id]
-            c2_activity = activity_lookup[complexes[c2_idx].id]
+            c1_activity = activity_lookup[idx_to_complex[c1_idx].id]
+            c2_activity = activity_lookup[idx_to_complex[c2_idx].id]
             reaction_indices_cache[key] = Set(union(c1_activity.idxs, c2_activity.idxs))
         end
     end
@@ -399,11 +406,10 @@ $(TYPEDSIGNATURES)
 Process a batch of concordance tests using ConstraintTrees templated approach with parallel batch processing.
 """
 function process_concordance_batch(
-    template::C.ConstraintTree,
     constraints::C.ConstraintTree,
     complexes::Dict{Symbol,MetabolicComplex},
     batch_pairs::Vector{Tuple{Int,Int,Set{Symbol}}},
-    A_matrix::Union{SparseIncidenceMatrix,SharedSparseMatrix};
+    idx_to_complex::Dict{Int,MetabolicComplex};
     optimizer,
     settings=[],
     workers=workers,
@@ -415,19 +421,15 @@ function process_concordance_batch(
         activity_lookup[complex_id] = constraint.value
     end
 
-    # Convert complexes dict to vector for indexing
-    complex_vector = collect(values(complexes))
-    complex_id_to_idx = Dict(c.id => i for (i, c) in enumerate(complex_vector))
-
     # Expand pairs by direction and prepare test data
     all_test_data = []
     pair_mappings = []
 
     for (c1_idx, c2_idx, directions) in batch_pairs
         for direction in directions
-            # Get complex IDs from the indices
-            c1_id = complex_vector[c1_idx].id
-            c2_id = complex_vector[c2_idx].id
+            # Get complex IDs from the indices using idx_to_complex mapping
+            c1_id = idx_to_complex[c1_idx].id
+            c2_id = idx_to_complex[c2_idx].id
 
             c1_activity = activity_lookup[c1_id]
             c2_activity = activity_lookup[c2_id]
@@ -447,15 +449,15 @@ function process_concordance_batch(
 
     # Process ALL concordance tests in parallel using the templated approach
     batch_results = COBREXA.screen_optimization_model(
-        template,
+        constraints,
         all_test_data;
         optimizer=optimizer,
         settings=settings,
         workers=workers
     ) do om, test_data
         # Use the templated approach - instantiate for this specific pair
-        instantiated, c1_expr, t_key = instantiate_charnes_cooper(
-            template,
+        instantiated, c1_expr = instantiate_charnes_cooper(
+            constraints,
             test_data.c1_activity,
             test_data.c2_activity,
             test_data.direction;
@@ -465,7 +467,7 @@ function process_concordance_batch(
         # The constraint tree is already instantiated, just optimize
         results = []
         for sense in [JuMP.MIN_SENSE, JuMP.MAX_SENSE]
-            @objective(om, sense, c1_expr)
+            @objective(om, sense, C.substitute(c1_expr, om[:x]))
             optimize!(om)
 
             if termination_status(om) == OPTIMAL
@@ -612,15 +614,15 @@ function concordance_analysis(
 
     # Build constraints and extract complexes
     constraints, complexes =
-        concordance_constraints(model; modifications, use_unidirectional_constraints, use_shared_arrays, min_size_for_sharing)
+        concordance_constraints(model; modifications, use_unidirectional_constraints, use_shared_arrays, min_size_for_sharing, return_complexes=true)
 
     # Extract complex information - complexes is now a Dict{Symbol,MetabolicComplex}
     n_complexes = length(complexes)
     complex_ids = [c.id for c in values(complexes)]
 
-    @info "Model statistics" n_complexes n_reactions = (
-        isa(A_matrix, SharedSparseMatrix) ? A_matrix.n : A_matrix.n_reactions
-    )
+    n_reactions = length(AbstractFBCModels.reactions(model))
+
+    @info "Model statistics" n_complexes n_reactions
 
     # Step 1: Find trivially balanced complexes
     @info "Finding trivially balanced complexes"
@@ -719,8 +721,8 @@ function concordance_analysis(
     n_trivial_ava_confirmed = 0
     n_trivial_ava_rejected = 0
 
-    for (i, c) in enumerate(complexes)
-        cid = c.id
+    for (i, (cid, c)) in enumerate(complexes)
+        # cid is the Symbol key, c is the MetabolicComplex value
 
         if haskey(complex_ranges, cid)
             min_val, max_val = complex_ranges[cid]
@@ -793,14 +795,29 @@ function concordance_analysis(
     # Step 4: Generate candidate pairs using streaming correlation
     @info "Generating candidate pairs via streaming correlation"
 
+    # Convert complexes dict to vector for streaming_filter
+    complexes_vector = collect(values(complexes))
+
+    # Convert trivial_pairs from Symbol pairs to index pairs
+    complex_id_to_index = Dict(complex.id => i for (i, complex) in enumerate(complexes_vector))
+    trivial_pairs_indices = Set{Tuple{Int,Int}}()
+    for (c1_id, c2_id) in trivial_pairs
+        if haskey(complex_id_to_index, c1_id) && haskey(complex_id_to_index, c2_id)
+            c1_idx = complex_id_to_index[c1_id]
+            c2_idx = complex_id_to_index[c2_id]
+            canonical_pair = c1_idx < c2_idx ? (c1_idx, c2_idx) : (c2_idx, c1_idx)
+            push!(trivial_pairs_indices, canonical_pair)
+        end
+    end
+
     # Pass the pre-computed warmup points directly
     correlation_time = @elapsed candidate_priorities = streaming_filter(
-        complexes,
+        complexes_vector,
         balanced_complexes,
         positive_complexes,
         negative_complexes,
         unrestricted_complexes,
-        trivial_pairs,
+        trivial_pairs_indices,
         warmup,
         constraints;
         tolerance=tolerance,
@@ -818,9 +835,6 @@ function concordance_analysis(
 
     @info "Candidate pairs identified" n_pairs = length(candidate_priorities) correlation_time_sec = round(correlation_time, digits=2)
 
-    # Create Charnes-Cooper template for efficient concordance testing
-    @info "Creating Charnes-Cooper template for concordance testing"
-    template = create_charnes_cooper_template(constraints)
 
     # Step 5: Process in stages with transitivity
     @info "Processing concordance tests in stages"
@@ -829,7 +843,6 @@ function concordance_analysis(
         constraints,
         complexes,
         candidate_priorities,
-        A_matrix,
         concordance_tracker;
         optimizer=optimizer,
         settings=settings,
@@ -846,11 +859,11 @@ function concordance_analysis(
 
     # Step 7: Prepare results
     complexes_df = DataFrame(
-        :complex_id => [c.id for c in complexes],
-        :n_metabolites => [length(c.metabolite_indices) for c in complexes],
-        :is_balanced => [c.id in balanced_complexes for c in complexes],
-        :is_trivially_balanced => [c.id in trivially_balanced for c in complexes],
-        :module => [get_module_id(c.id, modules) for c in complexes],
+        :complex_id => [c.id for c in values(complexes)],
+        :n_metabolites => [length(c.metabolites) for c in values(complexes)],
+        :is_balanced => [c.id in balanced_complexes for c in values(complexes)],
+        :is_trivially_balanced => [c.id in trivially_balanced for c in values(complexes)],
+        :module => [get_module_id(c.id, modules) for c in values(complexes)],
     )
 
     # Add activity ranges - verify trivially balanced complexes through AVA
@@ -863,7 +876,7 @@ function concordance_analysis(
         n_trivial_confirmed = 0
         n_trivial_contradicted = 0
 
-        for (i, c) in enumerate(complexes)
+        for (i, c) in enumerate(values(complexes))
             if haskey(complex_ranges, c.id)
                 min_act, max_act = complex_ranges[c.id]
                 min_activities[i] = min_act
@@ -937,7 +950,6 @@ function concordance_analysis(
     @info "Concordance analysis complete" stats
 
     return (
-        A=A_matrix,
         complexes=complexes_df,
         modules=modules_df,
         lambdas=lambda_df,

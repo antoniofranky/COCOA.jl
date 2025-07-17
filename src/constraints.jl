@@ -260,7 +260,7 @@ Much more efficient than manual JuMP model building as it reuses
 constraint structures between similar tests.
 """
 function test_concordance_templated(
-    template::C.ConstraintTree,
+    constraints::C.ConstraintTree,
     c1_activity::C.LinearValue,
     c2_activity::C.LinearValue,
     direction::Symbol;
@@ -270,8 +270,8 @@ function test_concordance_templated(
     settings=[]
 )
     # Instantiate the template for this specific pair
-    instantiated, c1_expr, t_key = instantiate_charnes_cooper(
-        template, c1_activity, c2_activity, direction; tolerance
+    instantiated, c1_expr = instantiate_charnes_cooper(constraints,
+        c1_activity, c2_activity, direction; tolerance
     )
 
     # Use COBREXA's optimization with the instantiated constraint tree
@@ -408,61 +408,159 @@ function test_concordance(
     return (is_concordant, lambda_value)
 end
 
+
 """
 $(TYPEDSIGNATURES)
 
-Create a reusable Charnes-Cooper constraint template that can be parameterized
-for different activity pairs and directions. This avoids rebuilding similar
-constraints for each concordance test.
+Create bounds constraints for Charnes-Cooper transformation.
+Implements the correct bounds: vmin*t ≤ w ≤ vmax*t for t ≥ 0, and vmax*t ≤ w ≤ vmin*t for t ≤ 0.
 """
-function create_charnes_cooper_template(
+function create_bounds_constraints(
     base_constraints::C.ConstraintTree,
-    all_reaction_indices::Set{Int};
-    default_bounds::Tuple{Float64,Float64}=(-1000.0, 1000.0)
+    direction::Symbol,
 )
-    lb, ub = default_bounds
+    bounds = C.ConstraintTree()
 
-    # Create w variables for ALL reactions that might be involved
-    # This avoids rebuilding the variable structure for each pair
-    w_vars = :w_vars^C.variables(
-        keys=Symbol.("w_$j" for j in all_reaction_indices),
-        bounds=C.Between(-Inf, Inf)
-    )
+    if direction == :positive
+        # Create t_pos variable once
+        t_pos = :t_pos^C.variable(bound=C.Between(1e-12, Inf))
+        base_constraints += (:charnes_cooper^t_pos)
+        t_var = base_constraints.charnes_cooper[:t_pos].value
 
-    # Create template t variables for both directions
-    t_pos = :t_pos^C.variable(bound=C.Between(1e-12, Inf))
-    t_neg = :t_neg^C.variable(bound=C.Between(-Inf, -1e-12))
+        # Forward fluxes
+        if haskey(base_constraints, :fluxes_forward)
+            for (flux_name, flux_constraint) in base_constraints.fluxes_forward
+                flux_var = flux_constraint.value
+                bound = flux_constraint.bound
 
-    # Create bounds constraint template for positive direction
-    bounds_pos = :bounds_pos^C.ConstraintTree(
-        Symbol("w_$(j)_lower") => C.Constraint(
-            C.value(w_vars.w_vars[Symbol("w_$j")]) - lb * C.value(t_pos.t_pos),
-            C.Between(0.0, Inf)
-        ) for j in all_reaction_indices
-    ) * C.ConstraintTree(
-        Symbol("w_$(j)_upper") => C.Constraint(
-            ub * C.value(t_pos.t_pos) - C.value(w_vars.w_vars[Symbol("w_$j")]),
-            C.Between(0.0, Inf)
-        ) for j in all_reaction_indices
-    )
+                if typeof(bound) <: C.Between
+                    vmin = bound.lower
+                    vmax = bound.upper
+                elseif typeof(bound) <: C.EqualTo
+                    vmin = bound.equal_to
+                    vmax = bound.equal_to
+                else
+                    continue
+                end
 
-    # Create bounds constraint template for negative direction
-    bounds_neg = :bounds_neg^C.ConstraintTree(
-        Symbol("w_$(j)_lower") => C.Constraint(
-            C.value(w_vars.w_vars[Symbol("w_$j")]) - ub * C.value(t_neg.t_neg),
-            C.Between(0.0, Inf)
-        ) for j in all_reaction_indices
-    ) * C.ConstraintTree(
-        Symbol("w_$(j)_upper") => C.Constraint(
-            lb * C.value(t_neg.t_neg) - C.value(w_vars.w_vars[Symbol("w_$j")]),
-            C.Between(0.0, Inf)
-        ) for j in all_reaction_indices
-    )
+                if isfinite(vmax) && !iszero(vmax)
+                    bounds *= Symbol("upper_fwd_$(flux_name)")^C.Constraint(
+                        flux_var - vmax * t_var,
+                        C.Between(-Inf, 0.0)
+                    )
+                end
+                if isfinite(vmin) && !iszero(vmin)
+                    bounds *= Symbol("lower_fwd_$(flux_name)")^C.Constraint(
+                        flux_var - vmin * t_var,
+                        C.Between(0.0, Inf)
+                    )
+                end
+            end
+        end
 
-    # Compose base template with variables and bounds
-    template = base_constraints * w_vars * t_pos * t_neg * bounds_pos * bounds_neg
+        # Reverse fluxes
+        if haskey(base_constraints, :fluxes_reverse)
+            for (flux_name, flux_constraint) in base_constraints.fluxes_reverse
+                flux_var = flux_constraint.value
+                bound = flux_constraint.bound
 
-    return template
+                if typeof(bound) <: C.Between
+                    vmin = bound.lower
+                    vmax = bound.upper
+                elseif typeof(bound) <: C.EqualTo
+                    vmin = bound.equal_to
+                    vmax = bound.equal_to
+                else
+                    continue
+                end
+
+                if isfinite(vmax) && !iszero(vmax)
+                    bounds *= Symbol("upper_rev_$(flux_name)")^C.Constraint(
+                        flux_var - vmax * t_var,
+                        C.Between(-Inf, 0.0)
+                    )
+                end
+                if isfinite(vmin) && !iszero(vmin)
+                    bounds *= Symbol("lower_rev_$(flux_name)")^C.Constraint(
+                        flux_var - vmin * t_var,
+                        C.Between(0.0, Inf)
+                    )
+                end
+            end
+        end
+
+    else # direction == :negative
+        # Create t_neg variable once
+        t_neg = :t_neg^C.variable(bound=C.Between(1e-12, Inf))
+        base_constraints += (:charnes_cooper^t_neg)
+        t_var = base_constraints.charnes_cooper[:t_neg].value
+
+        # Forward fluxes
+        if haskey(base_constraints, :fluxes_forward)
+            for (flux_name, flux_constraint) in base_constraints.fluxes_forward
+                flux_var = flux_constraint.value
+                bound = flux_constraint.bound
+
+                if typeof(bound) <: C.Between
+                    vmin = bound.lower
+                    vmax = bound.upper
+                elseif typeof(bound) <: C.EqualTo
+                    vmin = bound.equal_to
+                    vmax = bound.equal_to
+                else
+                    continue
+                end
+
+                # Note: bounds swap for negative t
+                if isfinite(vmin) && !iszero(vmin)
+                    bounds *= Symbol("upper_fwd_$(flux_name)")^C.Constraint(
+                        flux_var - vmin * t_var,
+                        C.Between(-Inf, 0.0)
+                    )
+                end
+                if isfinite(vmax) && !iszero(vmax)
+                    bounds *= Symbol("lower_fwd_$(flux_name)")^C.Constraint(
+                        flux_var - vmax * t_var,
+                        C.Between(0.0, Inf)
+                    )
+                end
+            end
+        end
+
+        # Reverse fluxes
+        if haskey(base_constraints, :fluxes_reverse)
+            for (flux_name, flux_constraint) in base_constraints.fluxes_reverse
+                flux_var = flux_constraint.value
+                bound = flux_constraint.bound
+
+                if typeof(bound) <: C.Between
+                    vmin = bound.lower
+                    vmax = bound.upper
+                elseif typeof(bound) <: C.EqualTo
+                    vmin = bound.equal_to
+                    vmax = bound.equal_to
+                else
+                    continue
+                end
+
+                # Note: bounds swap for negative t
+                if isfinite(vmin) && !iszero(vmin)
+                    bounds *= Symbol("upper_rev_$(flux_name)")^C.Constraint(
+                        flux_var - vmin * t_var,
+                        C.Between(-Inf, 0.0)
+                    )
+                end
+                if isfinite(vmax) && !iszero(vmax)
+                    bounds *= Symbol("lower_rev_$(flux_name)")^C.Constraint(
+                        flux_var - vmax * t_var,
+                        C.Between(0.0, Inf)
+                    )
+                end
+            end
+        end
+    end
+
+    return bounds
 end
 
 """
@@ -473,63 +571,34 @@ This uses constraint substitution and pruning to create an efficient constraint
 system for the specific concordance test.
 """
 function instantiate_charnes_cooper(
-    template::C.ConstraintTree,
+    base_constraints::C.ConstraintTree,
     c1_activities::C.LinearValue,
     c2_activities::C.LinearValue,
     direction::Symbol;
     tolerance::Float64=1e-12
 )
-    # Determine which reactions are actually involved in this pair
-    active_reactions = Set(union(c1_activities.idxs, c2_activities.idxs))
-
-    # Create c2 normalization constraint for this specific pair
+    base_constraints += :charnes_cooper^C.ConstraintTree()
     target_value = direction == :positive ? 1.0 : -1.0
-
-    # Select appropriate t variable
-    t_key = direction == :positive ? :t_pos : :t_neg
-
-    # Build c2 activity expression using the template's w variables
-    c2_expr = sum(
-        coeff * C.value(template.w_vars.w_vars[Symbol("w_$idx")])
-        for (idx, coeff) in zip(c2_activities.idxs, c2_activities.weights)
-    )
-
+    # Create normalization constraint: [Aw]j = ±1
     c2_constraint = :c2_normalization^C.Constraint(
-        c2_expr,
+        c2_activities,
         C.EqualTo(target_value)
     )
 
-    # Build c1 objective expression
-    c1_expr = sum(
-        coeff * C.value(template.w_vars.w_vars[Symbol("w_$idx")])
-        for (idx, coeff) in zip(c1_activities.idxs, c1_activities.weights)
-    )
+    # Create bounds constraints using the correct transformation
+    bounds_constraints = create_bounds_constraints(base_constraints, direction)
 
-    c1_objective = :c1_objective^C.Constraint(
-        c1_expr,
-        C.Between(-Inf, Inf)  # Unconstrained objective
-    )
 
     # Add pair-specific constraints to template
-    instantiated = template * c2_constraint * c1_objective
+    base_constraints *= :charnes_cooper^c2_constraint * :charnes_cooper^:fluxes_transformed^bounds_constraints
 
-    # Use substitution to fix unused variables to zero and prune
-    # This removes variables not involved in this specific pair
-    var_count = C.variable_count(instantiated)
-    substitution = zeros(var_count)
+    base_constraints.fluxes_forward = C.ConstraintTree()
+    base_constraints.fluxes_reverse = C.ConstraintTree()
 
-    # Only keep variables that are actually used
-    # (This is where the power of ConstraintTrees substitution comes in)
 
     # Prune unused variables for efficiency
-    optimized = C.prune_variables(instantiated)
-
-    return optimized, c1_expr, t_key
+    #optimized = C.prune_variables(instantiated)
+    optimized = base_constraints
+    #C.pretty(optimized)
+    return optimized, c1_activities
 end
-
-"""
-$(TYPEDSIGNATURES)
-
-Create and cache a Charnes-Cooper template for efficient concordance testing.
-This should be called once per analysis and reused for all concordance tests.
-"""
