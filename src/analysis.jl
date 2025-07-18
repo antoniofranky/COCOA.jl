@@ -765,7 +765,6 @@ function concordance_analysis(
         warmup,
         constraints,
         concordance_tracker;
-        tolerance=tolerance,
         correlation_threshold=correlation_threshold,
         sample_size=sample_size,
         min_valid_samples=min_valid_samples,

@@ -35,7 +35,8 @@ mutable struct ConcordanceTracker
 
     # Non-concordance tracking
     non_concordant_pairs::Set{Tuple{Int,Int}}  # Direct non-concordant pairs
-    non_concordant_modules::Dict{Tuple{Int,Int},Bool}  # Module relationship cache
+    # --- MODIFIED: Changed from Dict{Tuple{Int,Int},Bool} to Set for memory efficiency ---
+    non_concordant_modules::Set{Tuple{Int,Int}}  # Module relationship cache
     module_members_cache::Dict{Int,Vector{Int}}  # Module membership cache
 
     function ConcordanceTracker(complex_ids::Vector{Symbol})
@@ -47,7 +48,8 @@ mutable struct ConcordanceTracker
 
         new(parent, rank, id_to_idx, idx_to_id,
             Set{Tuple{Int,Int}}(),
-            Dict{Tuple{Int,Int},Bool}(),
+            # --- MODIFIED: Initialize as a Set ---
+            Set{Tuple{Int,Int}}(),
             Dict{Int,Vector{Int}}())
     end
 end
@@ -105,8 +107,9 @@ function add_non_concordant!(tracker::ConcordanceTracker, x::Int, y::Int)
         rep_x = find_set!(tracker, x)
         rep_y = find_set!(tracker, y)
         if rep_x != rep_y
-            tracker.non_concordant_modules[(rep_x, rep_y)] = true
-            tracker.non_concordant_modules[(rep_y, rep_x)] = true
+            # --- MODIFIED: Push to Set instead of setting Dict value ---
+            push!(tracker.non_concordant_modules, (rep_x, rep_y))
+            push!(tracker.non_concordant_modules, (rep_y, rep_x))
         end
     end
 end
@@ -127,8 +130,9 @@ function is_non_concordant(tracker::ConcordanceTracker, x::Int, y::Int)
         return false
     end
 
+    # --- MODIFIED: Check for key in Set ---
     # Cached module relationship
-    if get(tracker.non_concordant_modules, (rep_x, rep_y), false)
+    if (rep_x, rep_y) in tracker.non_concordant_modules
         return true
     end
 
@@ -140,8 +144,9 @@ function is_non_concordant(tracker::ConcordanceTracker, x::Int, y::Int)
         for m2 in tracker.module_members_cache[rep_y]
             pair_check = m1 < m2 ? (m1, m2) : (m2, m1)
             if pair_check in tracker.non_concordant_pairs
-                tracker.non_concordant_modules[(rep_x, rep_y)] = true
-                tracker.non_concordant_modules[(rep_y, rep_x)] = true
+                # --- MODIFIED: Push to Set ---
+                push!(tracker.non_concordant_modules, (rep_x, rep_y))
+                push!(tracker.non_concordant_modules, (rep_y, rep_x))
                 return true
             end
         end
@@ -168,11 +173,14 @@ function on_module_merged!(tracker::ConcordanceTracker, old_rep1::Int, old_rep2:
     delete!(tracker.module_members_cache, old_rep1)
     delete!(tracker.module_members_cache, old_rep2)
 
+    # --- MODIFIED: This section is updated to work with Sets ---
     # Update module relationships
     keys_to_remove = Tuple{Int,Int}[]
     new_relationships = Set{Tuple{Int,Int}}()
 
-    for (key, _) in tracker.non_concordant_modules
+    # NOTE: A more efficient implementation might involve a reverse mapping
+    # from rep -> non-concordant set to avoid this linear scan.
+    for key in tracker.non_concordant_modules
         rep1, rep2 = key
 
         if rep1 == old_rep1 || rep1 == old_rep2
@@ -191,8 +199,8 @@ function on_module_merged!(tracker::ConcordanceTracker, old_rep1::Int, old_rep2:
     end
 
     for (rep1, rep2) in new_relationships
-        tracker.non_concordant_modules[(rep1, rep2)] = true
-        tracker.non_concordant_modules[(rep2, rep1)] = true
+        push!(tracker.non_concordant_modules, (rep1, rep2))
+        push!(tracker.non_concordant_modules, (rep2, rep1))
     end
 end
 
