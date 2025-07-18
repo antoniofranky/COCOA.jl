@@ -5,7 +5,7 @@ This module contains:
 - Memory management buffers (AnalysisBuffers)
 - Core data structures (Complex, SharedSparseMatrix, SparseIncidenceMatrix)
 - Sample storage abstractions (SampleStorage, MemoryStreamStorage, DiskStreamStorage)
-- Concordance tracking (ConcordanceTracker, SharedConcordanceTracker)
+- Concordance tracking (ConcordanceTracker)
 """
 
 using SparseArrays
@@ -79,167 +79,6 @@ function ensure_buffer_capacity!(buffers::AnalysisBuffers, required_batch_size::
     end
 end
 
-
-"""
-Shared sparse matrix structure optimized for single-node parallelism.
-All processes share the same memory - no duplication!
-"""
-struct SharedSparseMatrix
-    m::Int
-    n::Int
-    colptr::SharedArray{Int32,1}
-    rowval::SharedArray{Int32,1}
-    nzval::SharedArray{Float32,1}
-
-    function SharedSparseMatrix(A::SparseMatrixCSC)
-        m, n = size(A)
-
-        # Create shared arrays
-        colptr = SharedArray{Int32}(length(A.colptr))
-        rowval = SharedArray{Int32}(length(A.rowval))
-        nzval = SharedArray{Float32}(length(A.nzval))
-
-        # Fill shared arrays (only on process 1)
-        if myid() == 1
-            colptr[:] = Int32.(A.colptr)
-            rowval[:] = Int32.(A.rowval)
-            nzval[:] = Float32.(A.nzval)
-        end
-
-        # Wait for all processes to see the data
-        @sync @distributed for p in workers()
-            nothing
-        end
-
-        new(m, n, colptr, rowval, nzval)
-    end
-end
-
-# Convert back to SparseMatrixCSC when needed
-function SparseArrays.sparse(S::SharedSparseMatrix)
-    SparseMatrixCSC(S.m, S.n,
-        convert(Vector{Int}, S.colptr),
-        convert(Vector{Int}, S.rowval),
-        convert(Vector{Float64}, S.nzval))
-end
-
-"""
-Memory-efficient storage for sparse complex-reaction incidence matrix.
-"""
-struct SparseIncidenceMatrix
-    n_complexes::Int
-    n_reactions::Int
-    colptr::Vector{Int32}
-    rowval::Vector{Int32}
-    nzval::Vector{Float32}
-
-    function SparseIncidenceMatrix(I::Vector{Int}, J::Vector{Int}, V::Vector{<:Real}, m::Int, n::Int)
-        A = sparse(I, J, Float32.(V), m, n)
-        new(m, n, Int32.(A.colptr), Int32.(A.rowval), Float32.(A.nzval))
-    end
-end
-
-# Convert back to SparseMatrixCSC when needed
-function SparseArrays.sparse(A::SparseIncidenceMatrix)
-    SparseMatrixCSC(A.n_complexes, A.n_reactions,
-        Int.(A.colptr), Int.(A.rowval), Float64.(A.nzval))
-end
-
-# Abstract storage interface
-abstract type SampleStorage end
-
-# Memory-based storage for medium models
-mutable struct MemoryStreamStorage <: SampleStorage
-    activity_matrix::Matrix{Float64}
-    n_samples::Int
-
-    function MemoryStreamStorage(n_complexes::Int, max_samples::Int)
-        new(zeros(Float64, max_samples, n_complexes), 0)
-    end
-end
-
-# Disk-based storage for ultra-large models (50K+)
-mutable struct DiskStreamStorage <: SampleStorage
-    temp_file::String
-    n_complexes::Int
-    n_samples::Int
-
-    function DiskStreamStorage(n_complexes::Int, max_samples::Int)
-        temp_file = tempname() * ".samples.h5"
-        h5open(temp_file, "w") do file
-            file["n_complexes"] = n_complexes
-            file["max_samples"] = max_samples
-            # Pre-create dataset with chunking for efficient streaming access
-            chunk_size = min(1000, max_samples)
-            create_dataset(file, "samples", Float64,
-                ((max_samples, n_complexes), (chunk_size, n_complexes)))
-        end
-        new(temp_file, n_complexes, 0)
-    end
-end
-
-# Storage interface implementations
-function store_sample!(storage::MemoryStreamStorage, activities::Dict, active_complexes::Vector{Complex}, iter::Int)
-    if storage.n_samples >= size(storage.activity_matrix, 1)
-        return false # Storage full
-    end
-
-    storage.n_samples += 1
-
-    for (i, c) in enumerate(active_complexes)
-        if haskey(activities, c.id)
-            storage.activity_matrix[storage.n_samples, i] = activities[c.id][iter]
-        else
-            storage.activity_matrix[storage.n_samples, i] = 0.0
-        end
-    end
-
-    return true
-end
-
-function store_sample!(storage::DiskStreamStorage, activities::Dict, active_complexes::Vector{Complex}, iter::Int)
-    h5open(storage.temp_file, "r+") do file
-        storage.n_samples += 1
-        sample_row = zeros(Float64, storage.n_complexes)
-
-        for (i, c) in enumerate(active_complexes)
-            if haskey(activities, c.id)
-                sample_row[i] = activities[c.id][iter]
-            end
-        end
-
-        # Write just this sample (efficient HDF5 slicing)
-        file["samples"][storage.n_samples, :] = sample_row
-    end
-
-    return true
-end
-
-function get_sample(storage::MemoryStreamStorage, idx::Int)
-    if idx > storage.n_samples
-        return zeros(Float64, size(storage.activity_matrix, 2))
-    end
-    return @view storage.activity_matrix[idx, :]
-end
-
-function get_sample(storage::DiskStreamStorage, idx::Int)
-    if idx > storage.n_samples
-        return zeros(Float64, storage.n_complexes)
-    end
-
-    sample_row = zeros(Float64, storage.n_complexes)
-    h5open(storage.temp_file, "r") do file
-        sample_row = file["samples"][idx, :]
-    end
-    return sample_row
-end
-
-function close(storage::DiskStreamStorage)
-    if isfile(storage.temp_file)
-        rm(storage.temp_file)
-    end
-end
-
 """
 Tracks both concordant and non-concordant relationships between complexes with transitivity.
 
@@ -276,52 +115,6 @@ mutable struct ConcordanceTracker
     end
 end
 
-"""
-Shared concordance tracker that maintains consistency across processes.
-"""
-mutable struct SharedConcordanceTracker
-    # Shared arrays for Union-Find - keep Int32 for memory efficiency in shared memory
-    parent::SharedArray{Int32,1}
-    rank::SharedArray{Int32,1}
-
-    # Complex mappings (read-only after initialization) - use Int for interface
-    id_to_idx::Dict{Symbol,Int}
-    idx_to_id::Vector{Symbol}
-
-    # Non-concordance tracking (requires synchronization)
-    non_concordant_matrix::SharedArray{Bool,2}
-
-    # Lock for thread-safe updates (on process 1)
-    update_lock::ReentrantLock
-
-    function SharedConcordanceTracker(complex_ids::Vector{Symbol})
-        n = length(complex_ids)
-
-        # Initialize shared arrays
-        parent = SharedArray{Int32}(n)
-        rank = SharedArray{Int32}(n)
-        non_concordant_matrix = SharedArray{Bool}(n, n)
-
-        # Initialize on process 1
-        if myid() == 1
-            parent[:] = 1:n
-            rank[:] .= 0
-            non_concordant_matrix[:] .= false
-        end
-
-        # Synchronize
-        @sync @distributed for p in workers()
-            nothing
-        end
-
-        # Create mappings (same on all processes) - use Int for interface
-        id_to_idx = Dict(id => i for (i, id) in enumerate(complex_ids))
-        idx_to_id = copy(complex_ids)
-
-        new(parent, rank, id_to_idx, idx_to_id,
-            non_concordant_matrix, ReentrantLock())
-    end
-end
 
 # Union-Find operations for regular tracker
 function find_set!(tracker::ConcordanceTracker, x::Int)
@@ -358,55 +151,9 @@ function union_sets!(tracker::ConcordanceTracker, x::Int, y::Int)
     return new_root
 end
 
-# Shared tracker operations
-function find_set!(tracker::SharedConcordanceTracker, x::Int)
-    # Convert to Int32 for internal storage access
-    x32 = Int32(x)
 
-    # Use atomic operations for thread safety
-    parent_x = tracker.parent[x32]
-    if parent_x != x32
-        # Path compression with atomic update
-        root = find_set!(tracker, Int(parent_x))
-        tracker.parent[x32] = Int32(root)
-        return root
-    end
-    return x
-end
-
-function union_sets!(tracker::SharedConcordanceTracker, x::Int, y::Int)
-    # Only process 1 should modify
-    if myid() != 1
-        return
-    end
-
-    root_x = find_set!(tracker, x)
-    root_y = find_set!(tracker, y)
-
-    if root_x == root_y
-        return root_x
-    end
-
-    # Convert to Int32 for internal access
-    root_x32 = Int32(root_x)
-    root_y32 = Int32(root_y)
-
-    # Union by rank with atomic operations
-    if tracker.rank[root_x32] < tracker.rank[root_y32]
-        tracker.parent[root_x32] = root_y32
-        return root_y
-    elseif tracker.rank[root_x32] > tracker.rank[root_y32]
-        tracker.parent[root_y32] = root_x32
-        return root_x
-    else
-        tracker.parent[root_y32] = root_x32
-        tracker.rank[root_x32] += 1
-        return root_x
-    end
-end
-
-# Generic operations that work for both trackers
-function are_concordant(tracker::Union{ConcordanceTracker,SharedConcordanceTracker}, x::Int, y::Int)
+# Generic operations
+function are_concordant(tracker::ConcordanceTracker, x::Int, y::Int)
     return find_set!(tracker, x) == find_set!(tracker, y)
 end
 
@@ -466,42 +213,6 @@ function is_non_concordant(tracker::ConcordanceTracker, x::Int, y::Int)
     return false
 end
 
-# Non-concordance operations for shared tracker
-function add_non_concordant!(tracker::SharedConcordanceTracker, x::Int, y::Int)
-    if myid() == 1
-        tracker.non_concordant_matrix[x, y] = true
-        tracker.non_concordant_matrix[y, x] = true
-    end
-end
-
-function is_non_concordant(tracker::SharedConcordanceTracker, x::Int, y::Int)
-    # Direct check
-    if tracker.non_concordant_matrix[x, y]
-        return true
-    end
-
-    # Check module transitivity
-    rep_x = find_set!(tracker, x)
-    rep_y = find_set!(tracker, y)
-
-    if rep_x == rep_y
-        return false
-    end
-
-    # Check if any pair between modules is non-concordant
-    n = length(tracker.parent)
-    for i in 1:n
-        if find_set!(tracker, i) == rep_x
-            for j in 1:n
-                if find_set!(tracker, j) == rep_y && tracker.non_concordant_matrix[i, j]
-                    return true
-                end
-            end
-        end
-    end
-
-    return false
-end
 
 function ensure_module_cached!(tracker::ConcordanceTracker, rep::Int)
     if !haskey(tracker.module_members_cache, rep)

@@ -82,7 +82,6 @@ function concordance_constraints(
     modifications=Function[],
     interface=nothing,
     use_unidirectional_constraints::Bool=true,
-    use_shared_arrays::Bool=true,
     min_size_for_sharing::Int=1_000_000
 )
     if use_unidirectional_constraints
@@ -98,14 +97,31 @@ function concordance_constraints(
         constraints = mod(constraints)
     end
 
+    # Store the original balance constraints for other uses (like variability analysis)
+    balance_constraints = deepcopy(constraints)
+
     # Build complex activities using C.sum pattern and extract complexes
     constraints, complexes = add_complex_activities_to_constraints(model, constraints)
 
+    # Create Charnes-Cooper templates for both directions
+    pos_template = create_charnes_cooper_template(balance_constraints, :positive)
+    neg_template = create_charnes_cooper_template(balance_constraints, :negative)
+
+    # Structure the final constraints tree
+    final_constraints = C.ConstraintTree(
+        :balance => balance_constraints,
+        :activities => constraints.activities,
+        :charnes_cooper => C.ConstraintTree(
+            :positive => pos_template,
+            :negative => neg_template
+        )
+    )
+
     if return_complexes
-        return constraints, complexes
+        return final_constraints, complexes
     else
         # If complexes are not needed, we can return just the constraints
-        return constraints
+        return final_constraints
     end
 
 end
@@ -443,18 +459,14 @@ function create_bounds_constraints(
                     continue
                 end
 
-                if isfinite(vmax) && !iszero(vmax)
-                    bounds *= Symbol("upper_fwd_$(flux_name)")^C.Constraint(
-                        flux_var - vmax * t_var,
-                        C.Between(-Inf, 0.0)
-                    )
-                end
-                if isfinite(vmin) && !iszero(vmin)
-                    bounds *= Symbol("lower_fwd_$(flux_name)")^C.Constraint(
-                        flux_var - vmin * t_var,
-                        C.Between(0.0, Inf)
-                    )
-                end
+                bounds *= Symbol("upper_fwd_$(flux_name)")^C.Constraint(
+                    flux_var - vmax * t_var,
+                    C.Between(-Inf, 0.0)
+                )
+                bounds *= Symbol("lower_fwd_$(flux_name)")^C.Constraint(
+                    flux_var - vmin * t_var,
+                    C.Between(0.0, Inf)
+                )
             end
         end
 
@@ -474,18 +486,15 @@ function create_bounds_constraints(
                     continue
                 end
 
-                if isfinite(vmax) && !iszero(vmax)
-                    bounds *= Symbol("upper_rev_$(flux_name)")^C.Constraint(
-                        flux_var - vmax * t_var,
-                        C.Between(-Inf, 0.0)
-                    )
-                end
-                if isfinite(vmin) && !iszero(vmin)
-                    bounds *= Symbol("lower_rev_$(flux_name)")^C.Constraint(
-                        flux_var - vmin * t_var,
-                        C.Between(0.0, Inf)
-                    )
-                end
+
+                bounds *= Symbol("upper_rev_$(flux_name)")^C.Constraint(
+                    flux_var - vmax * t_var,
+                    C.Between(-Inf, 0.0)
+                )
+                bounds *= Symbol("lower_rev_$(flux_name)")^C.Constraint(
+                    flux_var - vmin * t_var,
+                    C.Between(0.0, Inf)
+                )
             end
         end
 
@@ -601,4 +610,40 @@ function instantiate_charnes_cooper(
     optimized = base_constraints
     #C.pretty(optimized)
     return optimized, c1_activities
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Create a Charnes-Cooper template for a specific direction without activity-specific constraints.
+This creates the base constraint structure that can be reused for multiple concordance tests
+by only modifying the objective and c_j normalization constraint.
+
+The returned constraint tree contains:
+- The base flux balance constraints
+- Charnes-Cooper bounds constraints for the specified direction
+- Empty charnes_cooper section for c_j constraint to be added by workers
+
+This is more efficient than instantiate_charnes_cooper when the same direction 
+is used repeatedly with different activity pairs.
+"""
+function create_charnes_cooper_template(
+    base_constraints::C.ConstraintTree,
+    direction::Symbol;
+)
+    # Create a copy to avoid modifying the original
+    template_constraints = deepcopy(base_constraints)
+    template_constraints += :charnes_cooper^C.ConstraintTree()
+
+    # Create bounds constraints using the correct transformation
+    bounds_constraints = create_bounds_constraints(template_constraints, direction)
+
+    # Add bounds constraints to template (but not the c_j constraint)
+    template_constraints *= :charnes_cooper^:fluxes_transformed^bounds_constraints
+
+    # Remove the original flux variables since they're replaced by transformed ones
+    template_constraints.fluxes_forward = C.ConstraintTree()
+    template_constraints.fluxes_reverse = C.ConstraintTree()
+
+    return template_constraints
 end

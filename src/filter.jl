@@ -480,7 +480,8 @@ function streaming_filter(
     unrestricted_complexes::Set{Int},
     trivial_pairs::Set{Tuple{Int,Int}},
     warmup::Matrix{Float64},
-    constraints::C.ConstraintTree;
+    constraints::C.ConstraintTree,
+    concordance_tracker::ConcordanceTracker;
     tolerance::Float64=1e-12,
     correlation_threshold::Float64=0.95,
     sample_size::Int=100,
@@ -501,8 +502,8 @@ function streaming_filter(
     active_complexes = [c for c in complexes if !(c.id in balanced_complexes)]
     n_active = length(active_complexes)
 
-    # Create a mapping from complex ID to original index for efficient lookup of trivial pairs
-    original_indices = Dict(c.id => i for (i, c) in enumerate(complexes))
+    # Use concordance tracker as ground truth for index/ID mappings
+    original_indices = concordance_tracker.id_to_idx
 
     # Initialize the hierarchical, memory-aware correlation tracker
     correlation_tracker = CorrelationTracker(
@@ -605,7 +606,7 @@ function streaming_filter(
     # Sample with optimized settings
     all_samples = COBREXA.sample_constraints(
         COBREXA.sample_chain_achr,
-        constraints;
+        constraints.balance;
         output=constraints.activities,
         start_variables=limited_warmup,
         seed=rand(rng, UInt64),
@@ -635,11 +636,8 @@ function streaming_filter(
     active_complexes = [c for c in complexes if !(c.id in balanced_complexes)]
     n_active = length(active_complexes)
 
-    # Build index mappings once
-    original_indices = Dict{Symbol,Int}()
-    for (i, c) in enumerate(complexes)
-        original_indices[c.id] = i
-    end
+    # Use concordance tracker as ground truth for index/ID mappings
+    original_indices = concordance_tracker.id_to_idx
 
     # Use sparse set for memory-efficient skip tracking (massive memory savings)
     skip_pairs_set = Set{Tuple{Int,Int}}()
@@ -695,9 +693,9 @@ function streaming_filter(
     # === FILTERING BASED ON SELECTED METHODS ===
     use_cv_filtering = :cv in filter
     use_correlation_filtering = :cor in filter
-    
+
     valid_pairs = Tuple{Int,Int}[]
-    
+
     if use_cv_filtering
         @info "Using CV-based filtering (upstream MATLAB approach)"
 
@@ -714,7 +712,7 @@ function streaming_filter(
         # Add CV candidates to valid pairs
         append!(valid_pairs, cv_valid_pairs)
     end
-    
+
     if use_correlation_filtering
         @info "Using correlation-based filtering (original approach)"
 
@@ -766,7 +764,7 @@ function streaming_filter(
         # Add correlation pairs to valid_pairs
         append!(valid_pairs, correlation_pairs)
     end  # End of correlation filtering block
-    
+
     # Remove duplicates if both methods are used
     if use_cv_filtering && use_correlation_filtering
         unique!(valid_pairs)
