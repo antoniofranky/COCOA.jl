@@ -413,11 +413,8 @@ function process_concordance_batch(
             target_value = direction == :positive ? 1.0 : -1.0
 
             # Add the c_j constraint to the model
-            c2_expr = C.substitute(onstraints.activities[c2_id].value, om[:x])
+            c2_expr = C.substitute(constraints.activities[c2_id].value, om[:x])
             c2_constraint = @constraint(om, c2_expr == target_value)
-
-            # Build the c1 objective expression
-            c1_expr = C.substitute(c1_activity, om[:x])
 
             # Run optimization for both min and max
             results = []
@@ -564,12 +561,7 @@ function concordance_analysis(
         model
     end
 
-    # Scale batch sizes with number of workers for better utilization
-    n_workers = length(workers)
-    effective_batch_size = max(batch_size, 50 * n_workers)  # At least 50 tasks per worker
-    effective_stage_size = max(stage_size, 100 * n_workers)  # Scale stage size accordingly
-
-    @info "Starting concordance analysis" n_workers tolerance early_correlation_threshold correlation_threshold sample_size use_unidirectional_constraints effective_batch_size effective_stage_size
+    @info "Starting concordance analysis" n_workers = length(workers) tolerance early_correlation_threshold correlation_threshold sample_size use_unidirectional_constraints batch_size stage_size
 
     # Build constraints and extract complexes (includes Charnes-Cooper templates)
     constraints, complexes =
@@ -800,8 +792,8 @@ function concordance_analysis(
         optimizer=optimizer,
         settings=settings,
         workers=workers,
-        stage_size=effective_stage_size,
-        batch_size=effective_batch_size,
+        stage_size=stage_size,
+        batch_size=batch_size,
         tolerance,
     )
 

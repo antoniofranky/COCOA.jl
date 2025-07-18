@@ -524,8 +524,8 @@ function streaming_filter(
 
     # Use balanced settings (good quality, reasonable speed)
     base_warmup_per_chain = 200
-    burn_in_period = 50
-    thinning_interval = 6
+    burn_in_period = 32
+    thinning_interval = 8
 
     # Scale based on model complexity and available data
     if n_complexes > 10_000  # Large models need more diverse sampling

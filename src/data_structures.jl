@@ -15,69 +15,6 @@ using JLD2
 using Random
 using StableRNGs
 
-"""
-Pre-allocated buffers for memory-efficient concordance analysis.
-Reusing these buffers eliminates allocation overhead during analysis.
-"""
-mutable struct AnalysisBuffers
-    # Activity computation buffers
-    activities::Matrix{Float64}  # [n_active_complexes, batch_size]
-    sample_buffer::Matrix{Float64}  # [batch_size, n_reactions]
-    flux_buffer::Vector{Float64}  # [n_reactions]
-
-    # Optimization result buffers
-    optimization_results::Vector{Float64}  # For collecting results
-    constraint_coeffs::Vector{Float64}  # For building constraints
-
-    # Correlation computation buffers
-    x_values::Vector{Float64}  # For correlation calculation
-    y_values::Vector{Float64}  # For correlation calculation
-
-    # Sparse matrix operation buffers
-    sparse_indices::Vector{Int}  # For sparse operations
-    sparse_values::Vector{Float64}  # For sparse operations
-
-    function AnalysisBuffers(n_active_complexes::Int, n_reactions::Int, max_batch_size::Int)
-        new(
-            zeros(Float64, n_active_complexes, max_batch_size),
-            zeros(Float64, max_batch_size, n_reactions),
-            zeros(Float64, n_reactions),
-            zeros(Float64, max_batch_size),
-            zeros(Float64, n_reactions),
-            zeros(Float64, max_batch_size),
-            zeros(Float64, max_batch_size),
-            Vector{Int}(undef, n_reactions),
-            Vector{Float64}(undef, n_reactions)
-        )
-    end
-end
-
-"""
-Resize buffers if needed to accommodate larger batch sizes.
-"""
-function ensure_buffer_capacity!(buffers::AnalysisBuffers, required_batch_size::Int, n_reactions::Int)
-    current_batch_capacity = size(buffers.activities, 2)
-
-    if required_batch_size > current_batch_capacity
-        # Resize activity and sample buffers
-        n_active = size(buffers.activities, 1)
-        buffers.activities = zeros(Float64, n_active, required_batch_size)
-        buffers.sample_buffer = zeros(Float64, required_batch_size, n_reactions)
-
-        # Resize result buffers
-        resize!(buffers.optimization_results, required_batch_size)
-        resize!(buffers.x_values, required_batch_size)
-        resize!(buffers.y_values, required_batch_size)
-    end
-
-    # Ensure reaction-sized buffers are adequate
-    if length(buffers.flux_buffer) < n_reactions
-        resize!(buffers.flux_buffer, n_reactions)
-        resize!(buffers.constraint_coeffs, n_reactions)
-        resize!(buffers.sparse_indices, n_reactions)
-        resize!(buffers.sparse_values, n_reactions)
-    end
-end
 
 """
 Tracks both concordant and non-concordant relationships between complexes with transitivity.
