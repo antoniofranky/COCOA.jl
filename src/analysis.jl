@@ -53,6 +53,8 @@ function process_in_stages(
     )
 
     # Sort pairs by priority: high-confidence first, then by correlation
+    # NOTE: For very large numbers of candidates, consider a PriorityQueue
+    # for more efficient dynamic reprioritization.
     sorted_pairs = sort(candidate_priorities,
         by=p -> (-p.is_high_confidence, -abs(p.correlation), p.c1_idx, p.c2_idx))
 
@@ -128,10 +130,9 @@ function process_in_stages(
 
             append!(all_batch_results, batch_results)
 
-            # Optional: force GC between batches for large models
-            if batch_idx < n_batches
-                GC.gc()
-            end
+            # --- MODIFIED: Removed explicit GC call for better performance ---
+            # Explicit GC calls can introduce unnecessary pauses. Julia's GC is
+            # generally efficient at managing memory automatically.
         end
 
         batch_results = all_batch_results
@@ -416,85 +417,61 @@ function process_concordance_batch(
             c2_expr = C.substitute(constraints.activities[c2_id].value, om[:x])
             c2_constraint = @constraint(om, c2_expr == target_value)
 
-            # Run optimization for both min and max
-            results = []
-            for sense in [JuMP.MIN_SENSE, JuMP.MAX_SENSE]
-                @objective(om, sense, C.substitute(constraints.activities[c1_id].value, om[:x]))
-                optimize!(om)
+            # --- MODIFIED: More efficient min/max optimization loop ---
+            # Set objective once, then just change the sense. This avoids
+            # repeated work and is faster than adding/deleting constraints.
+            @objective(om, JuMP.MIN_SENSE, C.substitute(constraints.activities[c1_id].value, om[:x]))
 
-                if termination_status(om) == OPTIMAL
-                    push!(results, objective_value(om))
-                else
-                    push!(results, nothing)
-                end
-            end
+            # Run MIN_SENSE optimization
+            optimize!(om)
+            min_val = termination_status(om) == OPTIMAL ? objective_value(om) : nothing
+
+            # Run MAX_SENSE optimization
+            JuMP.set_objective_sense(om, JuMP.MAX_SENSE)
+            optimize!(om)
+            max_val = termination_status(om) == OPTIMAL ? objective_value(om) : nothing
+            # --- END MODIFICATION ---
 
             # Clean up the c_j constraint for next use
             delete(om, c2_constraint)
 
             # Store result for this direction
-            push!(pair_results, (direction, results))
+            push!(pair_results, (direction, [min_val, max_val]))
         end
 
         return pair_results  # [(direction, [min_val, max_val]), ...]
     end
 
-    # Process batch results back to individual concordance test results
-    results = []
-
-    # Process results for each pair
-    for (i, pair_results) in enumerate(batch_results)
-        c1_idx, c2_idx, directions = batch_pairs[i]  # Original indices
-
-        # Process each direction result
-        for (direction, test_results) in pair_results
-            min_val = test_results[1]  # MIN_SENSE result
-            max_val = test_results[2]  # MAX_SENSE result
-
-            if min_val === nothing || max_val === nothing
-                is_conc = false
-                lambda = nothing
-            else
-                # Check concordance
-                is_conc = isapprox(min_val, max_val; atol=tolerance)
-                lambda = is_conc ? min_val : nothing
-            end
-
-            push!(results, (c1_idx, c2_idx, direction, is_conc, lambda))
-        end
-    end
-
-    # Aggregate results by pair
-    pair_results = Dict{Tuple{Int,Int},Dict{Symbol,Tuple{Bool,Union{Float64,Nothing}}}}()
-
-    for (c1_idx, c2_idx, direction, is_conc, lambda) in results
-        pair_key = (c1_idx, c2_idx)
-        if !haskey(pair_results, pair_key)
-            pair_results[pair_key] = Dict{Symbol,Tuple{Bool,Union{Float64,Nothing}}}()
-        end
-        pair_results[pair_key][direction] = (is_conc, lambda)
-    end
-
-    # Check if all required directions are concordant
+    # --- MODIFIED: Streamlined result processing ---
+    # Process results more directly to avoid intermediate data structures.
     final_results = []
+    for (i, pair_results_by_dir) in enumerate(batch_results)
+        c1_idx, c2_idx, _ = batch_pairs[i] # Original indices
 
-    # Sort pairs by indices to ensure deterministic iteration order
-    sorted_pairs = sort(collect(pair_results), by=x -> x[1])
+        all_concordant = true
+        final_lambda = nothing
 
-    for ((c1_idx, c2_idx), dir_results) in sorted_pairs
-        all_concordant = all(r[1] for r in values(dir_results))
-        # Get lambda from any concordant direction (deterministic ordering)
-        lambda = nothing
-        for direction in sort(collect(keys(dir_results)))  # Sort directions for determinism
-            is_conc, lam = dir_results[direction]
-            if is_conc && !isnothing(lam)
-                lambda = lam
-                break
+        # Check if all directions for this pair are concordant
+        if isempty(pair_results_by_dir)
+            all_concordant = false
+        else
+            for (direction, test_results) in pair_results_by_dir
+                min_val, max_val = test_results
+
+                if min_val === nothing || max_val === nothing || !isapprox(min_val, max_val; atol=tolerance)
+                    all_concordant = false
+                    break # A single non-concordant result makes the pair non-concordant
+                end
+
+                # Store the first valid lambda found
+                if isnothing(final_lambda)
+                    final_lambda = min_val
+                end
             end
         end
-
-        push!(final_results, (c1_idx, c2_idx, :both, all_concordant, lambda))
+        push!(final_results, (c1_idx, c2_idx, :both, all_concordant, all_concordant ? final_lambda : nothing))
     end
+    # --- END MODIFICATION ---
 
     return final_results
 end

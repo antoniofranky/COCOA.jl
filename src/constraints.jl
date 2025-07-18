@@ -97,25 +97,28 @@ function concordance_constraints(
         constraints = mod(constraints)
     end
 
-    # Store the original balance constraints for other uses (like variability analysis)
-    balance_constraints = deepcopy(constraints)
+    # --- MODIFIED: Avoided deepcopy for efficiency ---
+    # Store the balance constraints for other uses (like variability analysis)
+    # By constructing a new tree from existing parts, we avoid a deep copy.
+    balance_constraints = constraints
 
     # Build complex activities using C.sum pattern and extract complexes
-    constraints, complexes = add_complex_activities_to_constraints(model, constraints)
+    constraints_with_activities, complexes = add_complex_activities_to_constraints(model, constraints)
 
     # Create Charnes-Cooper templates for both directions
     pos_template = create_charnes_cooper_template(balance_constraints, :positive)
     neg_template = create_charnes_cooper_template(balance_constraints, :negative)
 
-    # Structure the final constraints tree
+    # Structure the final constraints tree by composing its parts
     final_constraints = C.ConstraintTree(
         :balance => balance_constraints,
-        :activities => constraints.activities,
+        :activities => constraints_with_activities.activities,
         :charnes_cooper => C.ConstraintTree(
             :positive => pos_template,
             :negative => neg_template
         )
     )
+    # --- END MODIFICATION ---
 
     if return_complexes
         return final_constraints, complexes
@@ -264,164 +267,6 @@ function add_complex_activities_to_constraints(
 
     # Return both the updated constraints and the complexes
     return constraints_with_activities, complexes
-end
-
-
-
-"""
-$(TYPEDSIGNATURES)
-
-Test concordance using ConstraintTrees template-based approach.
-Much more efficient than manual JuMP model building as it reuses
-constraint structures between similar tests.
-"""
-function test_concordance_templated(
-    constraints::C.ConstraintTree,
-    c1_activity::C.LinearValue,
-    c2_activity::C.LinearValue,
-    direction::Symbol;
-    tolerance::Float64=1e-9,
-    optimizer,
-    workers,
-    settings=[]
-)
-    # Instantiate the template for this specific pair
-    instantiated, c1_expr = instantiate_charnes_cooper(constraints,
-        c1_activity, c2_activity, direction; tolerance
-    )
-
-    # Use COBREXA's optimization with the instantiated constraint tree
-    results = COBREXA.screen_optimization_model(
-        instantiated,
-        [(JuMP.MIN_SENSE, :min), (JuMP.MAX_SENSE, :max)];
-        optimizer=optimizer,
-        settings=settings,
-        workers=workers
-    ) do om, (sense, _)
-        # The objective is already built into the constraint tree
-        @objective(om, sense, c1_expr)
-        optimize!(om)
-
-        if termination_status(om) == OPTIMAL
-            return objective_value(om)
-        else
-            return nothing
-        end
-    end
-
-    # Extract results
-    min_val = results[1]
-    max_val = results[2]
-
-    if min_val === nothing || max_val === nothing
-        return (false, nothing)
-    end
-
-    # Check concordance
-    is_concordant = isapprox(min_val, max_val; atol=tolerance)
-    lambda_value = is_concordant ? min_val : nothing
-
-    return (is_concordant, lambda_value)
-end
-
-"""
-$(TYPEDSIGNATURES)
-
-Test concordance using manual JuMP model building with Charnes-Cooper transformation.
-Uses pre-computed LinearValues for efficient constraint composition.
-[DEPRECATED: Use test_concordance_templated for better performance]
-"""
-function test_concordance(
-    base_constraints::C.ConstraintTree,
-    c1_activity::C.LinearValue,
-    c2_activity::C.LinearValue,
-    direction::Symbol;
-    tolerance::Float64=1e-9,
-    optimizer,
-    workers,
-    settings=[]
-)
-    # Use COBREXA to build base model, then add concordance constraints manually
-    results = COBREXA.screen_optimization_model(
-        base_constraints,
-        [(JuMP.MIN_SENSE, :min), (JuMP.MAX_SENSE, :max)];
-        optimizer=optimizer,
-        settings=settings,
-        workers=workers
-    ) do om, (sense, _)
-        # Get reaction indices that are involved in these activities
-        reaction_indices = union(c1_activity.idxs, c2_activity.idxs)
-
-        # Create transformed variables (only for involved reactions)
-        w = Dict(j => @variable(om) for j in reaction_indices)
-        t = @variable(om)
-
-        # Direction constraint on t
-        if direction == :positive
-            @constraint(om, t >= tolerance)
-        else
-            @constraint(om, t <= -tolerance)
-        end
-
-        # Extract bounds from original flux variables
-        x = om[:x]
-
-        # Complex c2 activity constraint
-        c2_expr = sum(
-            c2_activity.weights[i] * w[c2_activity.idxs[i]]
-            for i in eachindex(c2_activity.idxs)
-            if c2_activity.idxs[i] in reaction_indices
-        )
-        target = direction == :positive ? 1.0 : -1.0
-        @constraint(om, c2_expr == target)
-
-        # Charnes-Cooper bounds constraints
-        if direction == :positive
-            for j in reaction_indices
-                lb = has_lower_bound(x[j]) ? lower_bound(x[j]) : -1e6
-                ub = has_upper_bound(x[j]) ? upper_bound(x[j]) : 1e6
-                @constraint(om, w[j] - lb * t >= 0)
-                @constraint(om, ub * t - w[j] >= 0)
-            end
-        else
-            for j in reaction_indices
-                lb = has_lower_bound(x[j]) ? lower_bound(x[j]) : -1e6
-                ub = has_upper_bound(x[j]) ? upper_bound(x[j]) : 1e6
-                @constraint(om, w[j] - ub * t >= 0)
-                @constraint(om, lb * t - w[j] >= 0)
-            end
-        end
-
-        # Objective: optimize complex c1 activity
-        c1_expr = sum(
-            c1_activity.weights[i] * w[c1_activity.idxs[i]]
-            for i in eachindex(c1_activity.idxs)
-            if c1_activity.idxs[i] in reaction_indices
-        )
-
-        @objective(om, sense, c1_expr)
-        optimize!(om)
-
-        if termination_status(om) == OPTIMAL
-            return objective_value(om)
-        else
-            return nothing
-        end
-    end
-
-    # Extract results
-    min_val = results[1]
-    max_val = results[2]
-
-    if min_val === nothing || max_val === nothing
-        return (false, nothing)
-    end
-
-    # Check concordance
-    is_concordant = isapprox(min_val, max_val; atol=tolerance)
-    lambda_value = is_concordant ? min_val : nothing
-
-    return (is_concordant, lambda_value)
 end
 
 
@@ -586,7 +431,9 @@ function instantiate_charnes_cooper(
     direction::Symbol;
     tolerance::Float64=1e-12
 )
-    base_constraints += :charnes_cooper^C.ConstraintTree()
+    # Create a mutable copy for this instance
+    instantiated = copy(base_constraints)
+    instantiated += :charnes_cooper^C.ConstraintTree()
     target_value = direction == :positive ? 1.0 : -1.0
     # Create normalization constraint: [Aw]j = ±1
     c2_constraint = :c2_normalization^C.Constraint(
@@ -595,20 +442,19 @@ function instantiate_charnes_cooper(
     )
 
     # Create bounds constraints using the correct transformation
-    bounds_constraints = create_bounds_constraints(base_constraints, direction)
+    bounds_constraints = create_bounds_constraints(instantiated, direction)
 
 
     # Add pair-specific constraints to template
-    base_constraints *= :charnes_cooper^c2_constraint * :charnes_cooper^:fluxes_transformed^bounds_constraints
+    instantiated *= :charnes_cooper^c2_constraint * :charnes_cooper^:fluxes_transformed^bounds_constraints
 
-    base_constraints.fluxes_forward = C.ConstraintTree()
-    base_constraints.fluxes_reverse = C.ConstraintTree()
+    instantiated.fluxes_forward = C.ConstraintTree()
+    instantiated.fluxes_reverse = C.ConstraintTree()
 
-
-    # Prune unused variables for efficiency
-    #optimized = C.prune_variables(instantiated)
-    optimized = base_constraints
-    #C.pretty(optimized)
+    # --- MODIFIED: Enabled variable pruning for efficiency ---
+    # Pruning removes unused variables and constraints, leading to a much
+    # smaller and faster optimization problem.
+    optimized = C.prune_variables(instantiated)
     return optimized, c1_activities
 end
 
@@ -618,13 +464,12 @@ $(TYPEDSIGNATURES)
 Create a Charnes-Cooper template for a specific direction without activity-specific constraints.
 This creates the base constraint structure that can be reused for multiple concordance tests
 by only modifying the objective and c_j normalization constraint.
-
 The returned constraint tree contains:
 - The base flux balance constraints
 - Charnes-Cooper bounds constraints for the specified direction
 - Empty charnes_cooper section for c_j constraint to be added by workers
 
-This is more efficient than instantiate_charnes_cooper when the same direction 
+This is more efficient than instantiate_charnes_cooper when the same direction
 is used repeatedly with different activity pairs.
 """
 function create_charnes_cooper_template(
