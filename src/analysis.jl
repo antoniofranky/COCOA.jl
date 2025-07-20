@@ -446,12 +446,13 @@ function process_concordance_batch(
     # Process results more directly to avoid intermediate data structures.
     final_results = []
     for (i, pair_results_by_dir) in enumerate(batch_results)
-        c1_idx, c2_idx, _ = batch_pairs[i] # Original indices
+        c1_idx, c2_idx, original_directions = batch_pairs[i] # Original indices and directions
 
         all_concordant = true
         final_lambda = nothing
+        concordant_directions = Set{Symbol}()
 
-        # Check if all directions for this pair are concordant
+        # Check concordance for each tested direction
         if isempty(pair_results_by_dir)
             all_concordant = false
         else
@@ -461,15 +462,36 @@ function process_concordance_batch(
                 if min_val === nothing || max_val === nothing || !isapprox(min_val, max_val; atol=tolerance)
                     all_concordant = false
                     break # A single non-concordant result makes the pair non-concordant
-                end
-
-                # Store the first valid lambda found
-                if isnothing(final_lambda)
-                    final_lambda = min_val
+                else
+                    # This direction is concordant
+                    push!(concordant_directions, direction)
+                    
+                    # Store the first valid lambda found
+                    if isnothing(final_lambda)
+                        final_lambda = min_val
+                    end
                 end
             end
         end
-        push!(final_results, (c1_idx, c2_idx, :both, all_concordant, all_concordant ? final_lambda : nothing))
+
+        # Determine the final direction field - only meaningful for concordant pairs
+        final_direction = if all_concordant
+            # All tested directions are concordant - report what was actually tested
+            if length(concordant_directions) == 2
+                :both
+            elseif :positive in concordant_directions
+                :positive
+            elseif :negative in concordant_directions
+                :negative
+            else
+                :both  # fallback, shouldn't happen
+            end
+        else
+            # For non-concordant pairs, direction doesn't matter
+            :both
+        end
+
+        push!(final_results, (c1_idx, c2_idx, final_direction, all_concordant, all_concordant ? final_lambda : nothing))
     end
     # --- END MODIFICATION ---
 
@@ -538,7 +560,7 @@ function concordance_analysis(
         model
     end
 
-    @info "Starting concordance analysis" n_workers = length(workers) tolerance early_correlation_threshold correlation_threshold sample_size use_unidirectional_constraints batch_size stage_size
+    @info "Starting concordance analysis" n_workers = length(workers) tolerance early_correlation_threshold correlation_threshold cv_threshold sample_size use_unidirectional_constraints batch_size stage_size
 
     # Build constraints and extract complexes (includes Charnes-Cooper templates)
     constraints, complexes =

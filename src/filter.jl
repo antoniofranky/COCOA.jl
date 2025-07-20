@@ -4,7 +4,8 @@ Correlation analysis functionality for COCOA.
 This module contains:
 - Streaming correlation statistics (StreamingStats, StreamingCorrelation)
 - Correlation tracking with memory management (CorrelationTracker)
-- Streaming correlation filtering functionality
+- CV tracking with memory management (CVTracker)
+- Deterministic, streaming correlation and CV filtering functionality
 """
 
 using Statistics
@@ -17,6 +18,8 @@ using DocStringExtensions
 using ProgressMeter
 import ConstraintTrees as C
 using Base.Threads
+
+# --- Base Streaming Statistics Structs and Functions ---
 
 """
 Check if threading is available and beneficial for correlation analysis.
@@ -81,7 +84,7 @@ function update!(c::StreamingCorrelation, x::Float64, y::Float64)
 end
 
 function correlation(c::StreamingCorrelation)
-    if c.n < 2 || c.var_x_sum ≈ 0 || c.var_y_sum ≈ 0
+    if c.n < 2 || c.var_x_sum <= 0 || c.var_y_sum <= 0
         return 0.0
     end
     return c.cov_sum / sqrt(c.var_x_sum * c.var_y_sum)
@@ -100,6 +103,56 @@ function reset!(c::StreamingCorrelation)
     return c
 end
 
+# --- New Merge Functions for Deterministic Combination ---
+
+"""
+Merge two StreamingStats objects deterministically.
+"""
+function merge!(s1::StreamingStats, s2::StreamingStats)
+    if s2.n == 0
+        return s1
+    end
+    if s1.n == 0
+        s1.n, s1.mean, s1.M2 = s2.n, s2.mean, s2.M2
+        return s1
+    end
+    n_new = s1.n + s2.n
+    delta = s2.mean - s1.mean
+    s1.mean = (s1.n * s1.mean + s2.n * s2.mean) / n_new
+    s1.M2 += s2.M2 + delta^2 * (s1.n * s2.n) / n_new
+    s1.n = n_new
+    return s1
+end
+
+"""
+Merge two StreamingCorrelation objects deterministically.
+"""
+function merge!(c1::StreamingCorrelation, c2::StreamingCorrelation)
+    if c2.n == 0
+        return c1
+    end
+    if c1.n == 0
+        c1.n, c1.mean_x, c1.mean_y, c1.cov_sum, c1.var_x_sum, c1.var_y_sum =
+            c2.n, c2.mean_x, c2.mean_y, c2.cov_sum, c2.var_x_sum, c2.var_y_sum
+        return c1
+    end
+
+    n_new = c1.n + c2.n
+    delta_x = c2.mean_x - c1.mean_x
+    delta_y = c2.mean_y - c1.mean_y
+
+    c1.var_x_sum += c2.var_x_sum + delta_x^2 * (c1.n * c2.n) / n_new
+    c1.var_y_sum += c2.var_y_sum + delta_y^2 * (c1.n * c2.n) / n_new
+    c1.cov_sum += c2.cov_sum + delta_x * delta_y * (c1.n * c2.n) / n_new
+
+    c1.mean_x = (c1.n * c1.mean_x + c2.n * c2.mean_x) / n_new
+    c1.mean_y = (c1.n * c1.mean_y + c2.n * c2.mean_y) / n_new
+    c1.n = n_new
+    return c1
+end
+
+# --- Tracker Data Structures ---
+
 """
 Correlation tracker entry for memory-efficient correlation storage.
 """
@@ -108,40 +161,29 @@ struct CorrelationEntry
     correlation_acc::StreamingCorrelation
     current_correlation::Float64
     last_updated::Int
-    confidence_upper_bound::Float64  # Statistical upper bound for correlation
+    confidence_upper_bound::Float64
 end
 
 """
 Hierarchical correlation tracker that manages memory using scientifically principled criteria.
-Only rejects pairs based on statistical evidence or promotes them to higher confidence tiers.
-Thread-safe implementation with sharded locks for reduced contention in multi-threaded analysis.
 """
 mutable struct CorrelationTracker
-    # Tier 1: High confidence pairs (>= promotion_threshold)
     high_confidence::Dict{Tuple{Symbol,Symbol},StreamingCorrelation}
-
-    # Tier 2: Under evaluation with LRU eviction
     under_evaluation::Dict{Tuple{Symbol,Symbol},CorrelationEntry}
-    lru_positions::Dict{Tuple{Symbol,Symbol},Int}  # O(1) LRU position lookup
+    lru_positions::Dict{Tuple{Symbol,Symbol},Int}
     lru_counter::Threads.Atomic{Int}
-
-    # Configuration
     max_under_evaluation::Int
     min_samples_for_decision::Int
     promotion_threshold::Float64
     rejection_confidence::Float64
-
-    # Statistics (thread-safe atomic counters)
     pairs_promoted::Threads.Atomic{Int}
     pairs_rejected_statistically::Threads.Atomic{Int}
     pairs_evicted_lru::Threads.Atomic{Int}
-
-    # Thread synchronization (sharded locks)
     num_locks::Int
     tracker_locks::Vector{ReentrantLock}
 
     function CorrelationTracker(max_pairs::Int, promotion_threshold::Float64=0.8, rejection_confidence::Float64=0.95)
-        num_locks = 256 # A power of 2, adjustable based on expected contention
+        num_locks = 256
         new(
             Dict{Tuple{Symbol,Symbol},StreamingCorrelation}(),
             Dict{Tuple{Symbol,Symbol},CorrelationEntry}(),
@@ -155,49 +197,77 @@ mutable struct CorrelationTracker
             Threads.Atomic{Int}(0),
             Threads.Atomic{Int}(0),
             num_locks,
-            [ReentrantLock() for _ in 1:num_locks] # Sharded locks
+            [ReentrantLock() for _ = 1:num_locks],
         )
     end
 end
 
 """
-Calculate confidence interval upper bound for correlation using Fisher's z-transformation.
+CV tracker entry for memory-efficient CV storage.
 """
-function correlation_confidence_upper_bound(corr_acc::StreamingCorrelation, confidence_level::Float64)
-    if corr_acc.n < 4
-        return 1.0
-    end
-
-    r = abs(correlation(corr_acc))
-    r = min(r, 0.999999) # Clamp to avoid Inf from atanh
-
-    z = atanh(r)
-    se_z = 1 / sqrt(corr_acc.n - 3)
-
-    z_critical = 1.96 # Approx for 95%
-    if confidence_level ≈ 0.99
-        z_critical = 2.576
-    elseif confidence_level ≈ 0.90
-        z_critical = 1.645
-    end
-
-    z_upper = z + z_critical * se_z
-    r_upper = tanh(z_upper)
-
-    return min(r_upper, 1.0)
+struct CVEntry
+    pair_key::Tuple{Symbol,Symbol}
+    ratio_stats_acc::StreamingStats
+    current_cv::Float64
+    last_updated::Int
+    confidence_lower_bound::Float64
 end
 
 """
-Update LRU order for a pair key.
+Hierarchical CV tracker that manages memory using scientifically principled criteria.
 """
-function update_lru!(tracker::CorrelationTracker, pair_key::Tuple{Symbol,Symbol})
-    new_counter = Threads.atomic_add!(tracker.lru_counter, 1) + 1
-    tracker.lru_positions[pair_key] = new_counter
+mutable struct CVTracker
+    low_cv_confirmed::Dict{Tuple{Symbol,Symbol},StreamingStats}
+    under_evaluation::Dict{Tuple{Symbol,Symbol},CVEntry}
+    lru_positions::Dict{Tuple{Symbol,Symbol},Int}
+    lru_counter::Threads.Atomic{Int}
+    max_under_evaluation::Int
+    min_samples_for_decision::Int
+    promotion_threshold::Float64
+    rejection_confidence::Float64
+    pairs_promoted::Threads.Atomic{Int}
+    pairs_rejected_statistically::Threads.Atomic{Int}
+    pairs_evicted_lru::Threads.Atomic{Int}
+    num_locks::Int
+    tracker_locks::Vector{ReentrantLock}
+
+    function CVTracker(max_pairs::Int, cv_threshold::Float64=0.01, rejection_confidence::Float64=0.95)
+        num_locks = 256
+        new(
+            Dict{Tuple{Symbol,Symbol},StreamingStats}(),
+            Dict{Tuple{Symbol,Symbol},CVEntry}(),
+            Dict{Tuple{Symbol,Symbol},Int}(),
+            Threads.Atomic{Int}(0),
+            max_pairs,
+            50,
+            cv_threshold,
+            rejection_confidence,
+            Threads.Atomic{Int}(0),
+            Threads.Atomic{Int}(0),
+            Threads.Atomic{Int}(0),
+            num_locks,
+            [ReentrantLock() for _ = 1:num_locks],
+        )
+    end
 end
 
-"""
-Efficient copy constructor for StreamingCorrelation.
-"""
+# --- Tracker Logic Functions ---
+
+function Base.copy(s::StreamingStats)
+    new_s = StreamingStats()
+    new_s.n = s.n
+    new_s.mean = s.mean
+    new_s.M2 = s.M2
+    return new_s
+end
+
+function update_in_place!(dest::StreamingStats, src::StreamingStats)
+    dest.n = src.n
+    dest.mean = src.mean
+    dest.M2 = src.M2
+    return dest
+end
+
 function Base.copy(c::StreamingCorrelation)
     new_corr = StreamingCorrelation()
     new_corr.n = c.n
@@ -209,9 +279,6 @@ function Base.copy(c::StreamingCorrelation)
     return new_corr
 end
 
-"""
-In-place update of destination StreamingCorrelation from source.
-"""
 function update_in_place!(dest::StreamingCorrelation, src::StreamingCorrelation)
     dest.n = src.n
     dest.mean_x = src.mean_x
@@ -222,34 +289,66 @@ function update_in_place!(dest::StreamingCorrelation, src::StreamingCorrelation)
     return dest
 end
 
+"""
+Merge two tracker objects by merging their internal statistics.
+"""
+function merge_trackers!(t1, t2)
+    field_to_merge = isdefined(t2, :high_confidence) ? :high_confidence : :low_cv_confirmed
+    dict1 = getfield(t1, field_to_merge)
+    dict2 = getfield(t2, field_to_merge)
 
-"""
-Update the correlation tracker with a new correlation value using scientific criteria.
-Thread-safe implementation with sharded locking for reduced contention.
-"""
+    for (pair_key, acc2) in dict2
+        if haskey(dict1, pair_key)
+            merge!(dict1[pair_key], acc2)
+        else
+            dict1[pair_key] = acc2
+        end
+    end
+end
+
+function update_lru!(tracker, pair_key::Tuple{Symbol,Symbol})
+    new_counter = Threads.atomic_add!(tracker.lru_counter, 1) + 1
+    tracker.lru_positions[pair_key] = new_counter
+end
+
+function correlation_confidence_upper_bound(corr_acc::StreamingCorrelation, confidence_level::Float64)
+    if corr_acc.n < 4
+        return 1.0
+    end
+    r = abs(correlation(corr_acc))
+    r = min(r, 0.999999)
+    z = atanh(r)
+    se_z = 1 / sqrt(corr_acc.n - 3)
+    z_critical = 1.96 # Approx for 95%
+    if confidence_level >= 0.99
+        z_critical = 2.576
+    elseif confidence_level >= 0.90
+        z_critical = 1.645
+    end
+    z_upper = z + z_critical * se_z
+    r_upper = tanh(z_upper)
+    return min(r_upper, 1.0)
+end
+
 function update_correlation_tracker!(
     tracker::CorrelationTracker,
     pair_key::Tuple{Symbol,Symbol},
     corr_acc::StreamingCorrelation,
     sample_number::Int,
-    final_threshold::Float64=0.95
+    final_threshold::Float64=0.95,
 )
     current_corr = abs(correlation(corr_acc))
-
-    # Use a sharded lock based on the hash of the pair key
     lock_idx = (hash(pair_key) % tracker.num_locks) + 1
-
     lock(tracker.tracker_locks[lock_idx]) do
-        # Check if already in high confidence
         if haskey(tracker.high_confidence, pair_key)
             update_in_place!(tracker.high_confidence[pair_key], corr_acc)
             return true
         end
 
-        upper_bound = correlation_confidence_upper_bound(corr_acc, tracker.rejection_confidence)
-
-        # Statistical rejection
-        if corr_acc.n >= tracker.min_samples_for_decision && upper_bound < (final_threshold - 0.05)
+        upper_bound =
+            correlation_confidence_upper_bound(corr_acc, tracker.rejection_confidence)
+        if corr_acc.n >= tracker.min_samples_for_decision &&
+           upper_bound < (final_threshold - 0.05)
             if haskey(tracker.under_evaluation, pair_key)
                 delete!(tracker.under_evaluation, pair_key)
                 delete!(tracker.lru_positions, pair_key)
@@ -258,7 +357,6 @@ function update_correlation_tracker!(
             return false
         end
 
-        # Promotion to high confidence
         if current_corr >= tracker.promotion_threshold && corr_acc.n >= 20
             tracker.high_confidence[pair_key] = copy(corr_acc)
             if haskey(tracker.under_evaluation, pair_key)
@@ -269,20 +367,30 @@ function update_correlation_tracker!(
             return true
         end
 
-        # Keep in under_evaluation tier
         if haskey(tracker.under_evaluation, pair_key)
             existing_entry = tracker.under_evaluation[pair_key]
             update_in_place!(existing_entry.correlation_acc, corr_acc)
-            new_entry = CorrelationEntry(pair_key, existing_entry.correlation_acc, current_corr, sample_number, upper_bound)
+            new_entry = CorrelationEntry(
+                pair_key,
+                existing_entry.correlation_acc,
+                current_corr,
+                sample_number,
+                upper_bound,
+            )
             tracker.under_evaluation[pair_key] = new_entry
             update_lru!(tracker, pair_key)
         else
-            entry = CorrelationEntry(pair_key, copy(corr_acc), current_corr, sample_number, upper_bound)
+            entry = CorrelationEntry(
+                pair_key,
+                copy(corr_acc),
+                current_corr,
+                sample_number,
+                upper_bound,
+            )
             if length(tracker.under_evaluation) >= tracker.max_under_evaluation
                 lru_key = nothing
                 min_counter = typemax(Int)
                 # This part is not O(1), but eviction is less frequent than updates.
-                # A more complex structure (e.g., doubly linked list) would be needed for true O(1).
                 for (key, position) in tracker.lru_positions
                     if position < min_counter
                         min_counter = position
@@ -302,56 +410,197 @@ function update_correlation_tracker!(
     end
 end
 
+function coefficient_of_variation(s::StreamingStats, epsilon::Float64=1e-12)
+    m = s.mean
+    v = variance(s)
+    if abs(m) < epsilon || v < 0
+        return Inf
+    end
+    return sqrt(v) / abs(m)
+end
 
-"""
-Get all pairs that meet the final correlation threshold from both tiers.
-"""
-function get_candidate_pairs(tracker::CorrelationTracker, final_threshold::Float64, min_valid_samples::Int)
-    candidates = CorrelationEntry[]
+function cv_confidence_lower_bound(
+    cv_acc::StreamingStats,
+    confidence_level::Float64,
+    epsilon::Float64=1e-12,
+)
+    if cv_acc.n < 10
+        return 0.0
+    end
+    cv = coefficient_of_variation(cv_acc, epsilon)
+    if isinf(cv)
+        return Inf
+    end
+    se_cv = cv * sqrt((1 + 2 * (cv^2)) / (2 * cv_acc.n))
+    z_critical = 1.645 # For one-sided 95% confidence
+    return max(0.0, cv - z_critical * se_cv)
+end
 
-    # Lock all shards to ensure a consistent snapshot
+function update_cv_tracker!(
+    tracker::CVTracker,
+    pair_key::Tuple{Symbol,Symbol},
+    ratio_stats_acc::StreamingStats,
+    sample_number::Int;
+    cv_epsilon::Float64=1e-12,
+)
+    current_cv = coefficient_of_variation(ratio_stats_acc, cv_epsilon)
+    if isinf(current_cv)
+        return true
+    end
+
+    lock_idx = (hash(pair_key) % tracker.num_locks) + 1
+    lock(tracker.tracker_locks[lock_idx]) do
+        if haskey(tracker.low_cv_confirmed, pair_key)
+            update_in_place!(tracker.low_cv_confirmed[pair_key], ratio_stats_acc)
+            return true
+        end
+
+        lower_bound =
+            cv_confidence_lower_bound(ratio_stats_acc, tracker.rejection_confidence, cv_epsilon)
+
+        if ratio_stats_acc.n >= tracker.min_samples_for_decision &&
+           lower_bound > tracker.promotion_threshold
+            if haskey(tracker.under_evaluation, pair_key)
+                delete!(tracker.under_evaluation, pair_key)
+                delete!(tracker.lru_positions, pair_key)
+            end
+            Threads.atomic_add!(tracker.pairs_rejected_statistically, 1)
+            return false
+        end
+
+        if current_cv <= tracker.promotion_threshold &&
+           ratio_stats_acc.n >= tracker.min_samples_for_decision
+            tracker.low_cv_confirmed[pair_key] = copy(ratio_stats_acc)
+            if haskey(tracker.under_evaluation, pair_key)
+                delete!(tracker.under_evaluation, pair_key)
+                delete!(tracker.lru_positions, pair_key)
+            end
+            Threads.atomic_add!(tracker.pairs_promoted, 1)
+            return true
+        end
+
+        if haskey(tracker.under_evaluation, pair_key)
+            existing_entry = tracker.under_evaluation[pair_key]
+            update_in_place!(existing_entry.ratio_stats_acc, ratio_stats_acc)
+            new_entry = CVEntry(
+                pair_key,
+                existing_entry.ratio_stats_acc,
+                current_cv,
+                sample_number,
+                lower_bound,
+            )
+            tracker.under_evaluation[pair_key] = new_entry
+            update_lru!(tracker, pair_key)
+        else
+            if length(tracker.under_evaluation) >= tracker.max_under_evaluation
+                lru_key = nothing
+                min_counter = typemax(Int)
+                for (key, position) in tracker.lru_positions
+                    if position < min_counter
+                        min_counter = position
+                        lru_key = key
+                    end
+                end
+                if lru_key !== nothing
+                    delete!(tracker.under_evaluation, lru_key)
+                    delete!(tracker.lru_positions, lru_key)
+                    Threads.atomic_add!(tracker.pairs_evicted_lru, 1)
+                end
+            end
+            entry = CVEntry(
+                pair_key,
+                copy(ratio_stats_acc),
+                current_cv,
+                sample_number,
+                lower_bound,
+            )
+            tracker.under_evaluation[pair_key] = entry
+            update_lru!(tracker, pair_key)
+        end
+        return true
+    end
+end
+
+function get_cv_candidate_pairs(tracker::CVTracker, final_cv_threshold::Float64, min_valid_samples::Int)
+    candidates = Set{Tuple{Symbol,Symbol}}()
     for l in tracker.tracker_locks
         lock(l)
     end
-
     try
-        # High confidence pairs
-        for (pair_key, corr_acc) in tracker.high_confidence
-            if corr_acc.n >= min_valid_samples && abs(correlation(corr_acc)) >= final_threshold
-                push!(candidates, CorrelationEntry(pair_key, corr_acc, abs(correlation(corr_acc)), 0, 1.0))
+        for (pair_key, stats_acc) in tracker.low_cv_confirmed
+            if stats_acc.n >= min_valid_samples &&
+               coefficient_of_variation(stats_acc) <= final_cv_threshold
+                push!(candidates, pair_key)
             end
         end
-
-        # Under evaluation pairs
         for entry in values(tracker.under_evaluation)
-            if entry.correlation_acc.n >= min_valid_samples && abs(entry.current_correlation) >= final_threshold
-                push!(candidates, entry)
+            if entry.ratio_stats_acc.n >= min_valid_samples &&
+               entry.current_cv <= final_cv_threshold
+                if !haskey(tracker.low_cv_confirmed, entry.pair_key)
+                    push!(candidates, entry.pair_key)
+                end
             end
         end
     finally
-        # Ensure all locks are unlocked
         for l in reverse(tracker.tracker_locks)
             unlock(l)
         end
     end
+    return collect(candidates)
+end
 
+function get_candidate_pairs(
+    tracker::CorrelationTracker,
+    final_threshold::Float64,
+    min_valid_samples::Int,
+)
+    candidates = CorrelationEntry[]
+    for l in tracker.tracker_locks
+        lock(l)
+    end
+    try
+        for (pair_key, corr_acc) in tracker.high_confidence
+            if corr_acc.n >= min_valid_samples && abs(correlation(corr_acc)) >= final_threshold
+                push!(
+                    candidates,
+                    CorrelationEntry(pair_key, corr_acc, abs(correlation(corr_acc)), 0, 1.0),
+                )
+            end
+        end
+        for entry in values(tracker.under_evaluation)
+            if entry.correlation_acc.n >= min_valid_samples &&
+               abs(entry.current_correlation) >= final_threshold
+                push!(candidates, entry)
+            end
+        end
+    finally
+        for l in reverse(tracker.tracker_locks)
+            unlock(l)
+        end
+    end
     sort!(candidates, by=e -> abs(e.current_correlation), rev=true)
     return candidates
 end
 
-"""
-Get statistics about tracker performance.
-"""
-function get_tracker_stats(tracker::CorrelationTracker)
-    # No need to lock for atomic reads
+function get_tracker_stats(tracker)
     return (
-        high_confidence_pairs=length(tracker.high_confidence),
+        high_confidence_pairs=if isdefined(tracker, :high_confidence)
+            length(tracker.high_confidence)
+        else
+            length(tracker.low_cv_confirmed)
+        end,
         under_evaluation_pairs=length(tracker.under_evaluation),
         max_capacity=tracker.max_under_evaluation,
         pairs_promoted=tracker.pairs_promoted[],
         pairs_rejected_statistically=tracker.pairs_rejected_statistically[],
         pairs_evicted_lru=tracker.pairs_evicted_lru[],
-        total_tracked=length(tracker.high_confidence) + length(tracker.under_evaluation)
+        total_tracked=(
+            if isdefined(tracker, :high_confidence)
+                length(tracker.high_confidence)
+            else
+                length(tracker.low_cv_confirmed)
+            end
+        ) + length(tracker.under_evaluation),
     )
 end
 
@@ -367,110 +616,54 @@ struct PairPriority
     is_high_confidence::Bool
 end
 
-"""
-$(TYPEDSIGNATURES)
+# --- Parallel Worker Functions ---
 
-Compute coefficient of variation for activity ratios between complex pairs.
-Pairs with CV <= cv_threshold are considered for concordance testing.
-This function requires all samples to be present in memory.
-"""
-function coefficient_of_variation_filter(
-    activity_refs::Dict{Symbol,Vector{Float64}},
-    valid_complexes::Vector{MetabolicComplex},
-    cv_threshold::Float64,
-    cv_epsilon::Float64
-)
-    n_valid = length(valid_complexes)
-    cv_candidates = Vector{Tuple{Int,Int,Float64}}()
-    @info "Computing CV filtering for $(n_valid) complexes" cv_threshold
-
-    for i in 1:n_valid
-        ci = valid_complexes[i]
-        ci_activities = activity_refs[ci.id]
-
-        for j in (i+1):n_valid
-            cj = valid_complexes[j]
-            cj_activities = activity_refs[cj.id]
-
-            ratios = (ci_activities .+ cv_epsilon) ./ (cj_activities .+ cv_epsilon)
-            valid_ratios = ratios[isfinite.(ratios)]
-
-            if length(valid_ratios) >= 2
-                ratio_mean = mean(valid_ratios)
-                if abs(ratio_mean) > cv_epsilon
-                    ratio_std = std(valid_ratios)
-                    cv_value = ratio_std / abs(ratio_mean)
-                    if cv_value <= cv_threshold
-                        push!(cv_candidates, (i, j, cv_value))
-                    end
-                end
-            end
-        end
-    end
-
-    @info "CV filtering complete" n_pairs_evaluated = div(n_valid * (n_valid - 1), 2) n_cv_candidates = length(cv_candidates)
-    return cv_candidates
-end
-
-"""
-Worker function to process samples from a single chain and update a shared tracker.
-This function is designed to be called in parallel for the memory-efficient streaming path.
-"""
-function process_chain_samples(
-    chain_idx::Int,
+function process_chain_samples_for_cor(
     constraints::C.ConstraintTree,
     warmup_subset::Matrix{Float64},
     sampler_config::NamedTuple,
     filter_config::NamedTuple,
-    shared_data::NamedTuple,
+    correlation_tracker::CorrelationTracker,
+    active_complexes,
+    valid_pairs,
 )
-    rng = StableRNG(sampler_config.seed + chain_idx) # Ensure each chain has a unique seed
-
-    # 1. Generate samples for this chain ONLY
+    rng = StableRNG(sampler_config.seed)
     chain_samples = COBREXA.sample_constraints(
         COBREXA.sample_chain_achr,
         constraints.balance;
         output=constraints.activities,
         start_variables=warmup_subset,
         seed=rand(rng, UInt64),
-        n_chains=1, # CRITICAL: only one chain per worker
+        n_chains=1,
         collect_iterations=sampler_config.iters_to_collect,
     )
-
     if isempty(chain_samples)
-        @warn "Chain $chain_idx produced no samples."
         return 0
     end
 
-    # 2. Extract activity references (zero-copy)
     activity_refs = Dict{Symbol,Vector{Float64}}()
-    for c in shared_data.valid_complexes
+    for c in active_complexes
         if haskey(chain_samples, c.id)
             activity_refs[c.id] = chain_samples[c.id]
         end
     end
 
     if isempty(activity_refs)
-        @warn "Chain $chain_idx had no valid complexes with data."
         return 0
     end
 
     n_samples_in_chain = length(first(values(activity_refs)))
+    pool = [StreamingCorrelation() for _ = 1:10]
 
-    # 3. Process pairs and update shared tracker
-    pool = [StreamingCorrelation() for _ in 1:10]
-    pool_size = length(pool)
-
-    processed_count = 0
-    for (pair_idx, (i, j)) in enumerate(shared_data.valid_pairs)
-        ci = shared_data.valid_complexes[i]
-        cj = shared_data.valid_complexes[j]
+    for (pair_idx, (i, j)) in enumerate(valid_pairs)
+        ci = active_complexes[i]
+        cj = active_complexes[j]
 
         if !haskey(activity_refs, ci.id) || !haskey(activity_refs, cj.id)
             continue
         end
 
-        corr_acc = pool[(pair_idx-1)%pool_size+1]
+        corr_acc = pool[(pair_idx-1)%length(pool)+1]
         reset!(corr_acc)
 
         x_values = activity_refs[ci.id]
@@ -482,25 +675,102 @@ function process_chain_samples(
 
         pair_key = (ci.id, cj.id)
         update_correlation_tracker!(
-            shared_data.correlation_tracker,
+            correlation_tracker,
             pair_key,
             corr_acc,
             n_samples_in_chain,
-            filter_config.correlation_threshold
+            filter_config.correlation_threshold,
         )
-        processed_count += 1
     end
-
-    return processed_count
+    return length(valid_pairs)
 end
 
+function process_chain_samples_for_cv(
+    constraints::C.ConstraintTree,
+    warmup_subset::Matrix{Float64},
+    sampler_config::NamedTuple,
+    filter_config::NamedTuple,
+    cv_tracker::CVTracker,
+    active_complexes,
+    valid_pairs,
+)
+    rng = StableRNG(sampler_config.seed)
+    chain_samples = COBREXA.sample_constraints(
+        COBREXA.sample_chain_achr,
+        constraints.balance;
+        output=constraints.activities,
+        start_variables=warmup_subset,
+        seed=rand(rng, UInt64),
+        n_chains=1,
+        collect_iterations=sampler_config.iters_to_collect,
+    )
+    if isempty(chain_samples)
+        return 0
+    end
+
+    activity_refs = Dict{Symbol,Vector{Float64}}()
+    for c in active_complexes
+        if haskey(chain_samples, c.id)
+            activity_refs[c.id] = chain_samples[c.id]
+        end
+    end
+    if isempty(activity_refs)
+        return 0
+    end
+
+    n_samples_in_chain = length(first(values(activity_refs)))
+    # A single accumulator is sufficient now that the loop is serial
+    ratio_stats_acc = StreamingStats()
+
+    # The loop is now serial, which is the correct implementation
+    for (i, j) in valid_pairs
+        ci = active_complexes[i]
+        cj = active_complexes[j]
+
+        if !haskey(activity_refs, ci.id) || !haskey(activity_refs, cj.id)
+            continue
+        end
+
+        # Reset the single accumulator for each pair
+        ratio_stats_acc.n = 0
+        ratio_stats_acc.mean = 0.0
+        ratio_stats_acc.M2 = 0.0
+
+        x_values = activity_refs[ci.id]
+        y_values = activity_refs[cj.id]
+
+        for k = 1:n_samples_in_chain
+            ratio =
+                (x_values[k] + filter_config.cv_epsilon) /
+                (y_values[k] + filter_config.cv_epsilon)
+            if isfinite(ratio)
+                update!(ratio_stats_acc, ratio)
+            end
+        end
+
+        if ratio_stats_acc.n > 1
+            pair_key = (ci.id, cj.id)
+            # This call is now safe because only one thread is accessing the tracker
+            update_cv_tracker!(
+                cv_tracker,
+                pair_key,
+                ratio_stats_acc,
+                n_samples_in_chain,
+                cv_epsilon=filter_config.cv_epsilon,
+            )
+        end
+    end
+    return length(valid_pairs)
+end
+
+# --- Main `streaming_filter` Function ---
 
 """
 $(TYPEDSIGNATURES)
 
-Perform streaming correlation analysis for complex concordance with direct matrix sampling.
-This version uses a true streaming approach, processing samples from each parallel
-chain as they are generated to keep memory usage low.
+Perform deterministic, streaming correlation and/or CV analysis for complex concordance.
+This version uses thread-local trackers and a final merge step to ensure
+reproducibility without sacrificing parallel efficiency.
 """
 function streaming_filter(
     complexes::Vector{MetabolicComplex},
@@ -516,6 +786,7 @@ function streaming_filter(
     sample_size::Int=100,
     min_valid_samples::Int=30,
     max_correlation_pairs::Int=500_000,
+    max_cv_pairs::Int=1_000_000,
     early_correlation_threshold::Float64=0.8,
     workers=workers,
     seed::Union{Int,Nothing}=42,
@@ -523,115 +794,120 @@ function streaming_filter(
     cv_threshold::Float64=0.01,
     cv_epsilon::Float64=1e-12,
 )
-    # === 1. Global Setup ===
+    # === 1. Global and Deterministic Setup ===
     rng = seed === nothing ? StableRNG() : StableRNG(seed)
     n_threads = Threads.nthreads()
     n_chains = min(n_threads, 12, length(workers))
-
-    correlation_tracker = CorrelationTracker(
-        max_correlation_pairs,
-        early_correlation_threshold,
-        0.95,
-    )
     active_complexes = [c for c in complexes if !(c.id in balanced_complexes)]
     original_indices = concordance_tracker.id_to_idx
 
-    # === 2. Select Execution Path (Memory-Efficient vs. CV-Compatible) ===
-    if :cv in filter
-        # --- CV-based path (higher memory usage) ---
-        @warn "CV filtering selected. This requires collecting all samples into memory."
+    n_active = length(active_complexes)
+    all_pairs_indices =
+        [(i, j) for i = 1:n_active for j = (i+1):n_active if !((i, j) in trivial_pairs)]
 
-        # A. Bulk sample generation
-        iters_to_collect = [32]
-        all_samples = COBREXA.sample_constraints(
-            COBREXA.sample_chain_achr,
-            constraints.balance;
-            output=constraints.activities,
-            start_variables=warmup,
-            seed=rand(rng, UInt64),
-            n_chains=n_chains,
-            collect_iterations=iters_to_collect,
-            workers=workers,
-        )
-
-        # B. Create activity refs and identify valid complexes with data
-        activity_refs = Dict{Symbol,Vector{Float64}}()
-        for c in active_complexes
-            if haskey(all_samples, c.id) && !isempty(all_samples[c.id])
-                activity_refs[c.id] = all_samples[c.id]
-            end
-        end
-        valid_complexes_with_data = [c for c in active_complexes if haskey(activity_refs, c.id)]
-        n_samples_total = isempty(activity_refs) ? 0 : length(first(values(activity_refs)))
-
-        # C. Run CV filter to get pairs to test
-        cv_candidates = coefficient_of_variation_filter(activity_refs, valid_complexes_with_data, cv_threshold, cv_epsilon)
-        pairs_to_test = [(valid_complexes_with_data[i], valid_complexes_with_data[j]) for (i, j, _) in cv_candidates]
-
-        # D. Run correlation on the filtered pairs
-        progress = Progress(length(pairs_to_test), desc="Correlating CV candidates: ", showspeed=true)
-
-        Threads.@threads for (ci, cj) in pairs_to_test
-            corr_acc = StreamingCorrelation()
-            x_values = activity_refs[ci.id]
-            y_values = activity_refs[cj.id]
-            for k = 1:n_samples_total
-                update!(corr_acc, x_values[k], y_values[k])
-            end
-            update_correlation_tracker!(correlation_tracker, (ci.id, cj.id), corr_acc, n_samples_total, correlation_threshold)
-            ProgressMeter.next!(progress)
-        end
-        ProgressMeter.finish!(progress)
-
-    else
-        # --- Correlation-only path (low memory streaming) ---
-        @info "Using memory-efficient streaming for correlation analysis."
-
-        # A. Determine all pairs to test
-        n_active = length(active_complexes)
-        skip_pairs_set = Set{Tuple{Int,Int}}()
-        for i in 1:n_active, j in (i+1):n_active
-            ci_original_idx = get(original_indices, active_complexes[i].id, 0)
-            cj_original_idx = get(original_indices, active_complexes[j].id, 0)
-            if ci_original_idx > 0 && cj_original_idx > 0
-                canonical_pair = ci_original_idx < cj_original_idx ? (ci_original_idx, cj_original_idx) : (cj_original_idx, ci_original_idx)
-                if canonical_pair in trivial_pairs
-                    push!(skip_pairs_set, (i, j))
-                end
-            end
-        end
-        valid_pairs = [(i, j) for i in 1:n_active for j in (i+1):n_active if (i, j) ∉ skip_pairs_set]
-
-        # B. Configure and distribute work
-        target_samples_per_chain = ceil(Int, sample_size / n_chains)
-        sampler_config = (seed=rand(rng, UInt), iters_to_collect=[32])
-        filter_config = (correlation_threshold=correlation_threshold,)
-        shared_data = (correlation_tracker=correlation_tracker, valid_complexes=active_complexes, valid_pairs=valid_pairs)
-
-        warmup_chunks = []
-        n_warmup_available = size(warmup, 1)
-        indices = 1:n_warmup_available
-        for i in 1:n_chains
-            chain_indices = [indices[mod1(k, n_warmup_available)] for k in (i-1)*target_samples_per_chain+1:i*target_samples_per_chain]
-            push!(warmup_chunks, warmup[chain_indices, :])
-        end
-
-        # C. Parallel chain execution
-        progress = Progress(n_chains, desc="Processing chains: ", showspeed=true)
-        tasks = [Threads.@spawn begin
-            process_chain_samples(i, constraints, warmup_chunks[i], sampler_config, filter_config, shared_data)
-            ProgressMeter.next!(progress)
-        end for i in 1:n_chains]
-
-        fetch.(tasks)
-        ProgressMeter.finish!(progress)
+    sampler_config = (seed=rand(rng, UInt), iters_to_collect=[32])
+    warmup_chunks = []
+    n_warmup_available = size(warmup, 1)
+    indices = 1:n_warmup_available
+    target_samples_per_chain = ceil(Int, sample_size / n_chains)
+    for i = 1:n_chains
+        chain_indices = [
+            indices[mod1(k, n_warmup_available)] for
+            k = (i-1)*target_samples_per_chain+1:i*target_samples_per_chain
+        ]
+        push!(warmup_chunks, warmup[chain_indices, :])
     end
 
-    # === 3. Extract Final Results (Common to both paths) ===
-    @info "Extracting final candidates from the aggregated tracker."
-    candidates = get_candidate_pairs(correlation_tracker, correlation_threshold, min_valid_samples)
-    @info "Found $(length(candidates)) candidate pairs meeting the criteria."
+    # === 2. Execute Filters using Thread-Local Trackers ===
+    pairs_to_test_indices = all_pairs_indices
 
+    if :cv in filter
+        @info "Using deterministic streaming for CV filtering with $n_chains chains."
+        thread_local_cv_trackers =
+            [CVTracker(max_cv_pairs, cv_threshold) for _ = 1:n_chains]
+
+        filter_config_cv = (cv_threshold=cv_threshold, cv_epsilon=cv_epsilon)
+
+        progress_cv = Progress(n_chains, desc="Processing chains for CV: ", showspeed=true)
+        tasks_cv = [
+            Threads.@spawn begin
+                process_chain_samples_for_cv(
+                    constraints,
+                    warmup_chunks[i],
+                    (seed=sampler_config.seed + i, iters_to_collect=sampler_config.iters_to_collect),
+                    filter_config_cv,
+                    thread_local_cv_trackers[i],
+                    active_complexes,
+                    pairs_to_test_indices,
+                )
+                ProgressMeter.next!(progress_cv)
+            end for i = 1:n_chains
+        ]
+        fetch.(tasks_cv)
+        ProgressMeter.finish!(progress_cv)
+
+        @info "Merging CV tracker results..."
+        final_cv_tracker = thread_local_cv_trackers[1]
+        for i = 2:n_chains
+            merge_trackers!(final_cv_tracker, thread_local_cv_trackers[i])
+        end
+
+        cv_candidate_keys =
+            get_cv_candidate_pairs(final_cv_tracker, cv_threshold, min_valid_samples)
+        @info "CV filtering complete. Found $(length(cv_candidate_keys)) candidate pairs."
+
+        id_to_active_idx = Dict(c.id => i for (i, c) in enumerate(active_complexes))
+        next_pairs_to_test = Tuple{Int,Int}[]
+        for (c1_id, c2_id) in cv_candidate_keys
+            i = get(id_to_active_idx, c1_id, 0)
+            j = get(id_to_active_idx, c2_id, 0)
+            if i > 0 && j > 0
+                push!(next_pairs_to_test, i < j ? (i, j) : (j, i))
+            end
+        end
+        pairs_to_test_indices = next_pairs_to_test
+    end
+
+    if !(:cor in filter)
+        return PairPriority[]
+    end
+
+    @info "Using deterministic streaming for correlation analysis on $(length(pairs_to_test_indices)) pairs."
+    thread_local_cor_trackers = [
+        CorrelationTracker(max_correlation_pairs, early_correlation_threshold) for
+        _ = 1:n_chains
+    ]
+    filter_config_cor = (correlation_threshold=correlation_threshold,)
+
+    progress_cor = Progress(n_chains, desc="Processing chains for Cor: ", showspeed=true)
+    tasks_cor = [
+        Threads.@spawn begin
+            process_chain_samples_for_cor(
+                constraints,
+                warmup_chunks[i],
+                (seed=sampler_config.seed + i, iters_to_collect=sampler_config.iters_to_collect),
+                filter_config_cor,
+                thread_local_cor_trackers[i],
+                active_complexes,
+                pairs_to_test_indices,
+            )
+            ProgressMeter.next!(progress_cor)
+        end for i = 1:n_chains
+    ]
+    fetch.(tasks_cor)
+    ProgressMeter.finish!(progress_cor)
+
+    @info "Merging correlation tracker results..."
+    final_cor_tracker = thread_local_cor_trackers[1]
+    for i = 2:n_chains
+        merge_trackers!(final_cor_tracker, thread_local_cor_trackers[i])
+    end
+
+    # === 3. Extract Final Results from Merged Tracker ===
+    @info "Extracting final candidates from the merged correlation tracker."
+    candidates =
+        get_candidate_pairs(final_cor_tracker, correlation_threshold, min_valid_samples)
+    @info "Found $(length(candidates)) candidate pairs meeting the criteria."
     priorities = PairPriority[]
     for entry in candidates
         c1_id, c2_id = entry.pair_key
@@ -641,20 +917,30 @@ function streaming_filter(
             continue
         end
 
-        directions = determine_directions(c1_idx, c2_idx, positive_complexes, negative_complexes, unrestricted_complexes)
-        is_high_conf = haskey(correlation_tracker.high_confidence, entry.pair_key)
-
-        push!(priorities, PairPriority(c1_idx, c2_idx, directions, abs(entry.current_correlation), entry.correlation_acc.n, is_high_conf))
+        directions = determine_directions(
+            c1_idx,
+            c2_idx,
+            positive_complexes,
+            negative_complexes,
+            unrestricted_complexes,
+        )
+        is_high_conf = haskey(final_cor_tracker.high_confidence, entry.pair_key)
+        push!(
+            priorities,
+            PairPriority(
+                c1_idx,
+                c2_idx,
+                directions,
+                abs(entry.current_correlation),
+                entry.correlation_acc.n,
+                is_high_conf,
+            ),
+        )
     end
 
     sort!(priorities, by=p -> p.correlation, rev=true)
-
-    stats = get_tracker_stats(correlation_tracker)
-    @info "Correlation tracker stats" stats
-
     return priorities
 end
-
 
 """
 $(TYPEDSIGNATURES)
@@ -662,9 +948,11 @@ $(TYPEDSIGNATURES)
 Determine which directions need to be tested based on complex activity patterns.
 """
 function determine_directions(
-    c1_idx::Int, c2_idx::Int,
-    positive_complexes::Set{Int}, negative_complexes::Set{Int},
-    unrestricted_complexes::Set{Int}
+    c1_idx::Int,
+    c2_idx::Int,
+    positive_complexes::Set{Int},
+    negative_complexes::Set{Int},
+    unrestricted_complexes::Set{Int},
 )::Set{Symbol}
     directions = Set{Symbol}()
 
