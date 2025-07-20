@@ -293,6 +293,8 @@ end
 Merge two tracker objects by merging their internal statistics.
 """
 function merge_trackers!(t1, t2)
+    # This generic function works for both CVTracker and CorrelationTracker
+    # by checking for the existence of the relevant fields.
     field_to_merge = isdefined(t2, :high_confidence) ? :high_confidence : :low_cv_confirmed
     dict1 = getfield(t1, field_to_merge)
     dict2 = getfield(t2, field_to_merge)
@@ -304,7 +306,23 @@ function merge_trackers!(t1, t2)
             dict1[pair_key] = acc2
         end
     end
+
+    # Also merge the `under_evaluation` dictionaries for a more complete picture,
+    # though this is less critical as they are transient.
+    if isdefined(t1, :under_evaluation) && isdefined(t2, :under_evaluation)
+        for (pair_key, entry2) in t2.under_evaluation
+            if haskey(t1.under_evaluation, pair_key)
+                entry1 = t1.under_evaluation[pair_key]
+                # Merge the stats accumulators within the entries
+                merge!(entry1.ratio_stats_acc, entry2.ratio_stats_acc)
+            else
+                # A simple copy is sufficient here, no need for complex LRU merge
+                t1.under_evaluation[pair_key] = entry2
+            end
+        end
+    end
 end
+
 
 function update_lru!(tracker, pair_key::Tuple{Symbol,Symbol})
     new_counter = Threads.atomic_add!(tracker.lru_counter, 1) + 1
@@ -719,10 +737,8 @@ function process_chain_samples_for_cv(
     end
 
     n_samples_in_chain = length(first(values(activity_refs)))
-    # A single accumulator is sufficient now that the loop is serial
     ratio_stats_acc = StreamingStats()
 
-    # The loop is now serial, which is the correct implementation
     for (i, j) in valid_pairs
         ci = active_complexes[i]
         cj = active_complexes[j]
@@ -731,7 +747,6 @@ function process_chain_samples_for_cv(
             continue
         end
 
-        # Reset the single accumulator for each pair
         ratio_stats_acc.n = 0
         ratio_stats_acc.mean = 0.0
         ratio_stats_acc.M2 = 0.0
@@ -750,7 +765,6 @@ function process_chain_samples_for_cv(
 
         if ratio_stats_acc.n > 1
             pair_key = (ci.id, cj.id)
-            # This call is now safe because only one thread is accessing the tracker
             update_cv_tracker!(
                 cv_tracker,
                 pair_key,
@@ -820,6 +834,8 @@ function streaming_filter(
 
     # === 2. Execute Filters using Thread-Local Trackers ===
     pairs_to_test_indices = all_pairs_indices
+    cv_candidate_keys = []
+    final_cv_tracker = nothing
 
     if :cv in filter
         @info "Using deterministic streaming for CV filtering with $n_chains chains."
@@ -834,7 +850,10 @@ function streaming_filter(
                 process_chain_samples_for_cv(
                     constraints,
                     warmup_chunks[i],
-                    (seed=sampler_config.seed + i, iters_to_collect=sampler_config.iters_to_collect),
+                    (
+                        seed=sampler_config.seed + i,
+                        iters_to_collect=sampler_config.iters_to_collect,
+                    ),
                     filter_config_cv,
                     thread_local_cv_trackers[i],
                     active_complexes,
@@ -869,9 +888,37 @@ function streaming_filter(
     end
 
     if !(:cor in filter)
-        return PairPriority[]
+        # Handle CV-only case: format CV results into PairPriority
+        priorities = PairPriority[]
+        if !isnothing(final_cv_tracker)
+            for pair_key in cv_candidate_keys
+                c1_id, c2_id = pair_key
+                c1_idx = get(original_indices, c1_id, 0)
+                c2_idx = get(original_indices, c2_id, 0)
+                if c1_idx == 0 || c2_idx == 0
+                    continue
+                end
+
+                stats = final_cv_tracker.low_cv_confirmed[pair_key]
+                directions = determine_directions(
+                    c1_idx,
+                    c2_idx,
+                    positive_complexes,
+                    negative_complexes,
+                    unrestricted_complexes,
+                )
+
+                # Create a placeholder priority object. Correlation is -1 to indicate not computed.
+                push!(
+                    priorities,
+                    PairPriority(c1_idx, c2_idx, directions, -1.0, stats.n, true),
+                )
+            end
+        end
+        return priorities
     end
 
+    # === 3. Correlation Filtering ===
     @info "Using deterministic streaming for correlation analysis on $(length(pairs_to_test_indices)) pairs."
     thread_local_cor_trackers = [
         CorrelationTracker(max_correlation_pairs, early_correlation_threshold) for
@@ -885,7 +932,10 @@ function streaming_filter(
             process_chain_samples_for_cor(
                 constraints,
                 warmup_chunks[i],
-                (seed=sampler_config.seed + i, iters_to_collect=sampler_config.iters_to_collect),
+                (
+                    seed=sampler_config.seed + i,
+                    iters_to_collect=sampler_config.iters_to_collect,
+                ),
                 filter_config_cor,
                 thread_local_cor_trackers[i],
                 active_complexes,
@@ -903,7 +953,7 @@ function streaming_filter(
         merge_trackers!(final_cor_tracker, thread_local_cor_trackers[i])
     end
 
-    # === 3. Extract Final Results from Merged Tracker ===
+    # === 4. Extract Final Correlation Results ===
     @info "Extracting final candidates from the merged correlation tracker."
     candidates =
         get_candidate_pairs(final_cor_tracker, correlation_threshold, min_valid_samples)

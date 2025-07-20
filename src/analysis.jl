@@ -465,7 +465,7 @@ function process_concordance_batch(
                 else
                     # This direction is concordant
                     push!(concordant_directions, direction)
-                    
+
                     # Store the first valid lambda found
                     if isnothing(final_lambda)
                         final_lambda = min_val
@@ -568,7 +568,7 @@ function concordance_analysis(
 
     # Extract complex information - complexes is now a Dict{Symbol,MetabolicComplex}
     n_complexes = length(complexes)
-    complex_ids = [c.id for c in values(complexes)]
+    complex_ids = sort(collect(keys(complexes)))
 
     n_reactions = length(AbstractFBCModels.reactions(model))
 
