@@ -26,7 +26,7 @@ export prepare_model_for_concordance
 """
     prepare_model_for_concordance(model::AbstractFBCModel; 
                                  optimizer=HiGHS.Optimizer,
-                                 flux_tolerance::Float64 = 1e-9,
+                                 flux_tolerance::Float64 = 1e-8,
                                  remove_blocked::Bool = true,
                                  split_reversible::Bool = true,
                                  remove_zero_rows::Bool = true,
@@ -42,7 +42,7 @@ Now uses parallel FVA for better performance on large models.
 """
 function prepare_model_for_concordance(model::AbstractFBCModel;
     optimizer=HiGHS.Optimizer,
-    flux_tolerance::Float64=1e-9,
+    flux_tolerance::Float64=1e-8,
     remove_blocked::Bool=true,
     split_reversible::Bool=false, # Already handled through COBREXA constraints
     remove_zero_rows::Bool=true,

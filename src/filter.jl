@@ -243,7 +243,6 @@ function sample_producer(
     warmup::Matrix{Float64},
     original_indices::Dict{Symbol,Int};
     sample_size::Int,
-    n_iterations::Int,
     workers,
     seed::Union{Int,Nothing}
 )
@@ -269,7 +268,7 @@ function sample_producer(
                 workers=workers,
                 seed=rand(rng, UInt64),
                 n_chains=1,
-                collect_iterations=[n_iterations]
+                collect_iterations=[32]
             )
 
             if isempty(all_samples_tree)
@@ -313,7 +312,7 @@ function streaming_filter(
     early_correlation_threshold::Float64=0.8,
     filter::Vector{Symbol}=[:cor],
     cv_threshold::Float64=0.01,
-    cv_epsilon::Float64=1e-9,
+    cv_epsilon::Float64=1e-8,
 )
     original_indices = concordance_tracker.id_to_idx
     active_complexes = [c for c in complexes if !(get(original_indices, c.id, 0) in balanced_complexes)]

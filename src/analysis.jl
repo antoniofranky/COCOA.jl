@@ -41,7 +41,7 @@ function process_in_stages(
     workers=workers,
     stage_size::Int=500,
     batch_size::Int=100,
-    tolerance::Float64=1e-9
+    tolerance::Float64=1e-8
 )
     stage_results = Dict{String,Any}(
         "stages_completed" => 0,
@@ -323,7 +323,7 @@ function process_concordance_batch(
     optimizer,
     settings=[],
     workers=workers,
-    tolerance::Float64=1e-9
+    tolerance::Float64=1e-8
 )
     batch_pairs_with_ids = [(concordance_tracker.idx_to_id[c1_idx], concordance_tracker.idx_to_id[c2_idx], directions) for (c1_idx, c2_idx, directions) in batch_pairs]
 
@@ -415,7 +415,7 @@ function concordance_analysis(
     optimizer,
     settings=[],
     workers=D.workers(),
-    tolerance::Float64=1e-9,
+    tolerance::Float64=1e-8,
     correlation_threshold::Float64=0.99,
     early_correlation_threshold::Float64=0.95,
     sample_size::Int=100,
@@ -427,7 +427,6 @@ function concordance_analysis(
     use_unidirectional_constraints::Bool=true,
     filter::Union{Symbol,Vector{Symbol}}=[:cv, :cor],
     cv_threshold::Float64=0.01,
-    cv_epsilon::Float64=1e-9,
 )
     start_time = time()
     filter_vec = isa(filter, Symbol) ? [filter] : filter
@@ -538,7 +537,6 @@ function concordance_analysis(
         union_sets!(concordance_tracker, concordance_tracker.id_to_idx[c1_id], concordance_tracker.id_to_idx[c2_id])
     end
 
-    @info "Generating candidate pairs via streaming correlation"
     complexes_vector = concordance_tracker.idx_to_id
     trivial_pairs_indices = Set{Tuple{Int,Int}}()
     for (c1_id, c2_id) in trivial_pairs
@@ -549,19 +547,16 @@ function concordance_analysis(
             push!(trivial_pairs_indices, canonical_pair)
         end
     end
-
-    @info "Starting background sample producer..."
+    @info "Generating candidate pairs via streaming correlation..."
     sample_channel = sample_producer(
         constraints,
         warmup,
         concordance_tracker.id_to_idx;
         sample_size=sample_size,
-        n_iterations=32,
         workers=workers, # This was the missing argument
         seed=seed
     )
 
-    @info "Generating candidate pairs via streaming correlation..."
     complexes_vector = [complexes[id] for id in concordance_tracker.idx_to_id]
     trivial_pairs_indices = Set(
         (concordance_tracker.id_to_idx[c1], concordance_tracker.id_to_idx[c2])
@@ -582,7 +577,7 @@ function concordance_analysis(
         early_correlation_threshold=early_correlation_threshold,
         filter=filter_vec,
         cv_threshold=cv_threshold,
-        cv_epsilon=cv_epsilon,
+        cv_epsilon=tolerance,
     )
 
     @info "Candidate pairs identified" n_pairs = length(candidate_priorities) filter_time_sec = round(filter_time, digits=2)

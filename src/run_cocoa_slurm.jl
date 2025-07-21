@@ -114,7 +114,7 @@ function parse_commandline()
         "--threshold"
         help = "Threshold for blocked reactions"
         arg_type = Float64
-        default = 1e-9
+        default = 1e-8
         "--default-lb"
         help = "Default lower bound for reactions"
         arg_type = Float64

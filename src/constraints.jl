@@ -62,7 +62,7 @@ function create_unidirectional_constraints(
 
     # Apply optimized substitution and pruning
     constraints_before_pruning = C.substitute(constraints, subst_vals)
-    #constraints = C.prune_variables(constraints_before_pruning)
+    constraints = C.prune_variables(constraints_before_pruning)
 
     # All reactions were split since we applied splitting to all fluxes
     rxn_ids = Symbol.(AbstractFBCModels.reactions(model))

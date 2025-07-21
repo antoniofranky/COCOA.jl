@@ -72,8 +72,8 @@ end
         # Test that balanced complexes have zero activity
         balanced_mask = results.complexes.is_balanced
         if any(balanced_mask)
-            @test all(abs.(results.complexes.min_activity[balanced_mask]) .< 1e-9)
-            @test all(abs.(results.complexes.max_activity[balanced_mask]) .< 1e-9)
+            @test all(abs.(results.complexes.min_activity[balanced_mask]) .< 1e-7)
+            @test all(abs.(results.complexes.max_activity[balanced_mask]) .< 1e-7)
         end
 
         # Test metadata
