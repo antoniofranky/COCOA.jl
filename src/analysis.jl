@@ -548,14 +548,6 @@ function concordance_analysis(
         end
     end
     @info "Generating candidate pairs via streaming correlation..."
-    sample_channel = sample_producer(
-        constraints,
-        warmup,
-        concordance_tracker.id_to_idx;
-        sample_size=sample_size,
-        workers=workers, # This was the missing argument
-        seed=seed
-    )
 
     complexes_vector = [complexes[id] for id in concordance_tracker.idx_to_id]
     trivial_pairs_indices = Set(
@@ -563,6 +555,35 @@ function concordance_analysis(
         for (c1, c2) in trivial_pairs if haskey(concordance_tracker.id_to_idx, c1) && haskey(concordance_tracker.id_to_idx, c2)
     )
 
+    rng = StableRNG(seed)
+
+    start_vars_indices = rand(rng, 1:size(warmup, 1), min(sample_size, size(warmup, 1)))
+    start_variables = warmup[start_vars_indices, :]
+    samples_tree = COBREXA.sample_constraints(
+        COBREXA.sample_chain_achr,
+        constraints.balance;
+        output=constraints.activities,
+        start_variables=start_variables,
+        workers=workers,
+        seed=rand(rng, UInt64),
+        n_chains=1,
+        collect_iterations=[32]
+    )
+    filter_config = FilterConfig(
+        coarse_sample_count=30, # Using default, can be exposed as parameter if needed
+        coarse_correlation_threshold=early_correlation_threshold,
+        correlation_threshold=correlation_threshold,
+        cv_threshold=cv_threshold,
+        cv_epsilon=tolerance,
+        max_correlation_pairs=2_000_000_000, # Default from filter.jl
+        max_cv_pairs=2_000_000_000, # Default from filter.jl
+        use_batching=true, # Assumed default
+        batch_size=1_000_000, # Default from filter.jl
+        use_threads=true, # Assumed default
+        filter=filter_vec
+    )
+    @info "type of samples_tree" typeof(samples_tree)
+    @info "Generating candidate pairs via streaming filter..."
     filter_time = @elapsed candidate_priorities = streaming_filter(
         complexes_vector,
         balanced_complexes,
@@ -570,14 +591,10 @@ function concordance_analysis(
         negative_complexes,
         unrestricted_complexes,
         trivial_pairs_indices,
-        sample_channel,
+        samples_tree, # Pass the collected samples
         concordance_tracker;
-        correlation_threshold=correlation_threshold,
-        min_valid_samples=min_valid_samples,
-        early_correlation_threshold=early_correlation_threshold,
-        filter=filter_vec,
-        cv_threshold=cv_threshold,
-        cv_epsilon=tolerance,
+        config=filter_config, # Pass the config object
+        seed=seed,
     )
 
     @info "Candidate pairs identified" n_pairs = length(candidate_priorities) filter_time_sec = round(filter_time, digits=2)
