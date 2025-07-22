@@ -464,7 +464,7 @@ function concordance_analysis(
         settings=settings,
         output=ava_output_with_warmup,
         output_type=Tuple{Float64,Vector{Float64}},
-        workers=[D.myid()],
+        workers=workers,
         # workers=workers,
     )
 
