@@ -53,7 +53,7 @@ function process_in_stages(
     )
 
     sorted_pairs = sort(candidate_priorities,
-        by=p -> (-p.is_high_confidence, -abs(p.correlation), p.c1_idx, p.c2_idx))
+        by=p -> (p.cv, p.c1_idx, p.c2_idx))
 
     remaining_pairs = [(p.c1_idx, p.c2_idx, p.directions) for p in sorted_pairs]
 
@@ -416,8 +416,8 @@ function concordance_analysis(
     settings=[],
     workers=D.workers(),
     tolerance::Float64=1e-8,
-    correlation_threshold::Float64=0.99,
-    early_correlation_threshold::Float64=0.95,
+    coarse_cv_threshold::Float64=0.95,
+    coarse_sample_count::Int=20,
     sample_size::Int=100,
     stage_size::Int=1000,
     batch_size::Int=1000,
@@ -438,7 +438,7 @@ function concordance_analysis(
         model
     end
 
-    @info "Starting concordance analysis" n_workers = length(workers) tolerance early_correlation_threshold correlation_threshold cv_threshold sample_size use_unidirectional_constraints batch_size stage_size
+    @info "Starting concordance analysis" n_workers = length(workers) tolerance coarse_cv_threshold cv_threshold sample_size use_unidirectional_constraints batch_size stage_size
 
     constraints, complexes =
         concordance_constraints(model; modifications, use_unidirectional_constraints, min_size_for_sharing, return_complexes=true)
@@ -464,10 +464,9 @@ function concordance_analysis(
         settings=settings,
         output=ava_output_with_warmup,
         output_type=Tuple{Float64,Vector{Float64}},
-        workers=workers,
+        workers=[D.myid()],
         # workers=workers,
     )
-
     # Collect AVA results into dictionaries first to ensure determinism,
     # then process the dictionaries in a sorted order.
     complex_ranges = Dict{Symbol,Tuple{Float64,Float64}}()
@@ -547,7 +546,7 @@ function concordance_analysis(
             push!(trivial_pairs_indices, canonical_pair)
         end
     end
-    @info "Generating candidate pairs via streaming correlation..."
+    @info "Generating candidate pairs via coefficient of variance..."
 
     complexes_vector = [complexes[id] for id in concordance_tracker.idx_to_id]
     trivial_pairs_indices = Set(
@@ -556,7 +555,8 @@ function concordance_analysis(
     )
 
     rng = StableRNG(seed)
-
+    decimals = max(0, -floor(Int, log10(tolerance)))
+    aggregate = rows -> round.(vec(hcat(rows...)), digits=decimals)
     start_vars_indices = rand(rng, 1:size(warmup, 1), min(sample_size, size(warmup, 1)))
     start_variables = warmup[start_vars_indices, :]
     samples_tree = COBREXA.sample_constraints(
@@ -567,21 +567,22 @@ function concordance_analysis(
         workers=workers,
         seed=rand(rng, UInt64),
         n_chains=1,
-        collect_iterations=[32]
+        collect_iterations=[32],
+        aggregate=aggregate,
+        aggregate_type=Vector{Float64}
     )
+    @info "First 5 samples collected" first_samples = collect(Iterators.take(samples_tree, 5))
     filter_config = FilterConfig(
-        coarse_sample_count=30, # Using default, can be exposed as parameter if needed
-        coarse_correlation_threshold=early_correlation_threshold,
-        correlation_threshold=correlation_threshold,
+        coarse_sample_count=coarse_sample_count,
+        coarse_cv_threshold=coarse_cv_threshold,
         cv_threshold=cv_threshold,
         cv_epsilon=tolerance,
-        max_correlation_pairs=2_000_000_000, # Default from filter.jl
-        max_cv_pairs=2_000_000_000, # Default from filter.jl
-        use_batching=true, # Assumed default
-        batch_size=1_000_000, # Default from filter.jl
-        use_threads=true, # Assumed default
-        filter=filter_vec
+        min_valid_samples=min_valid_samples,
+        use_threads=true,
+        chunk_size=1_000_000,
+        max_pairs_in_memory=1_000_000,
     )
+
     @info "type of samples_tree" typeof(samples_tree)
     @info "Generating candidate pairs via streaming filter..."
     filter_time = @elapsed candidate_priorities = streaming_filter(
@@ -669,6 +670,7 @@ function concordance_analysis(
         DataFrame(c1_idx=Int[], c2_idx=Int[], direction=Symbol[], lambda=Float64[])
 
     for ((c1_idx, c2_idx, direction), lambda) in stage_results["optimization_results"]
+        println(lambda)
         push!(lambda_df, (c1_idx, c2_idx, direction, lambda))
     end
 
