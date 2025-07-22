@@ -113,7 +113,7 @@ function streaming_filter(
         )
     else
         # Stream in chunks
-        @info "Processing in streaming chunks (large dataset)" chunk_size=config.chunk_size
+        @info "Processing in streaming chunks (large dataset)" chunk_size = config.chunk_size
         process_streaming_chunks(
             complexes, balanced_complexes, trivial_pairs, samples_tree,
             concordance_tracker, positive_complexes, negative_complexes,
@@ -121,9 +121,9 @@ function streaming_filter(
         )
     end
     stage23_time = time() - stage23_start
-    
-    @info "Stages 2 & 3 complete" final_pairs=length(priorities) time_sec=round(stage23_time, digits=2)
-    
+
+    @info "Stages 2 & 3 complete" final_pairs = length(priorities) time_sec = round(stage23_time, digits=2)
+
     return priorities
 end
 
@@ -141,7 +141,7 @@ function count_valid_pairs(complexes, balanced, trivial, concordance_tracker)
 end
 
 @inline function should_test_pair_indices(i::Int, j::Int, balanced, trivial, concordance_tracker)
-    i in balanced && j in balanced && return false
+    i in balanced || j in balanced && return false
     (i, j) in trivial && return false
     are_concordant(concordance_tracker, i, j) && return false
     is_non_concordant(concordance_tracker, i, j) && return false
@@ -226,8 +226,10 @@ function process_pair_stream(
     idx_to_id = concordance_tracker.idx_to_id
 
     if config.use_threads
+        @info "Using parallel processing with threads"
         process_pairs_parallel(pairs, samples_tree, idx_to_id, positive, negative, unrestricted, config)
     else
+        @info "Using serial processing"
         process_pairs_serial(pairs, samples_tree, idx_to_id, positive, negative, unrestricted, config)
     end
 end
@@ -284,13 +286,13 @@ function process_pairs_serial(
         push!(priorities, PairPriority(i, j, directions, cv_full, n_samples))
 
         if pair_count % 50_000 == 0
-            @info "Processing progress" pairs_processed=pair_count stage2_passed=stage2_passed stage3_passed=stage3_passed final_candidates=length(priorities)
+            @info "Processing progress" pairs_processed = pair_count stage2_passed = stage2_passed stage3_passed = stage3_passed final_candidates = length(priorities)
         end
     end
 
-    @info "Serial processing complete" total_pairs=pair_count stage2_passed=stage2_passed stage3_passed=stage3_passed final_pairs=length(priorities)
-    @info "Stage 2 (coarse filter) complete" candidates_after_coarse=stage2_passed
-    @info "Stage 3 (full analysis) complete" final_pairs=stage3_passed
+    @info "Serial processing complete" total_pairs = pair_count stage2_passed = stage2_passed stage3_passed = stage3_passed final_pairs = length(priorities)
+    @info "Stage 2 (coarse filter) complete" candidates_after_coarse = stage2_passed
+    @info "Stage 3 (full analysis) complete" final_pairs = stage3_passed
     return priorities
 end
 

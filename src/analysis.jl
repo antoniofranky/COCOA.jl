@@ -464,8 +464,7 @@ function concordance_analysis(
         settings=settings,
         output=ava_output_with_warmup,
         output_type=Tuple{Float64,Vector{Float64}},
-        workers=[D.myid()],
-        # workers=workers,
+        workers=workers,
     )
     # Collect AVA results into dictionaries first to ensure determinism,
     # then process the dictionaries in a sorted order.
@@ -566,7 +565,7 @@ function concordance_analysis(
         start_variables=start_variables,
         workers=workers,
         seed=rand(rng, UInt64),
-        n_chains=1,
+        n_chains=max(1, workers),
         collect_iterations=[32],
         aggregate=aggregate,
         aggregate_type=Vector{Float64}
@@ -670,7 +669,6 @@ function concordance_analysis(
         DataFrame(c1_idx=Int[], c2_idx=Int[], direction=Symbol[], lambda=Float64[])
 
     for ((c1_idx, c2_idx, direction), lambda) in stage_results["optimization_results"]
-        println(lambda)
         push!(lambda_df, (c1_idx, c2_idx, direction, lambda))
     end
 
