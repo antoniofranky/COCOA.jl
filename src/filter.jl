@@ -37,7 +37,7 @@ function FilterConfig(;
     coarse_sample_count::Int=20,
     coarse_cv_threshold::Float64=0.1,
     cv_threshold::Float64=0.01,
-    cv_epsilon::Float64=1e-8,
+    cv_epsilon::Float64=1e-15,
     min_valid_samples::Int=50,
     use_threads::Bool=true,
     chunk_size::Int=10_000,
@@ -91,8 +91,7 @@ function streaming_filter(
     trivial_pairs::Set{Tuple{Int,Int}},
     samples_tree::C.Tree{Vector{Float64}},
     concordance_tracker::ConcordanceTracker;
-    config::FilterConfig=FilterConfig(),
-    seed::Union{Int,Nothing}=42,
+    config::FilterConfig=FilterConfig()
 )
     @info "Starting memory-efficient CV filtering pipeline"
 
@@ -141,7 +140,9 @@ function count_valid_pairs(complexes, balanced, trivial, concordance_tracker)
 end
 
 @inline function should_test_pair_indices(i::Int, j::Int, balanced, trivial, concordance_tracker)
-    i in balanced || j in balanced && return false
+    if i in balanced || j in balanced
+        return false
+    end
     (i, j) in trivial && return false
     are_concordant(concordance_tracker, i, j) && return false
     is_non_concordant(concordance_tracker, i, j) && return false
@@ -359,11 +360,23 @@ function determine_directions(
 )::Set{Symbol}
     directions = Set{Symbol}()
 
-    if c2_idx in positive
+    # Check constraints on both complexes to determine valid directions
+    c1_positive = c1_idx in positive
+    c1_negative = c1_idx in negative
+    c2_positive = c2_idx in positive
+    c2_negative = c2_idx in negative
+
+    # If either complex is balanced, this should have been filtered out already
+    # Determine directions based on the most restrictive constraints
+    if c2_positive || c1_positive
         push!(directions, :positive)
-    elseif c2_idx in negative
+    end
+    if c2_negative || c1_negative
         push!(directions, :negative)
-    else
+    end
+
+    # If no specific constraints, test both directions
+    if isempty(directions)
         push!(directions, :positive)
         push!(directions, :negative)
     end

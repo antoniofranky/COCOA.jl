@@ -325,6 +325,7 @@ function process_concordance_batch(
     workers=workers,
     tolerance::Float64=1e-8
 )
+    # Convert indices to IDs for constraint lookup - this is the critical mapping step
     batch_pairs_with_ids = [(concordance_tracker.idx_to_id[c1_idx], concordance_tracker.idx_to_id[c2_idx], directions) for (c1_idx, c2_idx, directions) in batch_pairs]
 
     batch_results = screen_dual_optimization_model(
@@ -350,6 +351,10 @@ function process_concordance_batch(
             optimize!(om)
             max_val = termination_status(om) == OPTIMAL ? objective_value(om) : nothing
 
+            if min_val !== nothing && max_val !== nothing && abs(min_val) < 1e-6 && abs(max_val) < 1e-6
+                @info "Found zero lambda candidate" c1_id c2_id direction min_val max_val
+            end
+
             delete(om, c2_constraint)
             push!(pair_results, (direction, [min_val, max_val]))
         end
@@ -371,7 +376,7 @@ function process_concordance_batch(
             for (direction, test_results) in pair_results_by_dir
                 min_val, max_val = test_results
 
-                if min_val === nothing || max_val === nothing || !isapprox(min_val, max_val; atol=tolerance)
+                if min_val === nothing || max_val === nothing || round(min_val, digits=2) != round(max_val, digits=2)
                     all_concordant = false
                     break
                 else
@@ -415,7 +420,7 @@ function concordance_analysis(
     optimizer,
     settings=[],
     workers=D.workers(),
-    tolerance::Float64=1e-8,
+    tolerance::Float64=1e-2,
     coarse_cv_threshold::Float64=0.95,
     coarse_sample_count::Int=20,
     sample_size::Int=100,
@@ -484,12 +489,16 @@ function concordance_analysis(
 
     @info "AVA processing complete" n_complex_ranges = length(complex_ranges) ava_time_sec = round(ava_time, digits=2)
 
-    # Build the warmup points vector in a deterministic order from the dictionary
+    concordance_tracker = ConcordanceTracker(complex_ids)
+
+    # Build the warmup points vector in a deterministic order matching idx_to_id ordering
     warmup_points = Vector{Float64}[]
-    for cid in sort(collect(keys(warmup_fluxes)))
-        fluxes = warmup_fluxes[cid]
-        push!(warmup_points, fluxes[1]) # min_flux
-        push!(warmup_points, fluxes[2]) # max_flux
+    for cid in concordance_tracker.idx_to_id  # Use tracker ordering for consistency
+        if haskey(warmup_fluxes, cid)
+            fluxes = warmup_fluxes[cid]
+            push!(warmup_points, fluxes[1]) # min_flux
+            push!(warmup_points, fluxes[2]) # max_flux
+        end
     end
 
     warmup = if isempty(warmup_points)
@@ -503,29 +512,36 @@ function concordance_analysis(
         end
     end
 
-    concordance_tracker = ConcordanceTracker(complex_ids)
-
     balanced_complexes = Set{Int}()
     positive_complexes = Set{Int}()
     negative_complexes = Set{Int}()
     unrestricted_complexes = Set{Int}()
 
-    for cid in complex_ids
-        i = concordance_tracker.id_to_idx[cid]
+    # MATLAB-style balanced complex detection with tighter threshold
+    balanced_threshold = 1e-9
+
+    # Process complexes using proper concordance tracker indices
+    for cid in concordance_tracker.idx_to_id
+        idx = concordance_tracker.id_to_idx[cid]  # Use actual tracker index
 
         if haskey(complex_ranges, cid)
             min_val, max_val = complex_ranges[cid]
-            if abs(min_val) < tolerance && abs(max_val) < tolerance
-                push!(balanced_complexes, i)
-            elseif min_val >= -tolerance
-                push!(positive_complexes, i)
-            elseif max_val <= tolerance
-                push!(negative_complexes, i)
+
+            # MATLAB-style rounding to threshold precision
+            rounded_min = round(min_val / balanced_threshold) * balanced_threshold
+            rounded_max = round(max_val / balanced_threshold) * balanced_threshold
+
+            if rounded_min == 0.0 && rounded_max == 0.0
+                push!(balanced_complexes, idx)
+            elseif rounded_min >= 0.0
+                push!(positive_complexes, idx)
+            elseif rounded_max <= 0.0
+                push!(negative_complexes, idx)
             else
-                push!(unrestricted_complexes, i)
+                push!(unrestricted_complexes, idx)
             end
         else
-            push!(unrestricted_complexes, i)
+            push!(unrestricted_complexes, idx)
         end
     end
 
@@ -547,6 +563,7 @@ function concordance_analysis(
     end
     @info "Generating candidate pairs via coefficient of variance..."
 
+    # Use consistent ordering: build complexes_vector from tracker's idx_to_id  
     complexes_vector = [complexes[id] for id in concordance_tracker.idx_to_id]
     trivial_pairs_indices = Set(
         (concordance_tracker.id_to_idx[c1], concordance_tracker.id_to_idx[c2])
@@ -554,7 +571,7 @@ function concordance_analysis(
     )
 
     rng = StableRNG(seed)
-    decimals = max(0, -floor(Int, log10(tolerance)))
+    decimals = max(0, -floor(Int, log10(1e-9)))
     aggregate = rows -> round.(vec(hcat(rows...)), digits=decimals)
     start_vars_indices = rand(rng, 1:size(warmup, 1), min(sample_size, size(warmup, 1)))
     start_variables = warmup[start_vars_indices, :]
@@ -565,24 +582,23 @@ function concordance_analysis(
         start_variables=start_variables,
         workers=workers,
         seed=rand(rng, UInt64),
-        n_chains=max(1, workers),
+        n_chains=1,
         collect_iterations=[32],
         aggregate=aggregate,
         aggregate_type=Vector{Float64}
     )
-    @info "First 5 samples collected" first_samples = collect(Iterators.take(samples_tree, 5))
+    @debug "First 5 samples collected" first_samples = collect(Iterators.take(samples_tree, 5))
     filter_config = FilterConfig(
         coarse_sample_count=coarse_sample_count,
         coarse_cv_threshold=coarse_cv_threshold,
         cv_threshold=cv_threshold,
-        cv_epsilon=tolerance,
         min_valid_samples=min_valid_samples,
         use_threads=true,
         chunk_size=1_000_000,
         max_pairs_in_memory=1_000_000,
     )
 
-    @info "type of samples_tree" typeof(samples_tree)
+    @debug "type of samples_tree" typeof(samples_tree)
     @info "Generating candidate pairs via streaming filter..."
     filter_time = @elapsed candidate_priorities = streaming_filter(
         complexes_vector,
@@ -593,8 +609,7 @@ function concordance_analysis(
         trivial_pairs_indices,
         samples_tree, # Pass the collected samples
         concordance_tracker;
-        config=filter_config, # Pass the config object
-        seed=seed,
+        config=filter_config # Pass the config object
     )
 
     @info "Candidate pairs identified" n_pairs = length(candidate_priorities) filter_time_sec = round(filter_time, digits=2)
@@ -616,12 +631,13 @@ function concordance_analysis(
     @info "Building concordance modules" concordance_time_sec = round(concordance_time, digits=2)
     modules = extract_modules(concordance_tracker, balanced_complexes)
 
+    # Use concordance_tracker ordering as single source of truth for DataFrame
     complexes_df = DataFrame(
-        :complex_id => [c.id for c in values(complexes)],
-        :n_metabolites => [length(c.metabolites) for c in values(complexes)],
-        :is_balanced => [concordance_tracker.id_to_idx[c.id] in balanced_complexes for c in values(complexes)],
-        :is_trivially_balanced => [c.id in trivially_balanced for c in values(complexes)],
-        :module => [get_module_id(c.id, modules) for c in values(complexes)],
+        :complex_id => concordance_tracker.idx_to_id,
+        :n_metabolites => [length(complexes[cid].metabolites) for cid in concordance_tracker.idx_to_id],
+        :is_balanced => [concordance_tracker.id_to_idx[cid] in balanced_complexes for cid in concordance_tracker.idx_to_id],
+        :is_trivially_balanced => [cid in trivially_balanced for cid in concordance_tracker.idx_to_id],
+        :module => [get_module_id(cid, modules) for cid in concordance_tracker.idx_to_id],
     )
 
     if !isempty(complex_ranges) || !isempty(trivially_balanced)
@@ -629,14 +645,8 @@ function concordance_analysis(
         max_activities = Vector{Any}(undef, nrow(complexes_df))
         ava_confirms = Vector{Any}(undef, nrow(complexes_df))
 
-        # Create a mapping from complex_id to row index for efficient lookup
-        id_to_row = Dict(id => i for (i, id) in enumerate(complexes_df.complex_id))
-
-        for cid in sort(collect(keys(complexes)))
-            df_row_idx = get(id_to_row, cid, 0)
-            if df_row_idx == 0
-                continue
-            end
+        # Since DataFrame uses concordance_tracker ordering, row index = tracker index
+        for (df_row_idx, cid) in enumerate(concordance_tracker.idx_to_id)
 
             if haskey(complex_ranges, cid)
                 min_act, max_act = complex_ranges[cid]
