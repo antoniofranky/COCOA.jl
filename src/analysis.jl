@@ -36,6 +36,7 @@ function process_in_stages(
         "concordant_pairs" => Set{Tuple{Int,Int}}(),
         "non_concordant_pairs" => 0,
         "skipped_by_transitivity" => 0,
+        "timeout_pairs" => 0,
         "optimization_results" => Dict{Tuple{Int,Int,Symbol},Float64}()
     )
 
@@ -120,7 +121,12 @@ function process_in_stages(
         pairs_eliminated = 0
 
         for result in batch_results
-            c1_idx, c2_idx, direction, is_concordant, lambda = result
+            c1_idx, c2_idx, direction, is_concordant, lambda, has_timeout = result
+            
+            if has_timeout
+                stage_results["timeout_pairs"] += 1
+            end
+            
             if is_concordant
                 union_sets!(concordance_tracker, c1_idx, c2_idx)
                 push!(stage_results["concordant_pairs"], (c1_idx, c2_idx))
@@ -332,18 +338,26 @@ function process_concordance_batch(
             @objective(om, JuMP.MIN_SENSE, C.substitute(constraints.activities[c1_id].value, om[:x]))
 
             optimize!(om)
-            min_val = termination_status(om) == OPTIMAL ? objective_value(om) : nothing
+            min_status = termination_status(om)
+            min_val = min_status == OPTIMAL ? objective_value(om) : nothing
+            min_timeout = min_status == TIME_LIMIT
 
             JuMP.set_objective_sense(om, JuMP.MAX_SENSE)
             optimize!(om)
-            max_val = termination_status(om) == OPTIMAL ? objective_value(om) : nothing
+            max_status = termination_status(om)
+            max_val = max_status == OPTIMAL ? objective_value(om) : nothing
+            max_timeout = max_status == TIME_LIMIT
+
+            if min_timeout || max_timeout
+                @warn "Solver timeout on concordance test" c1_id c2_id direction min_timeout max_timeout
+            end
 
             if min_val !== nothing && max_val !== nothing && abs(min_val) < 1e-6 && abs(max_val) < 1e-6
                 @info "Found zero lambda candidate" c1_id c2_id direction min_val max_val
             end
 
             delete(om, c2_constraint)
-            push!(pair_results, (direction, [min_val, max_val]))
+            push!(pair_results, (direction, [min_val, max_val, min_timeout || max_timeout]))
         end
 
         return pair_results
@@ -356,12 +370,19 @@ function process_concordance_batch(
         all_concordant = true
         final_lambda = nothing
         concordant_directions = Set{Symbol}()
+        has_timeout = false
 
         if isempty(pair_results_by_dir)
             all_concordant = false
         else
             for (direction, test_results) in pair_results_by_dir
-                min_val, max_val = test_results
+                min_val = test_results[1]
+                max_val = test_results[2] 
+                timeout_occurred = test_results[3]
+                
+                if timeout_occurred === true
+                    has_timeout = true
+                end
 
                 if min_val === nothing || max_val === nothing || round(min_val, digits=2) != round(max_val, digits=2)
                     all_concordant = false
@@ -389,7 +410,7 @@ function process_concordance_batch(
             :both
         end
 
-        push!(final_results, (c1_idx, c2_idx, final_direction, all_concordant, all_concordant ? final_lambda : nothing))
+        push!(final_results, (c1_idx, c2_idx, final_direction, all_concordant, all_concordant ? final_lambda : nothing, has_timeout))
     end
 
     return final_results
@@ -416,7 +437,6 @@ function concordance_analysis(
     min_valid_samples::Int=10,
     seed::Union{Int,Nothing}=42,
     use_unidirectional_constraints::Bool=true,
-    filter::Union{Symbol,Vector{Symbol}}=[:cv, :cor],
     cv_threshold::Float64=0.01,
     use_threads::Bool=false,
     chunk_size_filter::Int=100_000,
@@ -424,7 +444,6 @@ function concordance_analysis(
     objective_bound=nothing
 )
     start_time = time()
-    filter_vec = isa(filter, Symbol) ? [filter] : filter
 
     model = if !isa(model, AbstractFBCModels.CanonicalModel.Model)
         @info "Converting model to CanonicalModel for optimal performance"
@@ -772,6 +791,7 @@ function concordance_analysis(
         "n_concordant_pairs" => length(stage_results["concordant_pairs"]) + length(trivial_pairs),
         "n_non_concordant_pairs" => stage_results["non_concordant_pairs"],
         "n_skipped_transitivity" => stage_results["skipped_by_transitivity"],
+        "n_timeout_pairs" => stage_results["timeout_pairs"],
         "n_modules" => length(modules),
         "stages_completed" => stage_results["stages_completed"],
         "elapsed_time" => elapsed,
