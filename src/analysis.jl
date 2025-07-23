@@ -8,20 +8,7 @@ This module contains:
 - Module extraction and result formatting
 """
 
-using AbstractFBCModels
-using COBREXA
 import COBREXA: worker_local_data, get_worker_local_data
-using DataFrames
-import Distributed as D
-using Statistics
-using Random
-using StableRNGs
-using JuMP
-using DocStringExtensions
-using ProgressMeter
-using LinearAlgebra
-
-import ConstraintTrees as C
 import Base.Iterators
 
 """
@@ -422,16 +409,19 @@ function concordance_analysis(
     workers=D.workers(),
     tolerance::Float64=1e-2,
     coarse_cv_threshold::Float64=0.95,
-    coarse_sample_count::Int=20,
+    coarse_sample_count::Int=100,
     sample_size::Int=100,
     stage_size::Int=1000,
     batch_size::Int=1000,
-    min_size_for_sharing::Int=1_000_000,
-    min_valid_samples::Int=0,
+    min_valid_samples::Int=10,
     seed::Union{Int,Nothing}=42,
     use_unidirectional_constraints::Bool=true,
     filter::Union{Symbol,Vector{Symbol}}=[:cv, :cor],
     cv_threshold::Float64=0.01,
+    use_threads::Bool=false,
+    chunk_size_filter::Int=100_000,
+    max_pairs_in_memory::Int=100_000,
+    objective_bound=nothing  # NEW: Optional objective constraint
 )
     start_time = time()
     filter_vec = isa(filter, Symbol) ? [filter] : filter
@@ -446,7 +436,32 @@ function concordance_analysis(
     @info "Starting concordance analysis" n_workers = length(workers) tolerance coarse_cv_threshold cv_threshold sample_size use_unidirectional_constraints batch_size stage_size
 
     constraints, complexes =
-        concordance_constraints(model; modifications, use_unidirectional_constraints, min_size_for_sharing, return_complexes=true)
+        concordance_constraints(model; modifications, use_unidirectional_constraints, return_complexes=true)
+    
+    # Add objective constraint if specified
+    if objective_bound !== nothing
+        @info "Adding objective constraint" bound_type=typeof(objective_bound)
+        
+        # Get optimal objective value first
+        objective_flux = COBREXA.optimized_values(
+            constraints.balance;
+            objective = constraints.balance.objective.value,
+            output = constraints.balance.objective,
+            optimizer,
+            settings,
+        )
+        
+        if objective_flux !== nothing
+            # Add objective bound constraint to limit feasible space
+            constraints = constraints * :objective_bound^C.Constraint(
+                constraints.balance.objective.value, 
+                objective_bound(objective_flux)
+            )
+            @info "Objective constraint added" optimal_value=objective_flux bound_value=objective_bound(objective_flux)
+        else
+            @warn "Could not determine optimal objective value, skipping objective constraint"
+        end
+    end
 
     n_complexes = length(complexes)
     complex_ids = sort(collect(keys(complexes)))
@@ -471,45 +486,40 @@ function concordance_analysis(
         output_type=Tuple{Float64,Vector{Float64}},
         workers=workers,
     )
-    # Collect AVA results into dictionaries first to ensure determinism,
-    # then process the dictionaries in a sorted order.
-    complex_ranges = Dict{Symbol,Tuple{Float64,Float64}}()
-    warmup_fluxes = Dict{Symbol,Vector{Vector{Float64}}}()
-    for (cid, result) in ava_results
-        if result !== nothing && length(result) == 2
-            min_res, max_res = result
-            if min_res !== nothing && max_res !== nothing
-                min_activity, min_flux = min_res
-                max_activity, max_flux = max_res
-                complex_ranges[cid] = (min_activity, max_activity)
-                warmup_fluxes[cid] = [min_flux, max_flux]
-            end
-        end
-    end
-
-    @info "AVA processing complete" n_complex_ranges = length(complex_ranges) ava_time_sec = round(ava_time, digits=2)
+    @info "AVA processing complete" ava_time_sec = round(ava_time, digits=2)
 
     concordance_tracker = ConcordanceTracker(complex_ids)
 
-    # Build the warmup points vector in a deterministic order matching idx_to_id ordering
-    warmup_points = Vector{Float64}[]
-    for cid in concordance_tracker.idx_to_id  # Use tracker ordering for consistency
-        if haskey(warmup_fluxes, cid)
-            fluxes = warmup_fluxes[cid]
-            push!(warmup_points, fluxes[1]) # min_flux
-            push!(warmup_points, fluxes[2]) # max_flux
+    # Memory-efficient: extract warmup matrix and ranges directly without intermediate storage
+    n_complexes = length(concordance_tracker.idx_to_id)
+    warmup_points = Vector{Vector{Float64}}()
+    complex_ranges = Vector{Union{Tuple{Float64,Float64},Nothing}}(undef, n_complexes)
+
+    for (i, cid) in enumerate(concordance_tracker.idx_to_id)
+        if haskey(ava_results, cid)
+            result = ava_results[cid]
+            if result !== nothing && length(result) == 2
+                min_res, max_res = result
+                if min_res !== nothing && max_res !== nothing
+                    min_activity, min_flux = min_res
+                    max_activity, max_flux = max_res
+                    complex_ranges[i] = (min_activity, max_activity)
+                    push!(warmup_points, min_flux, max_flux)
+                else
+                    complex_ranges[i] = nothing
+                end
+            else
+                complex_ranges[i] = nothing
+            end
+        else
+            complex_ranges[i] = nothing
         end
     end
 
     warmup = if isempty(warmup_points)
         Matrix{Float64}(undef, 0, 0)
     else
-        try
-            collect(transpose(reduce(hcat, warmup_points)))
-        catch e
-            @warn "Failed to create warmup matrix: $e. Using empty matrix."
-            Matrix{Float64}(undef, 0, 0)
-        end
+        reduce(hcat, warmup_points)'
     end
 
     balanced_complexes = Set{Int}()
@@ -521,11 +531,11 @@ function concordance_analysis(
     balanced_threshold = 1e-9
 
     # Process complexes using proper concordance tracker indices
-    for cid in concordance_tracker.idx_to_id
+    for (i, cid) in enumerate(concordance_tracker.idx_to_id)
         idx = concordance_tracker.id_to_idx[cid]  # Use actual tracker index
 
-        if haskey(complex_ranges, cid)
-            min_val, max_val = complex_ranges[cid]
+        if complex_ranges[i] !== nothing
+            min_val, max_val = complex_ranges[i]
 
             # MATLAB-style rounding to threshold precision
             rounded_min = round(min_val / balanced_threshold) * balanced_threshold
@@ -573,8 +583,92 @@ function concordance_analysis(
     rng = StableRNG(seed)
     decimals = max(0, -floor(Int, log10(1e-9)))
     aggregate = rows -> round.(vec(hcat(rows...)), digits=decimals)
-    start_vars_indices = rand(rng, 1:size(warmup, 1), min(sample_size, size(warmup, 1)))
-    start_variables = warmup[start_vars_indices, :]
+    @info "Sampling schedule"
+
+    # Sampling strategy for concordance analysis
+    # Formula: n_samples_collected = n_chains × n_starting_points × n_iterations_collected
+
+    # 1. Configure to produce exactly sample_size samples
+    n_chains = 1  # Single chain for precise control
+    n_iterations_to_collect = 1  # Single sample per starting point
+    n_starting_points = sample_size  # Exactly sample_size starting points for sample_size samples
+
+    # 2. Minimal burn-in since each starting point is already diverse
+    n_burnin = 500  # Short burn-in, diversity comes from different starting points
+    n_spacing = 1   # No spacing needed since each starting point is independent
+
+    # 3. Calculate expected total
+    expected_samples = n_chains * n_starting_points * n_iterations_to_collect
+
+    @info "Sampling configuration" n_chains n_starting_points n_iterations_to_collect n_burnin n_spacing target = sample_size expected = expected_samples warmup_size = size(warmup, 1)
+
+    # 4. Define single iteration to collect after burn-in
+    iterations_to_collect = [n_burnin]  # Single well-converged sample per starting point
+
+    # 5. Generate exactly sample_size starting points using stratified approach
+    # Distribute across strategies to ensure comprehensive coverage
+    n_extreme_points = min(sample_size ÷ 3, size(warmup, 1))  # 1/3 from extremes
+    n_center_points = min(1, sample_size - n_extreme_points)  # 1 center point if space allows
+    n_random_points = sample_size - n_extreme_points - n_center_points  # Rest as random combinations
+    
+    # Ensure we don't exceed sample_size
+    total_planned = n_extreme_points + n_center_points + n_random_points
+    if total_planned != sample_size
+        @warn "Starting point allocation mismatch" planned=total_planned target=sample_size
+        n_random_points = sample_size - n_extreme_points - n_center_points
+    end
+
+    start_variables_list = Vector{Float64}[]
+
+    # Strategy 1: Use extreme boundary points for maximum activity ranges
+    if n_extreme_points > 0 && !isempty(warmup)
+        # Select most diverse extreme points (max distance from each other)
+        extreme_indices = rand(rng, 1:size(warmup, 1), n_extreme_points)
+        for idx in extreme_indices
+            push!(start_variables_list, warmup[idx, :])
+        end
+    end
+
+    # Strategy 2: Use center point for balanced exploration
+    if n_center_points > 0 && !isempty(warmup)
+        # Create center point as average of all warmup points
+        center_point = vec(mean(warmup, dims=1))
+        push!(start_variables_list, center_point)
+    end
+
+    # Generate feasible random points as convex combinations of known feasible points
+    if n_random_points > 0 && size(warmup, 1) >= 2
+        for i in 1:n_random_points
+            # Use varying numbers of base points for different exploration depths
+            n_base_points = 2 + (i % 3)  # Alternate between 2, 3, 4 base points
+            n_base_points = min(n_base_points, size(warmup, 1))
+
+            # Select points for maximum diversity
+            base_indices = rand(rng, 1:size(warmup, 1), n_base_points)
+
+            # Generate weights for uniform interior exploration
+            weights = rand(rng, n_base_points)
+            weights ./= sum(weights)
+
+            # Create convex combination
+            random_flux = zeros(size(warmup, 2))
+            for (j, weight) in enumerate(weights)
+                random_flux .+= weight .* warmup[base_indices[j], :]
+            end
+
+            push!(start_variables_list, random_flux)
+        end
+    end
+
+    start_variables = if isempty(start_variables_list)
+        warmup  # Fallback to all warmup points
+    else
+        Matrix(reduce(hcat, start_variables_list)')  # Convert Adjoint to Matrix
+    end
+
+    @info "Starting point composition" extreme_points = n_extreme_points center_points = n_center_points random_combinations = n_random_points total = size(start_variables, 1)
+
+    # 6. Run the sampler with the corrected configuration
     samples_tree = COBREXA.sample_constraints(
         COBREXA.sample_chain_achr,
         constraints.balance;
@@ -582,20 +676,26 @@ function concordance_analysis(
         start_variables=start_variables,
         workers=workers,
         seed=rand(rng, UInt64),
-        n_chains=1,
-        collect_iterations=[32],
+        n_chains=n_chains,
+        collect_iterations=iterations_to_collect,
         aggregate=aggregate,
         aggregate_type=Vector{Float64}
     )
-    @debug "First 5 samples collected" first_samples = collect(Iterators.take(samples_tree, 5))
+
+    n_samples_collected = length(first(samples_tree)[2])
+    @info "Sampling complete." n_samples_collected
+    @info "First 5 samples collected" first_samples = collect(Iterators.take(samples_tree, 5))
+    @info "Number of samples per activity variable" n_samples = length(first(samples_tree)[2])
+
+    # Adjust filter config for high-quality sampling strategy
     filter_config = FilterConfig(
-        coarse_sample_count=coarse_sample_count,
+        coarse_sample_count=min(coarse_sample_count, expected_samples ÷ 2),  # Use half samples for coarse filter
         coarse_cv_threshold=coarse_cv_threshold,
         cv_threshold=cv_threshold,
-        min_valid_samples=min_valid_samples,
-        use_threads=true,
-        chunk_size=1_000_000,
-        max_pairs_in_memory=1_000_000,
+        min_valid_samples=min(min_valid_samples, max(2, expected_samples ÷ 4)),  # Adaptive minimum
+        use_threads=use_threads,
+        chunk_size=chunk_size_filter,
+        max_pairs_in_memory=max_pairs_in_memory,
     )
 
     @debug "type of samples_tree" typeof(samples_tree)
@@ -640,7 +740,7 @@ function concordance_analysis(
         :module => [get_module_id(cid, modules) for cid in concordance_tracker.idx_to_id],
     )
 
-    if !isempty(complex_ranges) || !isempty(trivially_balanced)
+    if any(x -> x !== nothing, complex_ranges) || !isempty(trivially_balanced)
         min_activities = Vector{Any}(undef, nrow(complexes_df))
         max_activities = Vector{Any}(undef, nrow(complexes_df))
         ava_confirms = Vector{Any}(undef, nrow(complexes_df))
@@ -648,14 +748,14 @@ function concordance_analysis(
         # Since DataFrame uses concordance_tracker ordering, row index = tracker index
         for (df_row_idx, cid) in enumerate(concordance_tracker.idx_to_id)
 
-            if haskey(complex_ranges, cid)
-                min_act, max_act = complex_ranges[cid]
+            if complex_ranges[df_row_idx] !== nothing
+                min_act, max_act = complex_ranges[df_row_idx]
                 min_activities[df_row_idx] = min_act
                 max_activities[df_row_idx] = max_act
                 if cid in trivially_balanced
                     ava_confirms[df_row_idx] = abs(min_act) < tolerance && abs(max_act) < tolerance
                 else
-                    ava_confirms[df_row_idx] = true
+                    ava_confirms[df_row_idx] = nothing
                 end
             else
                 min_activities[df_row_idx] = missing
@@ -669,16 +769,20 @@ function concordance_analysis(
         complexes_df.ava_confirms_balanced = ava_confirms
     end
 
+    # Sort modules for deterministic output
+    sorted_module_keys = sort(collect(keys(modules)))
     modules_df = DataFrame(
-        module_id=collect(String.(keys(modules))),
-        size=[length(m) for m in values(modules)],
-        complexes=[join(String.(m), ", ") for m in values(modules)],
+        module_id=String.(sorted_module_keys),
+        size=[length(modules[k]) for k in sorted_module_keys],
+        complexes=[join(sort(String.(modules[k])), ", ") for k in sorted_module_keys],
     )
 
     lambda_df =
         DataFrame(c1_idx=Int[], c2_idx=Int[], direction=Symbol[], lambda=Float64[])
 
-    for ((c1_idx, c2_idx, direction), lambda) in stage_results["optimization_results"]
+    # Sort lambda results for deterministic output
+    sorted_lambda_results = sort(collect(stage_results["optimization_results"]), by=x -> x[1])
+    for ((c1_idx, c2_idx, direction), lambda) in sorted_lambda_results
         push!(lambda_df, (c1_idx, c2_idx, direction, lambda))
     end
 

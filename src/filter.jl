@@ -4,13 +4,6 @@ filter.jl - Ultra memory-efficient CV filtering using OnlineStats.jl
 Streaming three-stage pipeline focused purely on CV computation.
 """
 
-using Statistics
-using Random
-using StableRNGs
-using COBREXA
-using DocStringExtensions
-using ProgressMeter
-import ConstraintTrees as C
 using Base.Threads
 using OnlineStats
 
@@ -121,7 +114,7 @@ function streaming_filter(
     end
     stage23_time = time() - stage23_start
 
-    @info "Stages 2 & 3 complete" final_pairs = length(priorities) time_sec = round(stage23_time, digits=2)
+    @info "Filtering complete" total_candidates = length(priorities) time_sec = round(stage23_time, digits=2)
 
     return priorities
 end
@@ -198,7 +191,7 @@ function process_streaming_chunks(
                     if length(all_priorities) > config.max_pairs_in_memory
                         sort!(all_priorities, by=p -> p.cv)
                         resize!(all_priorities, config.max_pairs_in_memory ÷ 2)
-                        @info "Pruned candidates" kept = length(all_priorities)
+                        @info "Memory pruning" kept_best = length(all_priorities)
                     end
                 end
             end
@@ -287,13 +280,11 @@ function process_pairs_serial(
         push!(priorities, PairPriority(i, j, directions, cv_full, n_samples))
 
         if pair_count % 50_000 == 0
-            @info "Processing progress" pairs_processed = pair_count stage2_passed = stage2_passed stage3_passed = stage3_passed final_candidates = length(priorities)
+            @info "Processing progress" pairs_tested = pair_count coarse_passed = stage2_passed cv_passed = stage3_passed candidates = length(priorities)
         end
     end
 
-    @info "Serial processing complete" total_pairs = pair_count stage2_passed = stage2_passed stage3_passed = stage3_passed final_pairs = length(priorities)
-    @info "Stage 2 (coarse filter) complete" candidates_after_coarse = stage2_passed
-    @info "Stage 3 (full analysis) complete" final_pairs = stage3_passed
+    @info "Serial processing complete" pairs_tested = pair_count coarse_passed = stage2_passed cv_passed = stage3_passed final_candidates = length(priorities)
     return priorities
 end
 

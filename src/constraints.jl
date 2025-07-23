@@ -8,12 +8,6 @@ This module contains:
 - Concordance test constraint building
 """
 
-using AbstractFBCModels
-using COBREXA
-using SparseArrays
-using Distributed
-using DocStringExtensions
-import ConstraintTrees as C
 
 
 
@@ -82,7 +76,9 @@ function concordance_constraints(
     modifications=Function[],
     interface=nothing,
     use_unidirectional_constraints::Bool=true,
-    min_size_for_sharing::Int=1_000_000
+    objective_bound=nothing,
+    optimizer=nothing,
+    settings=[],
 )
     if use_unidirectional_constraints
         constraints, split_indices = create_unidirectional_constraints(model)

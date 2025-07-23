@@ -46,22 +46,29 @@ For complete reproducibility, ensure:
 """
 module COCOA
 
+# Core dependencies used throughout the package
+# Use `using` for commonly used functions across multiple files
 using COBREXA
 using AbstractFBCModels
-using ConstraintTrees
+using DataFrames
 using SparseArrays
 using LinearAlgebra
-using Distributed
-using SharedArrays
-using DataFrames
 using Statistics
 using Random
 using StableRNGs
 using JuMP
-using DocStringExtensions
 using ProgressMeter
-using JLD2
-using HiGHS
+
+# Import with qualification for less commonly used or potentially conflicting names
+import ConstraintTrees as C
+import Distributed as D
+import SharedArrays
+import JLD2
+import HiGHS
+import Graphs
+
+# Macros require `using` - acceptable exception
+using DocStringExtensions
 
 # Include preprocessing modules
 include("preprocessing/ElementarySteps.jl")
@@ -74,11 +81,17 @@ include("data_structures.jl")
 include("constraints.jl")
 include("filter.jl")
 include("analysis.jl")
+include("kinetic_analysis.jl")
 
 
 # Re-export main functions
 export concordance_constraints, concordance_analysis
 export split_into_elementary_steps
 export prepare_model_for_concordance
+
+# Export kinetic analysis functions
+export identify_kinetic_modules, identify_concentration_robustness, kinetic_concordance_analysis
+export KineticModuleResults, ConcentrationRobustnessResults
+export save_kinetic_results, load_kinetic_results, save_robustness_results, load_robustness_results
 
 end # module COCOA
