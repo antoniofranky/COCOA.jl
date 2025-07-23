@@ -421,7 +421,7 @@ function concordance_analysis(
     use_threads::Bool=false,
     chunk_size_filter::Int=100_000,
     max_pairs_in_memory::Int=100_000,
-    objective_bound=nothing  # NEW: Optional objective constraint
+    objective_bound=nothing
 )
     start_time = time()
     filter_vec = isa(filter, Symbol) ? [filter] : filter
@@ -436,32 +436,7 @@ function concordance_analysis(
     @info "Starting concordance analysis" n_workers = length(workers) tolerance coarse_cv_threshold cv_threshold sample_size use_unidirectional_constraints batch_size stage_size
 
     constraints, complexes =
-        concordance_constraints(model; modifications, use_unidirectional_constraints, return_complexes=true)
-    
-    # Add objective constraint if specified
-    if objective_bound !== nothing
-        @info "Adding objective constraint" bound_type=typeof(objective_bound)
-        
-        # Get optimal objective value first
-        objective_flux = COBREXA.optimized_values(
-            constraints.balance;
-            objective = constraints.balance.objective.value,
-            output = constraints.balance.objective,
-            optimizer,
-            settings,
-        )
-        
-        if objective_flux !== nothing
-            # Add objective bound constraint to limit feasible space
-            constraints = constraints * :objective_bound^C.Constraint(
-                constraints.balance.objective.value, 
-                objective_bound(objective_flux)
-            )
-            @info "Objective constraint added" optimal_value=objective_flux bound_value=objective_bound(objective_flux)
-        else
-            @warn "Could not determine optimal objective value, skipping objective constraint"
-        end
-    end
+        concordance_constraints(model; modifications, use_unidirectional_constraints, objective_bound, optimizer, settings, return_complexes=true)
 
     n_complexes = length(complexes)
     complex_ids = sort(collect(keys(complexes)))
@@ -610,11 +585,11 @@ function concordance_analysis(
     n_extreme_points = min(sample_size ÷ 3, size(warmup, 1))  # 1/3 from extremes
     n_center_points = min(1, sample_size - n_extreme_points)  # 1 center point if space allows
     n_random_points = sample_size - n_extreme_points - n_center_points  # Rest as random combinations
-    
+
     # Ensure we don't exceed sample_size
     total_planned = n_extreme_points + n_center_points + n_random_points
     if total_planned != sample_size
-        @warn "Starting point allocation mismatch" planned=total_planned target=sample_size
+        @warn "Starting point allocation mismatch" planned = total_planned target = sample_size
         n_random_points = sample_size - n_extreme_points - n_center_points
     end
 

@@ -93,6 +93,37 @@ function concordance_constraints(
         constraints = mod(constraints)
     end
 
+    # Add objective constraint if specified
+    if objective_bound !== nothing
+        if optimizer === nothing
+            throw(ArgumentError("optimizer must be provided when using objective_bound"))
+        end
+        
+        # Validate objective_bound is callable
+        if !isa(objective_bound, Function)
+            throw(ArgumentError("objective_bound must be a function that takes optimal objective value and returns a constraint bound"))
+        end
+
+        # Get optimal objective value first
+        objective_flux = COBREXA.optimized_values(
+            constraints;
+            objective=constraints.objective.value,
+            output=constraints.objective,
+            optimizer,
+            settings,
+        )
+
+        if objective_flux !== nothing
+            # Add objective bound constraint to limit feasible space
+            constraints = constraints * :objective_bound^C.Constraint(
+                constraints.objective.value,
+                objective_bound(objective_flux)
+            )
+        else
+            @warn "Could not determine optimal objective value, skipping objective constraint"
+        end
+    end
+
     balance_constraints = constraints
 
     # Build complex activities using C.sum pattern and extract complexes
