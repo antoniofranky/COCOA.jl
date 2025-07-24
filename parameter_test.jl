@@ -220,7 +220,8 @@ function run_test_configuration(config, model)
     start_time = time()
     
     # Initialize timing and memory tracking
-    gc_start = GC.gc_num()
+    gc_start = Base.gc_num()
+    memory_start = Base.gc_bytes()
     
     try
         # Run concordance analysis
@@ -241,11 +242,12 @@ function run_test_configuration(config, model)
         )
         
         elapsed_time = time() - start_time
-        gc_end = GC.gc_num()
+        gc_end = Base.gc_num()
+        memory_end = Base.gc_bytes()
         
         # Calculate memory and GC metrics
-        memory_allocated = (gc_end.allocd - gc_start.allocd) / 1024^3  # GB
-        gc_time = (gc_end.total_time - gc_start.total_time) / 1e9  # seconds
+        memory_allocated = (memory_end - memory_start) / 1024^3  # GB
+        total_gc_time = (gc_end.total_time - gc_start.total_time) / 1e9  # seconds
         
         # Extract key metrics from results
         test_results = Dict(
@@ -254,7 +256,7 @@ function run_test_configuration(config, model)
             "success" => true,
             "elapsed_time" => elapsed_time,
             "memory_allocated_gb" => memory_allocated,
-            "gc_time_sec" => gc_time,
+            "gc_time_sec" => total_gc_time,
             "n_complexes" => results.stats["n_complexes"],
             "n_balanced" => results.stats["n_balanced"],
             "n_candidate_pairs" => results.stats["n_candidate_pairs"],
