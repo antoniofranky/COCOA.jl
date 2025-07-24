@@ -12,7 +12,7 @@ using SBMLFBCModels, AbstractFBCModels, COBREXA, JLD2, DataFrames, JSON, CSV, Da
 @everywhere using COCOA, HiGHS
 
 # Configuration for parameter testing
-const MODEL_PATH = "/work/schaffran1/toolbox/models/Sc"  # ~1000 complex model
+const MODEL_PATH = "/work/schaffran1/toolbox/models/Schizosaccharomyces_pombe.xml"  # ~1000 complex model
 const RESULTS_DIR = "/work/schaffran1/parameter_test_results"
 const SEED = 42  # Fixed seed for reproducibility
 
