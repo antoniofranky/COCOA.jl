@@ -36,7 +36,7 @@ mkdir -p "${RESULTS_BASE}/logs"
 
 # Define paths
 COCOA_DIR="/work/schaffran1/COCOA.jl"
-SCRIPT_DIR="/home/anton/master-thesis"
+SCRIPT_DIR="//work/schaffran1/COCOA.jl"
 PARAMETER_SCRIPT="${SCRIPT_DIR}/parameter_test.jl"
 LOG_FILE="${RESULTS_BASE}/logs/parameter_test_${TIMESTAMP}.log"
 
