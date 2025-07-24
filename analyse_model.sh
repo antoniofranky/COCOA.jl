@@ -18,5 +18,23 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 HEAP_SIZE_GB=$(( 60 * 8 / 10 ))
 HEAP_SIZE="${HEAP_SIZE_GB}G"
 
+# HPC optimizations for Julia
+export JULIA_NUM_THREADS="auto"
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export JULIA_GC_MEASURE_MALLOC=0
+export JULIA_GC_PARALLEL_COLLECT=1
 
-time julia --project=/work/schaffran1/COCOA.jl -p 31 -t auto --heap-size-hint $HEAP_SIZE /work/schaffran1/COCOA.jl/analyse_model.jl
+# Julia optimization flags
+JULIA_OPTS="--project=/work/schaffran1/COCOA.jl"
+JULIA_OPTS="$JULIA_OPTS -p 31 -t auto"
+JULIA_OPTS="$JULIA_OPTS --heap-size-hint=$HEAP_SIZE"
+JULIA_OPTS="$JULIA_OPTS --startup-file=no"
+JULIA_OPTS="$JULIA_OPTS --history-file=no"
+JULIA_OPTS="$JULIA_OPTS --compiled-modules=yes"
+JULIA_OPTS="$JULIA_OPTS --optimize=2"
+JULIA_OPTS="$JULIA_OPTS --check-bounds=no"
+
+cd /work/schaffran1/COCOA.jl
+time julia $JULIA_OPTS analyse_model.jl
