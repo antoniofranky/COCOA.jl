@@ -122,11 +122,11 @@ function process_in_stages(
 
         for result in batch_results
             c1_idx, c2_idx, direction, is_concordant, lambda, has_timeout = result
-            
+
             if has_timeout
                 stage_results["timeout_pairs"] += 1
             end
-            
+
             if is_concordant
                 union_sets!(concordance_tracker, c1_idx, c2_idx)
                 push!(stage_results["concordant_pairs"], (c1_idx, c2_idx))
@@ -377,9 +377,9 @@ function process_concordance_batch(
         else
             for (direction, test_results) in pair_results_by_dir
                 min_val = test_results[1]
-                max_val = test_results[2] 
+                max_val = test_results[2]
                 timeout_occurred = test_results[3]
-                
+
                 if timeout_occurred === true
                     has_timeout = true
                 end
@@ -430,7 +430,7 @@ function concordance_analysis(
     workers=D.workers(),
     tolerance::Float64=1e-2,
     coarse_cv_threshold::Float64=0.95,
-    coarse_sample_count::Int=100,
+    coarse_sample_count::Int=20,
     sample_size::Int=100,
     stage_size::Int=1000,
     batch_size::Int=1000,

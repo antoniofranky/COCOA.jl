@@ -15,8 +15,8 @@
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 # Calculate heap size hint (80% of available memory)
-HEAP_SIZE_GB=$(( 128 * 8 / 10 ))
+HEAP_SIZE_GB=$(( 60 * 8 / 10 ))
 HEAP_SIZE="${HEAP_SIZE_GB}G"
-cd /work/schaffran1/COCOA.jl
 
-time julia -p 31 -t auto --heap-size-hint $HEAP_SIZE analyse_model.jl
+
+time julia --project=/work/schaffran1/COCOA.jl -p 31 -t auto --heap-size-hint $HEAP_SIZE /work/schaffran1/COCOA.jl/analyse_model.jl

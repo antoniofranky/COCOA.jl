@@ -1,12 +1,6 @@
 using Pkg
 using Distributed
 
-# Activate and instantiate the environment on all workers
-@everywhere begin
-    import Pkg
-    Pkg.activate("/work/schaffran1/COCOA.jl")
-    Pkg.instantiate()
-end
 using SBMLFBCModels, AbstractFBCModels, COBREXA, JLD2
 @everywhere using COCOA, HiGHS
 # --- Hardcoded paths ---
@@ -15,6 +9,14 @@ model_path = "/work/schaffran1/COCOA.jl/test/e_coli_core_splt_prpd.xml"         
 output_path = "/work/schaffran1/concordance_results_e_coli_core_splt_prpd.jld2"    # Change as needed
 
 # Load the model
+highs_settings = [
+    COBREXA.set_optimizer_attribute("primal_feasibility_tolerance", 1e-10),
+    COBREXA.set_optimizer_attribute("dual_feasibility_tolerance", 1e-10),
+    COBREXA.set_optimizer_attribute("mip_feasibility_tolerance", 1e-10),
+    COBREXA.set_optimizer_attribute("random_seed", 42),
+    COBREXA.set_optimizer_attribute("time_limit", 240.0),  # 1 minute per optimization
+    COBREXA.set_optimizer_attribute("presolve", "on"),
+]
 test_model = COBREXA.load_model(test_model_path)
 model = COBREXA.load_model(model_path)
 res = concordance_analysis(
@@ -23,9 +25,10 @@ res = concordance_analysis(
     sample_size=10,                # Adjust as needed
     stage_size=1000,
     batch_size=1000,
-    seed=42
+    seed=42,
+    settings=highs_settings
 )
-
+#model = COCOA.split_into_elementary_steps(model)
 # Run concordance analysis and capture timing
 results = COCOA.concordance_analysis(
     model;
