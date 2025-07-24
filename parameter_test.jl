@@ -8,7 +8,7 @@ using Distributed
     Pkg.instantiate()
 end
 
-using SBMLFBCModels, AbstractFBCModels, COBREXA, JLD2, DataFrames, JSON, CSV, Dates
+using SBMLFBCModels, AbstractFBCModels, COBREXA, JLD2, DataFrames, JSON, CSV, Dates, Statistics
 @everywhere using COCOA, HiGHS
 
 # Configuration for parameter testing
