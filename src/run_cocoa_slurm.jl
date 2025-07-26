@@ -131,12 +131,8 @@ function parse_commandline()
         help = "Correlation threshold for concordance"
         arg_type = Float64
         default = 0.95
-        "--stage-size"
-        help = "Stage size for concordance analysis"
-        arg_type = Int
-        default = 500
         "--batch-size"
-        help = "Batch size within each stage (for memory management)"
+        help = "Batch size for concordance analysis"
         arg_type = Int
         default = 100
         "--early-correlation-threshold"
@@ -308,7 +304,6 @@ function main()
         println("\nAnalysis parameters:")
         println("  Workers: $(nworkers())")
         println("  Optimizer: $(args["optimizer"])")
-        println("  Stage size: $(args["stage-size"])")
         println("  Batch size: $(args["batch-size"])")
         println("  Sample size: $(args["sample-size"])")
         println("  Correlation threshold: $(args["correlation-threshold"])")
@@ -324,7 +319,6 @@ function main()
             sample_size=args["sample-size"],
             correlation_threshold=args["correlation-threshold"],
             early_correlation_threshold=args["early-correlation-threshold"],
-            stage_size=args["stage-size"],
             batch_size=args["batch-size"],
             seed=args["seed"],
             tolerance=args["threshold"]
@@ -395,7 +389,6 @@ function main()
             sample_size=args["sample-size"],
             correlation_threshold=args["correlation-threshold"],
             early_correlation_threshold=args["early-correlation-threshold"],
-            stage_size=args["stage-size"],
             batch_size=args["batch-size"],
             seed=args["seed"],
             tolerance=args["threshold"]

@@ -23,7 +23,6 @@ res = concordance_analysis(
     test_model;
     optimizer=HiGHS.Optimizer,
     sample_size=10,                # Adjust as needed
-    stage_size=1000,
     batch_size=1000,
     seed=42,
     settings=highs_settings
@@ -34,7 +33,6 @@ results = COCOA.concordance_analysis(
     model;
     optimizer=HiGHS.Optimizer,
     sample_size=100,                # Adjust as needed
-    stage_size=1000,
     batch_size=1000,
     seed=42
 )

@@ -98,7 +98,7 @@ function concordance_constraints(
         if optimizer === nothing
             throw(ArgumentError("optimizer must be provided when using objective_bound"))
         end
-        
+
         # Validate objective_bound is callable
         if !isa(objective_bound, Function)
             throw(ArgumentError("objective_bound must be a function that takes optimal objective value and returns a constraint bound"))
@@ -336,7 +336,7 @@ function create_bounds_constraints(
         end
 
     else # direction == :negative
-        t_neg = :t_neg^C.variable(bound=C.Between(1e-12, 1e9))
+        t_neg = :t_neg^C.variable(bound=C.Between(-1e9, -1e-12))
         base_constraints += (:charnes_cooper^t_neg)
         t_var = base_constraints.charnes_cooper[:t_neg].value
 

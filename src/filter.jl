@@ -276,7 +276,7 @@ function process_pairs_serial(
         stage3_passed += 1
 
         # Passed all filters
-        directions = determine_directions(i, j, positive, negative, unrestricted)
+        directions = determine_directions(j, positive, negative)
         push!(priorities, PairPriority(i, j, directions, cv_full, n_samples))
 
         if pair_count % 50_000 == 0
@@ -337,7 +337,7 @@ function process_pairs_parallel(
         cv_full = compute_cv(ratio_stat, config.cv_epsilon)
         cv_full > config.cv_threshold && continue
 
-        directions = determine_directions(i, j, positive, negative, unrestricted)
+        directions = determine_directions(j, positive, negative)
         push!(thread_results[tid], PairPriority(i, j, directions, cv_full, n_samples))
     end
 
@@ -345,30 +345,24 @@ function process_pairs_parallel(
     return vcat(thread_results...)
 end
 
-function determine_directions(
-    c1_idx::Int, c2_idx::Int,
-    positive::Set{Int}, negative::Set{Int}, unrestricted::Set{Int}
+function determine_directions(c2_idx::Int,
+    positive::Set{Int}, negative::Set{Int}
 )::Set{Symbol}
     directions = Set{Symbol}()
 
     # Check constraints on both complexes to determine valid directions
-    c1_positive = c1_idx in positive
-    c1_negative = c1_idx in negative
     c2_positive = c2_idx in positive
     c2_negative = c2_idx in negative
 
-    # If either complex is balanced, this should have been filtered out already
-    # Determine directions based on the most restrictive constraints
-    if c2_positive || c1_positive
+    # Positive direction test: set c2 = +1
+    # Only feasible if c2 can achieve positive values (not constrained to negative only)
+    if !c2_negative
         push!(directions, :positive)
-    end
-    if c2_negative || c1_negative
-        push!(directions, :negative)
     end
 
-    # If no specific constraints, test both directions
-    if isempty(directions)
-        push!(directions, :positive)
+    # Negative direction test: set c2 = -1  
+    # Only feasible if c2 can achieve negative values (not constrained to positive only)
+    if !c2_positive
         push!(directions, :negative)
     end
 

@@ -2,8 +2,8 @@
 Main analysis algorithms for COCOA.
 
 This module contains:
-- Staged processing with transitivity optimization
-- Concordance batch processing
+- Batch processing with transitivity optimization
+- Concordance analysis using unified batch_size parameter
 - Main concordance analysis function
 - Module extraction and result formatting
 """
@@ -14,11 +14,11 @@ import Base.Iterators
 """
 $(TYPEDSIGNATURES)
 
-Process concordance analysis in stages.
+Process concordance analysis in batches.
 When concordant pairs are found, remaining pairs involving those complexes are prioritized.
 This exploits the clustering tendency of concordant complexes to dramatically improve efficiency.
 """
-function process_in_stages(
+function process_in_batches(
     constraints::C.ConstraintTree,
     complexes::Dict{Symbol,MetabolicComplex},
     candidate_priorities::Vector{PairPriority},
@@ -26,16 +26,16 @@ function process_in_stages(
     optimizer,
     settings=[],
     workers=workers,
-    stage_size::Int=500,
-    batch_size::Int=100,
-    tolerance::Float64=1e-8
+    batch_size::Int=50,
+    tolerance::Float64=1e-2
 )
-    stage_results = Dict{String,Any}(
-        "stages_completed" => 0,
+    batch_results = Dict{String,Any}(
+        "batches_completed" => 0,
         "pairs_processed" => 0,
         "concordant_pairs" => Set{Tuple{Int,Int}}(),
         "non_concordant_pairs" => 0,
         "skipped_by_transitivity" => 0,
+        "transitive_pairs" => 0,
         "timeout_pairs" => 0,
         "optimization_results" => Dict{Tuple{Int,Int,Symbol},Float64}()
     )
@@ -45,7 +45,7 @@ function process_in_stages(
 
     remaining_pairs = [(p.c1_idx, p.c2_idx, p.directions) for p in sorted_pairs]
 
-    stage_count = 0
+    batch_count = 0
     total_pairs = length(remaining_pairs)
     processed_pairs = 0
     all_concordant_complexes = Set{Symbol}()
@@ -64,98 +64,83 @@ function process_in_stages(
     prioritized_count = 0
 
     while !isempty(remaining_pairs)
-        stage_count += 1
+        batch_count += 1
 
         if isa(concordance_tracker, ConcordanceTracker)
             clear_module_cache!(concordance_tracker)
         end
 
-        @debug "Starting stage $stage_count" remaining = length(remaining_pairs)
+        @debug "Starting batch $batch_count" remaining = length(remaining_pairs)
 
         filtered_pairs, skipped_count = filter_transitive_pairs(
             remaining_pairs,
             concordance_tracker
         )
-        stage_results["skipped_by_transitivity"] += skipped_count
+        batch_results["skipped_by_transitivity"] += skipped_count
 
         if isempty(filtered_pairs)
             @debug "No more pairs to process after transitivity filtering"
             break
         end
 
-        stage_size_actual = min(stage_size, length(filtered_pairs))
-        stage_pairs = filtered_pairs[1:stage_size_actual]
-        remaining_pairs = filtered_pairs[(stage_size_actual+1):end]
+        batch_size_actual = min(batch_size, length(filtered_pairs))
+        batch_pairs = filtered_pairs[1:batch_size_actual]
+        remaining_pairs = filtered_pairs[(batch_size_actual+1):end]
 
-        @debug "Processing stage $stage_count" pairs = length(stage_pairs) batch_size
+        @debug "Processing batch $batch_count" pairs = length(batch_pairs)
 
-        all_batch_results = []
-        n_batches = ceil(Int, length(stage_pairs) / batch_size)
+        current_batch_results = process_concordance_batch(
+            constraints, batch_pairs, concordance_tracker;
+            optimizer=optimizer,
+            settings=settings,
+            workers=workers,
+            tolerance=tolerance
+        )
 
-        for batch_idx in 1:n_batches
-            start_idx = (batch_idx - 1) * batch_size + 1
-            end_idx = min(batch_idx * batch_size, length(stage_pairs))
-            batch_pairs = stage_pairs[start_idx:end_idx]
-
-            @debug "Processing batch $batch_idx/$n_batches" batch_pairs = length(batch_pairs)
-
-            batch_results = process_concordance_batch(
-                constraints, batch_pairs, concordance_tracker;
-                optimizer=optimizer,
-                settings=settings,
-                workers=workers,
-                tolerance=tolerance
-            )
-
-            append!(all_batch_results, batch_results)
-        end
-
-        batch_results = all_batch_results
-
-        processed_pairs += length(stage_pairs)
-        ProgressMeter.update!(prog, processed_pairs)
+        processed_pairs += length(batch_pairs)
 
         newly_concordant = Vector{Tuple{Symbol,Symbol}}()
-        stage_concordant_count = 0
-        stage_prioritized_count = 0
+        batch_concordant_count = 0
+        batch_prioritized_count = 0
         pairs_eliminated = 0
 
-        for result in batch_results
+        for result in current_batch_results
             c1_idx, c2_idx, direction, is_concordant, lambda, has_timeout = result
 
             if has_timeout
-                stage_results["timeout_pairs"] += 1
+                batch_results["timeout_pairs"] += 1
             end
 
             if is_concordant
                 union_sets!(concordance_tracker, c1_idx, c2_idx)
-                push!(stage_results["concordant_pairs"], (c1_idx, c2_idx))
+                push!(batch_results["concordant_pairs"], (c1_idx, c2_idx))
                 push!(newly_concordant, (concordance_tracker.idx_to_id[c1_idx], concordance_tracker.idx_to_id[c2_idx]))
-                stage_concordant_count += 1
+                batch_concordant_count += 1
 
                 if !isnothing(lambda)
-                    stage_results["optimization_results"][(c1_idx, c2_idx, direction)] = lambda
+                    batch_results["optimization_results"][(c1_idx, c2_idx, direction)] = lambda
                 end
             else
                 add_non_concordant!(concordance_tracker, c1_idx, c2_idx)
-                stage_results["non_concordant_pairs"] += 1
+                batch_results["non_concordant_pairs"] += 1
             end
         end
 
-        concordant_count = length(stage_results["concordant_pairs"])
+        concordant_count = length(batch_results["concordant_pairs"])
 
-        if stage_concordant_count > 0
+        if batch_concordant_count > 0
             prev_num_pairs = length(remaining_pairs)
-            remaining_pairs = apply_transitivity_elimination(
+            remaining_pairs, transitive_count = apply_transitivity_elimination(
                 remaining_pairs,
                 newly_concordant,
                 concordance_tracker
             )
             pairs_eliminated = prev_num_pairs - length(remaining_pairs)
             eliminated_count += pairs_eliminated
+            batch_results["transitive_pairs"] += transitive_count
         end
 
-        if stage_concordant_count >= 1
+        if batch_concordant_count >= 1
             for (c1_id, c2_id) in newly_concordant
                 push!(all_concordant_complexes, c1_id, c2_id)
             end
@@ -168,22 +153,22 @@ function process_in_stages(
 
             for (c1_idx, c2_idx, _) in remaining_pairs
                 if (concordance_tracker.idx_to_id[c1_idx] in all_concordant_complexes) || (concordance_tracker.idx_to_id[c2_idx] in all_concordant_complexes)
-                    stage_prioritized_count += 1
+                    batch_prioritized_count += 1
                 end
             end
-            prioritized_count = stage_prioritized_count
+            prioritized_count = batch_prioritized_count
         end
 
-        stage_results["pairs_processed"] += length(stage_pairs)
-        stage_results["stages_completed"] = stage_count
+        batch_results["pairs_processed"] += length(batch_pairs)
+        batch_results["batches_completed"] = batch_count
 
-        @debug "Stage $stage_count complete" new_concordant = stage_concordant_count
+        @debug "Batch $batch_count complete" new_concordant = batch_concordant_count
 
         ProgressMeter.update!(prog, processed_pairs;
             showvalues=[
-                (:concordant, concordant_count),
-                (:eliminated, eliminated_count),
-                (:prioritized, prioritized_count)
+                (:computed, concordant_count),
+                (:transitive, batch_results["transitive_pairs"]),
+                (:eliminated, eliminated_count)
             ]
         )
     end
@@ -191,12 +176,12 @@ function process_in_stages(
     ProgressMeter.finish!(prog)
 
     @info "Concordance testing complete" (
-        total_stages=stage_count,
-        total_concordant_pairs=length(stage_results["concordant_pairs"]),
+        total_batches=batch_count,
+        total_concordant_pairs=length(batch_results["concordant_pairs"]),
         total_concordant_complexes=length(all_concordant_complexes)
     )
 
-    return stage_results
+    return batch_results
 end
 
 """
@@ -284,12 +269,20 @@ function apply_transitivity_elimination(
     concordance_tracker::ConcordanceTracker
 )
     if isempty(newly_concordant)
-        return remaining_pairs
+        return remaining_pairs, 0
     end
 
+    # Count pairs that are now concordant through transitivity
+    transitive_concordant_count = 0
     filtered_pairs = filter(remaining_pairs) do (c1_idx, c2_idx, directions)
-        !are_concordant(concordance_tracker, c1_idx, c2_idx) &&
-            !is_non_concordant(concordance_tracker, c1_idx, c2_idx)
+        if are_concordant(concordance_tracker, c1_idx, c2_idx)
+            transitive_concordant_count += 1
+            return false
+        elseif is_non_concordant(concordance_tracker, c1_idx, c2_idx)
+            return false
+        else
+            return true
+        end
     end
 
     eliminated_count = length(remaining_pairs) - length(filtered_pairs)
@@ -297,11 +290,12 @@ function apply_transitivity_elimination(
     if eliminated_count > 0
         @debug "Transitivity elimination" (
             pairs_eliminated=eliminated_count,
+            transitive_concordant=transitive_concordant_count,
             remaining_pairs=length(filtered_pairs)
         )
     end
 
-    return filtered_pairs
+    return filtered_pairs, transitive_concordant_count
 end
 
 """
@@ -316,51 +310,123 @@ function process_concordance_batch(
     optimizer,
     settings=[],
     workers=workers,
-    tolerance::Float64=1e-8
+    tolerance::Float64=1e-2
 )
-    # Convert indices to IDs for constraint lookup - this is the critical mapping step
-    batch_pairs_with_ids = [(concordance_tracker.idx_to_id[c1_idx], concordance_tracker.idx_to_id[c2_idx], directions) for (c1_idx, c2_idx, directions) in batch_pairs]
+    # Create COBREXA-style test array with direction multipliers
+    test_array = []
+    for (c1_idx, c2_idx, directions) in batch_pairs
+        c1_id, c2_id = concordance_tracker.idx_to_id[c1_idx], concordance_tracker.idx_to_id[c2_idx]
+        for direction in directions
+            target_value = direction == :positive ? 1.0 : -1.0
+            # Add both MIN (-1) and MAX (+1) tests
+            push!(test_array, (c1_id, c2_id, direction, target_value, -1))  # MIN test
+            push!(test_array, (c1_id, c2_id, direction, target_value, +1))  # MAX test
+        end
+    end
 
-    batch_results = screen_dual_optimization_model(
+    # Process using pure COBREXA pattern
+    optimization_results = screen_dual_optimization_model(
         constraints,
-        batch_pairs_with_ids;
+        test_array;
         optimizer=optimizer,
         settings=settings,
         workers=workers
-    ) do models_cache, (c1_id, c2_id, directions)
-        pair_results = []
+    ) do models_cache, (c1_id, c2_id, direction, target_value, dir_multiplier)
 
-        for direction in directions
-            om = direction == :positive ? models_cache.positive : models_cache.negative
-            target_value = direction == :positive ? 1.0 : -1.0
-            c2_expr = C.substitute(constraints.activities[c2_id].value, om[:x])
-            c2_constraint = @constraint(om, c2_expr == target_value)
-            @objective(om, JuMP.MIN_SENSE, C.substitute(constraints.activities[c1_id].value, om[:x]))
+        om = direction == :positive ? models_cache.positive : models_cache.negative
 
-            optimize!(om)
-            min_status = termination_status(om)
-            min_val = min_status == OPTIMAL ? objective_value(om) : nothing
-            min_timeout = min_status == TIME_LIMIT
+        # Set c2 constraint
+        c2_constraint = @constraint(om, c2_constraint,
+            C.substitute(constraints.activities[c2_id].value, om[:x]) == target_value)
 
-            JuMP.set_objective_sense(om, JuMP.MAX_SENSE)
-            optimize!(om)
-            max_status = termination_status(om)
-            max_val = max_status == OPTIMAL ? objective_value(om) : nothing
-            max_timeout = max_status == TIME_LIMIT
+        # COBREXA style: Always maximize, use direction multiplier in the expression
+        @objective(om, JuMP.MAX_SENSE,
+            C.substitute(dir_multiplier * constraints.activities[c1_id].value, om[:x]))
 
-            if min_timeout || max_timeout
-                @warn "Solver timeout on concordance test" c1_id c2_id direction min_timeout max_timeout
+        optimize!(om)
+        status = termination_status(om)
+
+        # Handle different termination statuses according to JuMP best practices
+        raw_value = if status in (OPTIMAL, LOCALLY_SOLVED)
+            # Solution is acceptable
+            if is_solved_and_feasible(om)
+                objective_value(om)
+            else
+                @debug "Model solved but solution not feasible" c1_id c2_id direction status
+                nothing
             end
-
-            if min_val !== nothing && max_val !== nothing && abs(min_val) < 1e-6 && abs(max_val) < 1e-6
-                @info "Found zero lambda candidate" c1_id c2_id direction min_val max_val
-            end
-
-            delete(om, c2_constraint)
-            push!(pair_results, (direction, [min_val, max_val, min_timeout || max_timeout]))
+        elseif status == INFEASIBLE
+            # Problem has no feasible solution - this is expected for some concordance tests
+            @warn "Optimization infeasible" c1_id c2_id direction
+            nothing
+        elseif status == DUAL_INFEASIBLE
+            # Problem may be unbounded
+            @warn "Dual infeasible (possibly unbounded)" c1_id c2_id direction
+            nothing
+        elseif status == TIME_LIMIT
+            # Solver hit time limit
+            @warn "Solver time limit reached" c1_id c2_id direction
+            nothing
+        else
+            # Other errors (OTHER_ERROR, NUMERICAL_ERROR, etc.)
+            @warn "Solver error" c1_id c2_id direction status
+            nothing
         end
 
-        return pair_results
+        # Convert back: if we maximized -f(x), negate result to get min f(x)
+        actual_value = dir_multiplier == -1 ? (raw_value !== nothing ? -raw_value : nothing) : raw_value
+
+        delete(om, c2_constraint)
+        JuMP.unregister(om, :c2_constraint)
+
+        return (c1_id, c2_id, direction, dir_multiplier, actual_value, status == TIME_LIMIT)
+    end
+
+    # Group results back into (min_val, max_val) pairs per direction
+    batch_results = []
+    result_dict = Dict{Tuple{Any,Any,Symbol},Dict{Int,Any}}()
+
+    # Organize results by (c1_id, c2_id, direction)
+    for result in optimization_results
+        c1_id, c2_id, direction, dir_multiplier, actual_value, timeout = result
+        key = (c1_id, c2_id, direction)
+        if !haskey(result_dict, key)
+            result_dict[key] = Dict{Int,Any}()
+        end
+        result_dict[key][dir_multiplier] = (actual_value, timeout)
+    end
+
+    # Convert back to original format grouped by (c1_id, c2_id)
+    pair_results_dict = Dict{Tuple{Any,Any},Vector{Tuple{Symbol,Vector{Any}}}}()
+
+    for ((c1_id, c2_id, direction), minmax_results) in result_dict
+        key = (c1_id, c2_id)
+        if !haskey(pair_results_dict, key)
+            pair_results_dict[key] = []
+        end
+
+        min_result = get(minmax_results, -1, (nothing, false))
+        max_result = get(minmax_results, +1, (nothing, false))
+
+        min_val, min_timeout = min_result
+        max_val, max_timeout = max_result
+
+        if min_timeout || max_timeout
+            @warn "Solver timeout on concordance test" c1_id c2_id direction min_timeout max_timeout
+        end
+
+        if min_val !== nothing && max_val !== nothing && abs(min_val) < 1e-6 && abs(max_val) < 1e-6
+            @info "Found zero lambda candidate" c1_id c2_id direction min_val max_val
+        end
+
+        push!(pair_results_dict[key], (direction, [min_val, max_val, min_timeout || max_timeout]))
+    end
+
+    # Convert to the expected batch_results format
+    for (c1_idx, c2_idx, _) in batch_pairs
+        c1_id, c2_id = concordance_tracker.idx_to_id[c1_idx], concordance_tracker.idx_to_id[c2_idx]
+        pair_results = get(pair_results_dict, (c1_id, c2_id), [])
+        push!(batch_results, pair_results)
     end
 
     final_results = []
@@ -431,8 +497,7 @@ function concordance_analysis(
     tolerance::Float64=1e-2,
     coarse_sample_count::Int=20,
     sample_size::Int=100,
-    stage_size::Int=1000,
-    batch_size::Int=1000,
+    batch_size::Int=50,
     min_valid_samples::Int=10,
     seed::Union{Int,Nothing}=42,
     use_unidirectional_constraints::Bool=true,
@@ -452,7 +517,7 @@ function concordance_analysis(
         model
     end
 
-    @info "Starting concordance analysis" n_workers = length(workers) tolerance coarse_cv_threshold cv_threshold sample_size use_unidirectional_constraints batch_size stage_size
+    @info "Starting concordance analysis" n_workers = length(workers) tolerance coarse_cv_threshold cv_threshold sample_size use_unidirectional_constraints batch_size
 
     constraints, complexes =
         concordance_constraints(model; modifications, use_unidirectional_constraints, objective_bound, optimizer, settings, return_complexes=true)
@@ -708,8 +773,8 @@ function concordance_analysis(
 
     @info "Candidate pairs identified" n_pairs = length(candidate_priorities) filter_time_sec = round(filter_time, digits=2)
 
-    @info "Processing concordance tests in stages"
-    concordance_time = @elapsed stage_results = process_in_stages(
+    @info "Processing concordance tests in batches"
+    concordance_time = @elapsed batch_results = process_in_batches(
         constraints,
         complexes,
         candidate_priorities,
@@ -717,7 +782,6 @@ function concordance_analysis(
         optimizer=optimizer,
         settings=settings,
         workers=workers,
-        stage_size=stage_size,
         batch_size=batch_size,
         tolerance,
     )
@@ -727,7 +791,7 @@ function concordance_analysis(
 
     # Use concordance_tracker ordering as single source of truth for DataFrame
     complexes_df = DataFrame(
-        :complex_id => concordance_tracker.idx_to_id,
+        :id => concordance_tracker.idx_to_id,
         :n_metabolites => [length(complexes[cid].metabolites) for cid in concordance_tracker.idx_to_id],
         :is_balanced => [concordance_tracker.id_to_idx[cid] in balanced_complexes for cid in concordance_tracker.idx_to_id],
         :is_trivially_balanced => [cid in trivially_balanced for cid in concordance_tracker.idx_to_id],
@@ -775,7 +839,7 @@ function concordance_analysis(
         DataFrame(c1_idx=Int[], c2_idx=Int[], direction=Symbol[], lambda=Float64[])
 
     # Sort lambda results for deterministic output
-    sorted_lambda_results = sort(collect(stage_results["optimization_results"]), by=x -> x[1])
+    sorted_lambda_results = sort(collect(batch_results["optimization_results"]), by=x -> x[1])
     for ((c1_idx, c2_idx, direction), lambda) in sorted_lambda_results
         push!(lambda_df, (c1_idx, c2_idx, direction, lambda))
     end
@@ -788,12 +852,14 @@ function concordance_analysis(
         "n_trivially_balanced" => length(trivially_balanced),
         "n_trivial_pairs" => length(trivial_pairs),
         "n_candidate_pairs" => length(candidate_priorities),
-        "n_concordant_pairs" => length(stage_results["concordant_pairs"]) + length(trivial_pairs),
-        "n_non_concordant_pairs" => stage_results["non_concordant_pairs"],
-        "n_skipped_transitivity" => stage_results["skipped_by_transitivity"],
-        "n_timeout_pairs" => stage_results["timeout_pairs"],
+        "n_computed_pairs" => length(batch_results["concordant_pairs"]),
+        "n_transitive_pairs" => batch_results["transitive_pairs"],
+        "n_concordant_pairs" => length(batch_results["concordant_pairs"]) + batch_results["transitive_pairs"] + length(trivial_pairs),
+        "n_non_concordant_pairs" => batch_results["non_concordant_pairs"],
+        "n_skipped_transitivity" => batch_results["skipped_by_transitivity"],
+        "n_timeout_pairs" => batch_results["timeout_pairs"],
         "n_modules" => length(modules),
-        "stages_completed" => stage_results["stages_completed"],
+        "batches_completed" => batch_results["batches_completed"],
         "elapsed_time" => elapsed,
     )
 
