@@ -140,10 +140,24 @@ function extract_network_matrices(model)
     Y_matrix = SparseArrays.sparse(Y_rows, Y_cols, Y_vals, n_metabolites, n_complexes)
     A_matrix = SparseArrays.sparse(A_rows, A_cols, A_vals, n_complexes, n_reactions)
     
-    # Create index mappings
-    complex_to_idx = Dict(complexes[i] => i for i in eachindex(complexes))
-    metabolite_to_idx = Dict(metabolites[i] => i for i in eachindex(metabolites))
-    reaction_to_idx = Dict(reactions[i] => i for i in eachindex(reactions))
+    # Create index mappings with pre-allocated sizes
+    complex_to_idx = Dict{String,Int}()
+    sizehint!(complex_to_idx, n_complexes)
+    @inbounds for i in eachindex(complexes)
+        complex_to_idx[complexes[i]] = i
+    end
+    
+    metabolite_to_idx = Dict{String,Int}()
+    sizehint!(metabolite_to_idx, n_metabolites)
+    @inbounds for i in eachindex(metabolites)
+        metabolite_to_idx[metabolites[i]] = i
+    end
+    
+    reaction_to_idx = Dict{String,Int}()
+    sizehint!(reaction_to_idx, n_reactions)
+    @inbounds for i in eachindex(reactions)
+        reaction_to_idx[reactions[i]] = i
+    end
     
     return (
         Y_matrix = Y_matrix,
