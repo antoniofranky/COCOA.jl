@@ -17,6 +17,10 @@ $(TYPEDSIGNATURES)
 Process concordance analysis in batches.
 When concordant pairs are found, remaining pairs involving those complexes are prioritized.
 This exploits the clustering tendency of concordant complexes to dramatically improve efficiency.
+
+When `use_transitivity=false`, transitivity filtering and elimination are disabled, 
+which forces testing of all candidate pairs regardless of already known concordant relationships.
+Trivially concordant pairs are still automatically recognized and don't need explicit testing.
 """
 function process_in_batches(
     constraints::C.ConstraintTree,
@@ -27,7 +31,8 @@ function process_in_batches(
     settings=[],
     workers=workers,
     batch_size::Int=50,
-    tolerance::Float64=1e-2
+    tolerance::Float64=1e-2,
+    use_transitivity::Bool=true
 )
     batch_results = Dict{String,Any}(
         "batches_completed" => 0,
@@ -72,14 +77,18 @@ function process_in_batches(
 
         @debug "Starting batch $(batch_count)" remaining = length(remaining_pairs)
 
-        filtered_pairs, skipped_count = filter_transitive_pairs(
-            remaining_pairs,
-            concordance_tracker
-        )
-        batch_results["skipped_by_transitivity"] += skipped_count
+        if use_transitivity
+            filtered_pairs, skipped_count = filter_transitive_pairs(
+                remaining_pairs,
+                concordance_tracker
+            )
+            batch_results["skipped_by_transitivity"] += skipped_count
+        else
+            filtered_pairs = remaining_pairs
+            skipped_count = 0
+        end
 
         if isempty(filtered_pairs)
-            @debug "No more pairs to process after transitivity filtering"
             break
         end
 
@@ -87,15 +96,18 @@ function process_in_batches(
         batch_pairs = filtered_pairs[1:batch_size_actual]
         remaining_pairs = filtered_pairs[(batch_size_actual+1):end]
 
-        @debug "Processing batch $(batch_count)" pairs = length(batch_pairs)
-
-        current_batch_results = process_concordance_batch(
-            constraints, batch_pairs, concordance_tracker;
-            optimizer=optimizer,
-            settings=settings,
-            workers=workers,
-            tolerance=tolerance
-        )
+        current_batch_results = try
+            process_concordance_batch(
+                constraints, batch_pairs, concordance_tracker;
+                optimizer=optimizer,
+                settings=settings,
+                workers=workers,
+                tolerance=tolerance
+            )
+        catch e
+            @warn "Error processing batch $(batch_count)" error=string(e)
+            continue
+        end
 
         processed_pairs += length(batch_pairs)
 
@@ -104,6 +116,9 @@ function process_in_batches(
         batch_prioritized_count = 0
         pairs_eliminated = 0
 
+        # Cache idx_to_id for better performance
+        idx_to_id = concordance_tracker.idx_to_id
+        
         for result in current_batch_results
             c1_idx, c2_idx, direction, is_concordant, lambda, has_timeout = result
 
@@ -114,7 +129,7 @@ function process_in_batches(
             if is_concordant
                 union_sets!(concordance_tracker, c1_idx, c2_idx)
                 push!(batch_results["concordant_pairs"], (c1_idx, c2_idx))
-                push!(newly_concordant, (concordance_tracker.idx_to_id[c1_idx], concordance_tracker.idx_to_id[c2_idx]))
+                push!(newly_concordant, (idx_to_id[c1_idx], idx_to_id[c2_idx]))
                 batch_concordant_count += 1
 
                 if !isnothing(lambda)
@@ -128,7 +143,7 @@ function process_in_batches(
 
         concordant_count = length(batch_results["concordant_pairs"])
 
-        if batch_concordant_count > 0
+        if batch_concordant_count > 0 && use_transitivity
             prev_num_pairs = length(remaining_pairs)
             remaining_pairs, transitive_count = apply_transitivity_elimination(
                 remaining_pairs,
@@ -152,7 +167,7 @@ function process_in_batches(
             )
 
             for (c1_idx, c2_idx, _) in remaining_pairs
-                if (concordance_tracker.idx_to_id[c1_idx] in all_concordant_complexes) || (concordance_tracker.idx_to_id[c2_idx] in all_concordant_complexes)
+                if (idx_to_id[c1_idx] in all_concordant_complexes) || (idx_to_id[c2_idx] in all_concordant_complexes)
                     batch_prioritized_count += 1
                 end
             end
@@ -232,12 +247,19 @@ function reprioritize_by_concordant_complexes(
         return remaining_pairs
     end
 
+    # Pre-allocate with size hints for better performance
+    n_pairs = length(remaining_pairs)
     priority_pairs = Vector{Tuple{Int,Int,Set{Symbol}}}()
     regular_pairs = Vector{Tuple{Int,Int,Set{Symbol}}}()
+    sizehint!(priority_pairs, n_pairs ÷ 2)  # Estimate
+    sizehint!(regular_pairs, n_pairs ÷ 2)   # Estimate
+
+    # Cache the idx_to_id lookups to avoid repeated dictionary access
+    idx_to_id = concordance_tracker.idx_to_id
 
     for (c1_idx, c2_idx, directions) in remaining_pairs
-        c1_id = concordance_tracker.idx_to_id[c1_idx]
-        c2_id = concordance_tracker.idx_to_id[c2_idx]
+        c1_id = idx_to_id[c1_idx]
+        c2_id = idx_to_id[c2_idx]
 
         if c1_id in concordant_complexes || c2_id in concordant_complexes
             push!(priority_pairs, (c1_idx, c2_idx, directions))
@@ -301,6 +323,59 @@ end
 """
 $(TYPEDSIGNATURES)
 
+Helper function to process optimization results into the expected format.
+"""
+function process_optimization_results(optimization_results, batch_pairs, concordance_tracker)
+    # Group results by (c1_id, c2_id, direction) - use concrete types
+    result_dict = Dict{Tuple{Symbol,Symbol,Symbol},Dict{Int,Tuple{Union{Float64,Nothing},Bool}}}()
+    
+    for result in optimization_results
+        c1_id, c2_id, direction, dir_multiplier, actual_value, timeout = result
+        key = (c1_id, c2_id, direction)
+        if !haskey(result_dict, key)
+            result_dict[key] = Dict{Int,Tuple{Union{Float64,Nothing},Bool}}()
+        end
+        result_dict[key][dir_multiplier] = (actual_value, timeout)
+    end
+    
+    # Convert to pair format - use concrete types
+    pair_results_dict = Dict{Tuple{Symbol,Symbol},Vector{Tuple{Symbol,Tuple{Union{Float64,Nothing},Union{Float64,Nothing},Bool}}}}()
+    
+    for ((c1_id, c2_id, direction), minmax_results) in result_dict
+        key = (c1_id, c2_id)
+        if !haskey(pair_results_dict, key)
+            pair_results_dict[key] = Tuple{Symbol,Tuple{Union{Float64,Nothing},Union{Float64,Nothing},Bool}}[]
+        end
+        
+        min_result = get(minmax_results, -1, (nothing, false))
+        max_result = get(minmax_results, +1, (nothing, false))
+        min_val, min_timeout = min_result
+        max_val, max_timeout = max_result
+        
+        if min_timeout || max_timeout
+            @warn "Solver timeout" c1_id c2_id direction
+        end
+        
+        push!(pair_results_dict[key], (direction, (min_val, max_val, min_timeout || max_timeout)))
+    end
+    
+    # Pre-allocate results array
+    batch_results = Vector{Vector{Tuple{Symbol,Tuple{Union{Float64,Nothing},Union{Float64,Nothing},Bool}}}}(undef, length(batch_pairs))
+    
+    # Cache idx_to_id for better performance
+    idx_to_id = concordance_tracker.idx_to_id
+    
+    for (i, (c1_idx, c2_idx, _)) in enumerate(batch_pairs)
+        c1_id, c2_id = idx_to_id[c1_idx], idx_to_id[c2_idx]
+        batch_results[i] = get(pair_results_dict, (c1_id, c2_id), Tuple{Symbol,Tuple{Union{Float64,Nothing},Union{Float64,Nothing},Bool}}[])
+    end
+    
+    return batch_results
+end
+
+"""
+$(TYPEDSIGNATURES)
+
 Process a batch of concordance tests using ConstraintTrees templated approach with parallel batch processing.
 """
 function process_concordance_batch(
@@ -317,109 +392,46 @@ function process_concordance_batch(
     for (c1_idx, c2_idx, directions) in batch_pairs
         c1_id, c2_id = concordance_tracker.idx_to_id[c1_idx], concordance_tracker.idx_to_id[c2_idx]
         for direction in directions
-            target_value = direction == :positive ? 1.0 : 1.0
             # Add both MIN (-1) and MAX (+1) tests
-            push!(test_array, (c1_id, c2_id, direction, target_value, -1))  # MIN test
-            push!(test_array, (c1_id, c2_id, direction, target_value, +1))  # MAX test
+            push!(test_array, (c1_id, c2_id, direction, -1))  # MIN test
+            push!(test_array, (c1_id, c2_id, direction, +1))  # MAX test
         end
     end
 
     # Process using pure COBREXA pattern
     optimization_results = screen_dual_optimization_model(
-        (models_cache, (c1_id, c2_id, direction, target_value, dir_multiplier)) -> begin
-
+        (models_cache, (c1_id, c2_id, direction, dir_multiplier)) -> begin
             om = direction == :positive ? models_cache.positive : models_cache.negative
-
-            # DEBUG: Track optimization details  
-            opt_num = models_cache.optimization_count[]
-            n_vars_before = JuMP.num_variables(om)
-            n_constraints_before = length(JuMP.all_constraints(om, include_variable_in_set_constraints=false))
-
-            # Set c2 constraint
-            c2_constraint = @constraint(om, c2_constraint,
-                C.substitute(constraints.activities[c2_id].value, om[:x]) == target_value)
-
-            # COBREXA style: Always maximize, use direction multiplier in the expression
-            @objective(om, JuMP.MAX_SENSE,
-                C.substitute(dir_multiplier * constraints.activities[c1_id].value, om[:x]))
-
-            # DEBUG: Check model state after constraint/objective addition
-            n_vars_after = JuMP.num_variables(om)
-            n_constraints_after = length(JuMP.all_constraints(om, include_variable_in_set_constraints=false))
-
-            optimize!(om)
-            status = termination_status(om)
-
-            # DEBUG: Log details for problematic cases
-            if status ∉ (OPTIMAL, LOCALLY_SOLVED)
-                # Get solver name for debugging comparison between GLPK and HiGHS
-                solver_name = string(typeof(JuMP.backend(om).optimizer))
-                @info "OPTIMIZATION FAILED" optimization = opt_num c1_id c2_id direction target_value dir_multiplier status solver = solver_name vars_before = n_vars_before vars_after = n_vars_after constraints_before = n_constraints_before constraints_after = n_constraints_after
-
-                # Check if this same pair works with the other solver by testing feasibility
-                try
-                    # Create a simple feasibility test model
-                    test_model = copy(om)
-                    # Need to set optimizer on copied model since it's not automatically copied
-                    JuMP.set_optimizer(test_model, optimizer)
-                    # Apply settings to the copied model
-                    for s in [COBREXA.configuration.default_solver_settings; settings]
-                        s(test_model)
-                    end
-                    # Remove objective to test pure feasibility
-                    @objective(test_model, JuMP.FEASIBILITY_SENSE, 0)
-                    optimize!(test_model)
-                    feasible_status = termination_status(test_model)
-                    @info "FEASIBILITY TEST" pair = "$(c1_id) vs $(c2_id)" direction = direction feasible_status = feasible_status solver = solver_name
-
-                    # If feasibility test passes but optimization failed, log this discrepancy
-                    if feasible_status == JuMP.OPTIMAL && status == JuMP.INFEASIBLE
-                        @warn "SOLVER INCONSISTENCY DETECTED" pair = "$(c1_id) vs $(c2_id)" direction = direction optimization_status = status feasibility_status = feasible_status solver = solver_name optimization_num = opt_num
-                    end
-                catch e
-                    @info "FEASIBILITY TEST FAILED" pair = "$(c1_id) vs $(c2_id)" error = "$(e)" solver = solver_name
-                end
-            end
-
-            # Handle different termination statuses according to JuMP best practices
-            raw_value = if status in (OPTIMAL, LOCALLY_SOLVED)
-                # Solution is acceptable
-                if is_solved_and_feasible(om)
+            
+            try
+                # Set c2 constraint to 1.0 and optimize c1
+                c2_constraint = @constraint(om, c2_constraint,
+                    C.substitute(constraints.activities[c2_id].value, om[:x]) == 1.0)
+                
+                @objective(om, JuMP.MAX_SENSE,
+                    C.substitute(dir_multiplier * constraints.activities[c1_id].value, om[:x]))
+                
+                optimize!(om)
+                
+                # Get result
+                raw_value = if termination_status(om) in (OPTIMAL, LOCALLY_SOLVED) && is_solved_and_feasible(om)
                     objective_value(om)
                 else
-                    @debug "Model solved but solution not feasible" c1_id c2_id direction status
                     nothing
                 end
-            elseif status == INFEASIBLE
-                # Problem has no feasible solution - this is expected for some concordance tests
-                solver_name = string(typeof(JuMP.backend(om).optimizer))
-                @info "Optimization infeasible (expected)" c1_id c2_id direction solver = solver_name optimization = opt_num
-                nothing
-            elseif status == DUAL_INFEASIBLE
-                # Problem may be unbounded
-                solver_name = string(typeof(JuMP.backend(om).optimizer))
-                @warn "Dual infeasible (possibly unbounded)" c1_id c2_id direction solver = solver_name optimization = opt_num
-                nothing
-            elseif status == TIME_LIMIT
-                # Solver hit time limit
-                solver_name = string(typeof(JuMP.backend(om).optimizer))
-                @warn "Solver time limit reached" c1_id c2_id direction solver = solver_name optimization = opt_num
-                nothing
-            else
-                # Other errors (OTHER_ERROR, NUMERICAL_ERROR, etc.)
-                solver_name = string(typeof(JuMP.backend(om).optimizer))
-                @warn "Solver error" c1_id c2_id direction status solver = solver_name optimization = opt_num
-                nothing
+                
+                # Convert back: if we maximized -f(x), negate result to get min f(x)
+                actual_value = dir_multiplier == -1 ? (raw_value !== nothing ? -raw_value : nothing) : raw_value
+                
+                # Cleanup
+                delete(om, c2_constraint)
+                JuMP.unregister(om, :c2_constraint)
+                
+                return (c1_id, c2_id, direction, dir_multiplier, actual_value, termination_status(om) == TIME_LIMIT)
+            catch e
+                @warn "Optimization error" c1_id c2_id direction error=string(e)
+                return (c1_id, c2_id, direction, dir_multiplier, nothing, false)
             end
-
-            # Convert back: if we maximized -f(x), negate result to get min f(x)
-            actual_value = dir_multiplier == -1 ? (raw_value !== nothing ? -raw_value : nothing) : raw_value
-
-            delete(om, c2_constraint)
-            JuMP.unregister(om, :c2_constraint)
-
-            # DEBUG: Return additional debugging info
-            return (c1_id, c2_id, direction, dir_multiplier, actual_value, status == TIME_LIMIT, status, opt_num)
         end,
         constraints,
         test_array;
@@ -428,52 +440,8 @@ function process_concordance_batch(
         workers=workers
     )
 
-    # Group results back into (min_val, max_val) pairs per direction
-    batch_results = []
-    result_dict = Dict{Tuple{Any,Any,Symbol},Dict{Int,Any}}()
-
-    # Organize results by (c1_id, c2_id, direction)
-    for result in optimization_results
-        c1_id, c2_id, direction, dir_multiplier, actual_value, timeout = result
-        key = (c1_id, c2_id, direction)
-        if !haskey(result_dict, key)
-            result_dict[key] = Dict{Int,Any}()
-        end
-        result_dict[key][dir_multiplier] = (actual_value, timeout)
-    end
-
-    # Convert back to original format grouped by (c1_id, c2_id)
-    pair_results_dict = Dict{Tuple{Any,Any},Vector{Tuple{Symbol,Vector{Any}}}}()
-
-    for ((c1_id, c2_id, direction), minmax_results) in result_dict
-        key = (c1_id, c2_id)
-        if !haskey(pair_results_dict, key)
-            pair_results_dict[key] = []
-        end
-
-        min_result = get(minmax_results, -1, (nothing, false))
-        max_result = get(minmax_results, +1, (nothing, false))
-
-        min_val, min_timeout = min_result
-        max_val, max_timeout = max_result
-
-        if min_timeout || max_timeout
-            @warn "Solver timeout on concordance test" c1_id c2_id direction min_timeout max_timeout
-        end
-
-        if min_val !== nothing && max_val !== nothing && abs(min_val) < 1e-6 && abs(max_val) < 1e-6
-            @info "Found zero lambda candidate" c1_id c2_id direction min_val max_val
-        end
-
-        push!(pair_results_dict[key], (direction, [min_val, max_val, min_timeout || max_timeout]))
-    end
-
-    # Convert to the expected batch_results format
-    for (c1_idx, c2_idx, _) in batch_pairs
-        c1_id, c2_id = concordance_tracker.idx_to_id[c1_idx], concordance_tracker.idx_to_id[c2_idx]
-        pair_results = get(pair_results_dict, (c1_id, c2_id), [])
-        push!(batch_results, pair_results)
-    end
+    # Process results into final format
+    batch_results = process_optimization_results(optimization_results, batch_pairs, concordance_tracker)
 
     final_results = []
     for (i, pair_results_by_dir) in enumerate(batch_results)
@@ -552,7 +520,8 @@ function concordance_analysis(
     use_threads::Bool=false,
     chunk_size_filter::Int=100_000,
     max_pairs_in_memory::Int=100_000,
-    objective_bound=nothing
+    objective_bound=nothing,
+    use_transitivity::Bool=true
 )
     start_time = time()
 
@@ -624,7 +593,14 @@ function concordance_analysis(
     warmup = if isempty(warmup_points)
         Matrix{Float64}(undef, 0, 0)
     else
-        reduce(hcat, warmup_points)'
+        # Build matrix directly without transpose - more efficient
+        n_points = length(warmup_points)
+        n_vars = length(warmup_points[1])
+        warmup_matrix = Matrix{Float64}(undef, n_points, n_vars)
+        for (i, point) in enumerate(warmup_points)
+            warmup_matrix[i, :] = point
+        end
+        warmup_matrix
     end
 
     balanced_complexes = Set{Int}()
@@ -642,7 +618,7 @@ function concordance_analysis(
         if complex_ranges[i] !== nothing
             min_val, max_val = complex_ranges[i]
 
-            # MATLAB-style rounding to threshold precision
+            # MATLAB-style rounding to threshold precision - use more efficient operations
             rounded_min = round(min_val / balanced_threshold) * balanced_threshold
             rounded_max = round(max_val / balanced_threshold) * balanced_threshold
 
@@ -723,7 +699,9 @@ function concordance_analysis(
         n_random_points = sample_size - n_extreme_points - n_center_points
     end
 
-    start_variables_list = Vector{Float64}[]
+    # Pre-allocate start_variables_list with known size
+    start_variables_list = Vector{Vector{Float64}}()
+    sizehint!(start_variables_list, sample_size)
 
     # Strategy 1: Use extreme boundary points for maximum activity ranges
     if n_extreme_points > 0 && !isempty(warmup)
@@ -743,6 +721,9 @@ function concordance_analysis(
 
     # Generate feasible random points as convex combinations of known feasible points
     if n_random_points > 0 && size(warmup, 1) >= 2
+        # Pre-allocate weights vector to reuse
+        weights = Vector{Float64}(undef, 4)  # max n_base_points is 4
+        
         for i in 1:n_random_points
             # Use varying numbers of base points for different exploration depths
             n_base_points = 2 + (i % 3)  # Alternate between 2, 3, 4 base points
@@ -752,10 +733,11 @@ function concordance_analysis(
             base_indices = rand(rng, 1:size(warmup, 1), n_base_points)
 
             # Generate weights for uniform interior exploration
-            weights = rand(rng, n_base_points)
+            resize!(weights, n_base_points)
+            rand!(rng, weights)
             weights ./= sum(weights)
 
-            # Create convex combination
+            # Create convex combination - pre-allocate and reuse
             random_flux = zeros(size(warmup, 2))
             for (j, weight) in enumerate(weights)
                 random_flux .+= weight .* warmup[base_indices[j], :]
@@ -768,7 +750,14 @@ function concordance_analysis(
     start_variables = if isempty(start_variables_list)
         warmup  # Fallback to all warmup points
     else
-        Matrix(reduce(hcat, start_variables_list)')  # Convert Adjoint to Matrix
+        # Build matrix directly without transpose - more efficient
+        n_points = length(start_variables_list)
+        n_vars = length(start_variables_list[1])
+        start_matrix = Matrix{Float64}(undef, n_points, n_vars)
+        for (i, point) in enumerate(start_variables_list)
+            start_matrix[i, :] = point
+        end
+        start_matrix
     end
 
     @info "Starting point composition" extreme_points = n_extreme_points center_points = n_center_points random_combinations = n_random_points total = size(start_variables, 1)
@@ -830,6 +819,7 @@ function concordance_analysis(
         workers=workers,
         batch_size=batch_size,
         tolerance,
+        use_transitivity=use_transitivity,
     )
 
     @info "Building concordance modules" concordance_time_sec = round(concordance_time, digits=2)
@@ -845,9 +835,10 @@ function concordance_analysis(
     )
 
     if any(x -> x !== nothing, complex_ranges) || !isempty(trivially_balanced)
-        min_activities = Vector{Any}(undef, nrow(complexes_df))
-        max_activities = Vector{Any}(undef, nrow(complexes_df))
-        ava_confirms = Vector{Any}(undef, nrow(complexes_df))
+        # Use separate arrays for better type stability
+        min_activities = Vector{Union{Float64,Missing}}(undef, nrow(complexes_df))
+        max_activities = Vector{Union{Float64,Missing}}(undef, nrow(complexes_df))
+        ava_confirms = Vector{Union{Bool,Nothing}}(undef, nrow(complexes_df))
 
         # Since DataFrame uses concordance_tracker ordering, row index = tracker index
         for (df_row_idx, cid) in enumerate(concordance_tracker.idx_to_id)
@@ -1040,39 +1031,13 @@ function screen_dual_optimization_model(
                 s(pos_model)
                 s(neg_model)
             end
-            return (
-                positive=pos_model,
-                negative=neg_model,
-                optimization_count=Ref(0),
-                infeasible_problems=Set{Tuple{Symbol,Symbol,Symbol}}()
-            )
+            return (positive=pos_model, negative=neg_model)
         end,
         (pos_constraints, neg_constraints)
     )
 
     D.pmap(
-        (as...) -> begin
-            cache = COBREXA.get_worker_local_data(worker_cache)
-            cache.optimization_count[] += 1
-
-            result = f(cache, as...)
-
-            # Track infeasible problems for debugging
-            if length(as) > 0 && length(as[1]) >= 3
-                c1_id, c2_id, direction = as[1][1], as[1][2], as[1][3]
-                # Check if result indicates infeasibility (depends on your result format)
-                if result isa Tuple && length(result) >= 8
-                    # Extract status from result tuple: (c1_id, c2_id, direction, dir_multiplier, actual_value, timeout, status, opt_num)
-                    status = result[7]
-                    if status == JuMP.INFEASIBLE
-                        push!(cache.infeasible_problems, (c1_id, c2_id, direction))
-                        @debug "INFEASIBLE pair logged" optimization = cache.optimization_count[] c1_id c2_id direction
-                    end
-                end
-            end
-
-            return result
-        end,
+        (as...) -> f(COBREXA.get_worker_local_data(worker_cache), as...),
         D.CachingPool(workers),
         args...,
     )

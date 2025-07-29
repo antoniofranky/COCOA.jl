@@ -43,8 +43,12 @@ function create_unidirectional_constraints(
         signed=constraints.fluxes,
     )
 
-    # Functional variable substitution and pruning
-    subst_vals = [C.variable(; idx).value for idx = 1:C.variable_count(constraints)]
+    # Functional variable substitution and pruning - pre-allocate for better performance
+    n_vars = C.variable_count(constraints)
+    subst_vals = Vector{Any}(undef, n_vars)
+    @inbounds for idx in 1:n_vars
+        subst_vals[idx] = C.variable(; idx).value
+    end
 
     # Use C.zip for functional composition
     constraints.fluxes = C.zip(constraints.fluxes, constraints.fluxes_forward, constraints.fluxes_reverse) do f, p, n
@@ -59,8 +63,14 @@ function create_unidirectional_constraints(
     constraints = C.prune_variables(constraints_before_pruning)
 
     # All reactions were split since we applied splitting to all fluxes
-    rxn_ids = Symbol.(AbstractFBCModels.reactions(model))
-    all_indices = Set(1:length(rxn_ids))
+    reactions = AbstractFBCModels.reactions(model)
+    n_reactions = length(reactions)
+    # Pre-allocate and build efficiently
+    rxn_ids = Vector{Symbol}(undef, n_reactions)
+    @inbounds for (i, rxn) in enumerate(reactions)
+        rxn_ids[i] = Symbol(rxn)
+    end
+    all_indices = Set(1:n_reactions)
 
     return constraints, all_indices
 end
@@ -172,7 +182,7 @@ end
 
 # Define a custom equality method that is robust to floating-point noise.
 import Base.:(==)
-function ==(a::MetabolicComplex, b::MetabolicComplex)
+@inline function ==(a::MetabolicComplex, b::MetabolicComplex)
     a.id != b.id && return false
     a.metabolites != b.metabolites && return false
 
@@ -200,11 +210,26 @@ function extract_complexes_from_model(model::AbstractFBCModels.AbstractFBCModel)
     # Step 1: Accumulate reaction contributions for each unique complex.
     # The key is the canonical representation of the complex (a sorted vector of its metabolites).
     complex_data = Dict{Vector{Tuple{Symbol,Float64}},Dict{Symbol,Float64}}()
-
+    
+    # Pre-allocate and cache model data for better performance
     S = AbstractFBCModels.stoichiometry(model)
     reactions = AbstractFBCModels.reactions(model)
     metabolites = AbstractFBCModels.metabolites(model)
-    reaction_map = Dict(id => i for (i, id) in enumerate(reactions))
+    n_reactions = length(reactions)
+    n_metabolites = length(metabolites)
+    
+    # Pre-allocate reaction map with known size
+    reaction_map = Dict{String,Int}()
+    sizehint!(reaction_map, n_reactions)
+    for (i, id) in enumerate(reactions)
+        reaction_map[id] = i
+    end
+    
+    # Pre-allocate temporary vectors to reuse in loops
+    substrate_mets = Vector{Tuple{Symbol,Float64}}()
+    product_mets = Vector{Tuple{Symbol,Float64}}()
+    sizehint!(substrate_mets, n_metabolites ÷ 4)  # Estimate
+    sizehint!(product_mets, n_metabolites ÷ 4)    # Estimate
 
     # Iterate over sorted reactions to ensure deterministic processing
     for rxn_id in sort(reactions)
@@ -212,27 +237,43 @@ function extract_complexes_from_model(model::AbstractFBCModels.AbstractFBCModel)
         rxn_symbol = Symbol(rxn_id)
         rxn_col = S[:, rxn_idx]
 
-        # Substrate side - trust all negative coefficients from the model
-        substrate_mets = [(Symbol(metabolites[i]), -s) for (i, s) in enumerate(rxn_col) if s < 0]
+        # Clear and reuse pre-allocated vectors
+        empty!(substrate_mets)
+        empty!(product_mets)
+
+        # Build substrate and product lists efficiently
+        @inbounds for (i, s) in enumerate(rxn_col)
+            if s < 0
+                push!(substrate_mets, (Symbol(metabolites[i]), -s))
+            elseif s > 0
+                push!(product_mets, (Symbol(metabolites[i]), s))
+            end
+        end
+
+        # Process substrate side
         if !isempty(substrate_mets)
-            canonical_mets = sort(substrate_mets, by=x -> x[1])
-            reaction_contribs = get!(complex_data, canonical_mets, Dict{Symbol,Float64}())
+            sort!(substrate_mets, by=x -> x[1])
+            reaction_contribs = get!(complex_data, copy(substrate_mets), Dict{Symbol,Float64}())
             reaction_contribs[rxn_symbol] = get(reaction_contribs, rxn_symbol, 0.0) - 1.0
         end
 
-        # Product side - trust all positive coefficients from the model
-        product_mets = [(Symbol(metabolites[i]), s) for (i, s) in enumerate(rxn_col) if s > 0]
+        # Process product side
         if !isempty(product_mets)
-            canonical_mets = sort(product_mets, by=x -> x[1])
-            reaction_contribs = get!(complex_data, canonical_mets, Dict{Symbol,Float64}())
+            sort!(product_mets, by=x -> x[1])
+            reaction_contribs = get!(complex_data, copy(product_mets), Dict{Symbol,Float64}())
             reaction_contribs[rxn_symbol] = get(reaction_contribs, rxn_symbol, 0.0) + 1.0
         end
     end
 
     # Step 2: Build the final, immutable MetabolicComplex structs.
+    # Pre-allocate complexes dictionary with estimated size
     complexes = Dict{Symbol,MetabolicComplex}()
-    # The sort order of keys doesn't matter for correctness, but sorting makes debugging easier.
-    for canonical_mets in sort(collect(keys(complex_data)); by=x -> string(generate_complex_id(x)))
+    sizehint!(complexes, length(complex_data))
+    
+    # Use keys directly without collecting to avoid allocation, sort them for determinism
+    sorted_keys = sort!(collect(keys(complex_data)), by=x -> string(generate_complex_id(x)))
+    
+    for canonical_mets in sorted_keys
         reaction_contribs = complex_data[canonical_mets]
         complex_id = generate_complex_id(canonical_mets)
         # The constructor handles the final conversion to the canonical struct form
@@ -248,10 +289,14 @@ $(TYPEDSIGNATURES)
 
 Generate a unique, canonical complex ID from metabolite composition.
 """
-function generate_complex_id(metabolites::Vector{Tuple{Symbol,Float64}})
+@inline function generate_complex_id(metabolites::Vector{Tuple{Symbol,Float64}})
     # Sorting is required here to ensure that the ID is canonical.
     sorted_mets = sort(metabolites, by=x -> x[1])
-    parts = ["$(isinteger(coeff) ? Int(coeff) : coeff)_$(met_id)" for (met_id, coeff) in sorted_mets]
+    # Pre-allocate parts vector for better performance
+    parts = Vector{String}(undef, length(sorted_mets))
+    @inbounds for (i, (met_id, coeff)) in enumerate(sorted_mets)
+        parts[i] = "$(isinteger(coeff) ? Int(coeff) : coeff)_$(met_id)"
+    end
     return Symbol(join(parts, "+"))
 end
 
