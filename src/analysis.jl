@@ -543,8 +543,8 @@ function concordance_analysis(
     tolerance::Float64=1e-2,
     cv_threshold::Float64=0.01,
     coarse_cv_threshold::Float64=0.1,
-    coarse_sample_count::Int=20,
     sample_size::Int=100,
+    coarse_sample_size::Int=Int(sample_size ÷ 5),
     batch_size::Int=50,
     min_valid_samples::Int=10,
     seed::Union{Int,Nothing}=nothing,
@@ -794,10 +794,10 @@ function concordance_analysis(
 
     # Adjust filter config for high-quality sampling strategy
     filter_config = FilterConfig(
-        coarse_sample_count=min(coarse_sample_count, expected_samples ÷ 2),  # Use half samples for coarse filter
         coarse_cv_threshold=coarse_cv_threshold,
         cv_threshold=cv_threshold,
-        min_valid_samples=min(min_valid_samples, max(2, expected_samples ÷ 4)),  # Adaptive minimum
+        coarse_sample_size=coarse_sample_size,
+        min_valid_samples=min_valid_samples,
         use_threads=use_threads,
         chunk_size=chunk_size_filter,
         max_pairs_in_memory=max_pairs_in_memory,

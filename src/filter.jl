@@ -10,7 +10,7 @@ using OnlineStats
 # --- Configuration ---
 struct FilterConfig
     # Stage 2 parameters
-    coarse_sample_count::Int
+    coarse_sample_size::Int
     coarse_cv_threshold::Float64
 
     # Stage 3 parameters
@@ -27,7 +27,7 @@ struct FilterConfig
 end
 
 function FilterConfig(;
-    coarse_sample_count::Int=20,
+    coarse_sample_size::Int=20,
     coarse_cv_threshold::Float64=0.1,
     cv_threshold::Float64=0.01,
     cv_epsilon::Float64=1e-15,
@@ -37,7 +37,7 @@ function FilterConfig(;
     max_pairs_in_memory::Int=1_000_000,
 )
     FilterConfig(
-        coarse_sample_count,
+        coarse_sample_size,
         coarse_cv_threshold,
         cv_threshold,
         cv_epsilon,
@@ -249,7 +249,7 @@ function process_pairs_serial(
         isnothing(c1_samples) || isnothing(c2_samples) && continue
 
         # Stage 2: Coarse filter
-        n_coarse = min(config.coarse_sample_count, length(c1_samples), length(c2_samples))
+        n_coarse = min(config.coarse_sample_size, length(c1_samples), length(c2_samples))
         n_coarse < 2 && continue
 
         ratio_stat = Variance()
@@ -313,7 +313,7 @@ function process_pairs_parallel(
         isnothing(c1_samples) || isnothing(c2_samples) && continue
 
         # Coarse filter
-        n_coarse = min(config.coarse_sample_count, length(c1_samples), length(c2_samples))
+        n_coarse = min(config.coarse_sample_size, length(c1_samples), length(c2_samples))
         n_coarse < 2 && continue
 
         ratio_stat = Variance()
