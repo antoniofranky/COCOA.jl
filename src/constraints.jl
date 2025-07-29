@@ -212,16 +212,16 @@ function extract_complexes_from_model(model::AbstractFBCModels.AbstractFBCModel)
         rxn_symbol = Symbol(rxn_id)
         rxn_col = S[:, rxn_idx]
 
-        # Substrate side
-        substrate_mets = [(Symbol(metabolites[i]), -s) for (i, s) in enumerate(rxn_col) if s < -1e-12]
+        # Substrate side - trust all negative coefficients from the model
+        substrate_mets = [(Symbol(metabolites[i]), -s) for (i, s) in enumerate(rxn_col) if s < 0]
         if !isempty(substrate_mets)
             canonical_mets = sort(substrate_mets, by=x -> x[1])
             reaction_contribs = get!(complex_data, canonical_mets, Dict{Symbol,Float64}())
             reaction_contribs[rxn_symbol] = get(reaction_contribs, rxn_symbol, 0.0) - 1.0
         end
 
-        # Product side
-        product_mets = [(Symbol(metabolites[i]), s) for (i, s) in enumerate(rxn_col) if s > 1e-12]
+        # Product side - trust all positive coefficients from the model
+        product_mets = [(Symbol(metabolites[i]), s) for (i, s) in enumerate(rxn_col) if s > 0]
         if !isempty(product_mets)
             canonical_mets = sort(product_mets, by=x -> x[1])
             reaction_contribs = get!(complex_data, canonical_mets, Dict{Symbol,Float64}())
@@ -287,109 +287,114 @@ function add_complex_activities_to_constraints(
 end
 
 
-"""
-$(TYPEDSIGNATURES)
-
-Create bounds constraints for Charnes-Cooper transformation.
-"""
-function create_bounds_constraints(
-    base_constraints::C.ConstraintTree,
-    direction::Symbol,
-)
-    bounds = C.ConstraintTree()
-
-    if direction == :positive
-        t_pos = :t_pos^C.variable(bound=C.Between(1e-9, 1e9))
-        base_constraints += (:charnes_cooper^t_pos)
-        t_var = base_constraints.charnes_cooper[:t_pos].value
-
-        if haskey(base_constraints, :fluxes_forward)
-            for flux_name in sort(collect(keys(base_constraints.fluxes_forward)))
-                flux_constraint = base_constraints.fluxes_forward[flux_name]
-                flux_var = flux_constraint.value
-                bound = flux_constraint.bound
-                vmin = hasproperty(bound, :lower) ? bound.lower : (hasproperty(bound, :equal_to) ? bound.equal_to : continue)
-                vmax = hasproperty(bound, :upper) ? bound.upper : (hasproperty(bound, :equal_to) ? bound.equal_to : continue)
-                if isfinite(vmax) && !iszero(vmax)
-                    bounds *= Symbol("upper_fwd_$(flux_name)")^C.Constraint(flux_var - vmax * t_var, C.Between(-1e9, 0.0))
-                end
-                if isfinite(vmin) && !iszero(vmin)
-                    bounds *= Symbol("lower_fwd_$(flux_name)")^C.Constraint(flux_var - vmin * t_var, C.Between(0.0, 1e9))
-                end
-            end
-        end
-
-        if haskey(base_constraints, :fluxes_reverse)
-            for flux_name in sort(collect(keys(base_constraints.fluxes_reverse)))
-                flux_constraint = base_constraints.fluxes_reverse[flux_name]
-                flux_var = flux_constraint.value
-                bound = flux_constraint.bound
-                vmin = hasproperty(bound, :lower) ? bound.lower : (hasproperty(bound, :equal_to) ? bound.equal_to : continue)
-                vmax = hasproperty(bound, :upper) ? bound.upper : (hasproperty(bound, :equal_to) ? bound.equal_to : continue)
-                if isfinite(vmax) && !iszero(vmax)
-                    bounds *= Symbol("upper_rev_$(flux_name)")^C.Constraint(flux_var - vmax * t_var, C.Between(-1e9, 0.0))
-                end
-                if isfinite(vmin) && !iszero(vmin)
-                    bounds *= Symbol("lower_rev_$(flux_name)")^C.Constraint(flux_var - vmin * t_var, C.Between(0.0, 1e9))
-                end
-            end
-        end
-
-    else # direction == :negative
-        t_neg = :t_neg^C.variable(bound=C.Between(-1e9, -1e-12))
-        base_constraints += (:charnes_cooper^t_neg)
-        t_var = base_constraints.charnes_cooper[:t_neg].value
-
-        if haskey(base_constraints, :fluxes_forward)
-            for flux_name in sort(collect(keys(base_constraints.fluxes_forward)))
-                flux_constraint = base_constraints.fluxes_forward[flux_name]
-                flux_var = flux_constraint.value
-                bound = flux_constraint.bound
-                vmin = hasproperty(bound, :lower) ? bound.lower : (hasproperty(bound, :equal_to) ? bound.equal_to : continue)
-                vmax = hasproperty(bound, :upper) ? bound.upper : (hasproperty(bound, :equal_to) ? bound.equal_to : continue)
-                if isfinite(vmin) && !iszero(vmin)
-                    bounds *= Symbol("upper_fwd_$(flux_name)")^C.Constraint(flux_var - vmin * t_var, C.Between(-1e9, 0.0))
-                end
-                if isfinite(vmax) && !iszero(vmax)
-                    bounds *= Symbol("lower_fwd_$(flux_name)")^C.Constraint(flux_var - vmax * t_var, C.Between(0.0, 1e9))
-                end
-            end
-        end
-
-        if haskey(base_constraints, :fluxes_reverse)
-            for flux_name in sort(collect(keys(base_constraints.fluxes_reverse)))
-                flux_constraint = base_constraints.fluxes_reverse[flux_name]
-                flux_var = flux_constraint.value
-                bound = flux_constraint.bound
-                vmin = hasproperty(bound, :lower) ? bound.lower : (hasproperty(bound, :equal_to) ? bound.equal_to : continue)
-                vmax = hasproperty(bound, :upper) ? bound.upper : (hasproperty(bound, :equal_to) ? bound.equal_to : continue)
-                if isfinite(vmin) && !iszero(vmin)
-                    bounds *= Symbol("upper_rev_$(flux_name)")^C.Constraint(flux_var - vmin * t_var, C.Between(-1e9, 0.0))
-                end
-                if isfinite(vmax) && !iszero(vmax)
-                    bounds *= Symbol("lower_rev_$(flux_name)")^C.Constraint(flux_var - vmax * t_var, C.Between(0.0, 1e9))
-                end
-            end
-        end
-    end
-
-    return bounds
-end
 
 """
 $(TYPEDSIGNATURES)
 
-Create a Charnes-Cooper template for a specific direction without activity-specific constraints.
+Create a Charnes-Cooper template for a specific direction with balance constraints and scaled flux bounds.
 """
 function create_charnes_cooper_template(
     base_constraints::C.ConstraintTree,
     direction::Symbol;
 )
+    # Start with a copy of base constraints (includes stoichiometry, etc.)
     template_constraints = deepcopy(base_constraints)
-    template_constraints += :charnes_cooper^C.ConstraintTree()
-    bounds_constraints = create_bounds_constraints(template_constraints, direction)
-    template_constraints *= :charnes_cooper^:fluxes_transformed^bounds_constraints
-    template_constraints.fluxes_forward = C.ConstraintTree()
-    template_constraints.fluxes_reverse = C.ConstraintTree()
+
+    # Add t variable
+    if direction == :positive
+        template_constraints += :t^C.variable(bound=C.Between(0, 999))
+    else # direction == :negative
+        template_constraints += :t^C.variable(bound=C.Between(-999, 0))
+    end
+
+    # Replace flux bounds with scaled bounds
+    if haskey(template_constraints, :fluxes_forward)
+        template_constraints.fluxes_forward = COBREXA.value_scaled_bound_constraints(
+            template_constraints.fluxes_forward, template_constraints.t.value, direction
+        )
+    end
+    if haskey(template_constraints, :fluxes_reverse)
+        template_constraints.fluxes_reverse = COBREXA.value_scaled_bound_constraints(
+            template_constraints.fluxes_reverse, template_constraints.t.value, direction
+        )
+    end
+
     return template_constraints
+end
+
+# Import both the singular and plural versions of the function
+import COBREXA: value_scaled_bound_constraint, value_scaled_bound_constraints
+
+# ------------------------------------------------------------------
+# CORRECTED OVERLOADS START HERE
+# ------------------------------------------------------------------
+
+"""
+$(TYPEDSIGNATURES)
+
+Overload of `value_scaled_bound_constraint` for `C.Between` bounds that
+correctly handles the directionality of the Charnes-Cooper transformation.
+"""
+function COBREXA.value_scaled_bound_constraint(
+    x::C.Value,
+    b::C.Between,
+    scale::C.Value,
+    direction::Symbol,
+)
+    if direction == :negative
+        # NEGATIVE CASE: For t <= 0, inequalities flip: v_max*t <= w <= v_min*t
+        bounds = [
+            b.upper < Inf ? (:lower => C.Constraint(x - b.upper * scale, (0, Inf))) : nothing,
+            b.lower > -Inf ? (:upper => C.Constraint(x - b.lower * scale, (-Inf, 0))) : nothing,
+        ]
+        return C.ConstraintTree(b for b in bounds if !isnothing(b))
+    else
+        # POSITIVE CASE (default)
+        bounds = [
+            b.lower > -Inf ? (:lower => C.Constraint(x - b.lower * scale, (0, Inf))) : nothing,
+            b.upper < Inf ? (:upper => C.Constraint(x - b.upper * scale, (-Inf, 0))) : nothing,
+        ]
+        return C.ConstraintTree(b for b in bounds if !isnothing(b))
+    end
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Overload of `value_scaled_bound_constraint` for `C.EqualTo` bounds. The
+directionality does not change the resulting equality constraint.
+"""
+function COBREXA.value_scaled_bound_constraint(
+    x::C.Value,
+    b::C.EqualTo,
+    scale::C.Value,
+    direction::Symbol, # The direction argument is present for dispatch consistency
+)
+    # The original 3-argument function is correct for equality, regardless of direction.
+    return COBREXA.value_scaled_bound_constraint(x, b, scale)
+end
+
+
+# --- Recursive Wrapper Functions ---
+
+# Wrapper for ConstraintTree: Recursively calls the function, passing the direction.
+function COBREXA.value_scaled_bound_constraints(
+    x::C.ConstraintTree,
+    scale::C.Value,
+    direction::Symbol,
+)
+    return C.ConstraintTree(
+        k => v for
+        (k, v) in (k => value_scaled_bound_constraints(v, scale, direction) for (k, v) in x) if
+        !(v isa C.ConstraintTree) || !isempty(v)
+    )
+end
+
+# Wrapper for Constraint: Calls the singular version with the direction.
+function COBREXA.value_scaled_bound_constraints(
+    x::C.Constraint,
+    scale::C.Value,
+    direction::Symbol,
+)
+    return value_scaled_bound_constraint(x.value, x.bound, scale, direction)
 end

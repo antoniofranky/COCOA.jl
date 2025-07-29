@@ -70,7 +70,7 @@ function process_in_batches(
             clear_module_cache!(concordance_tracker)
         end
 
-        @debug "Starting batch $batch_count" remaining = length(remaining_pairs)
+        @debug "Starting batch $(batch_count)" remaining = length(remaining_pairs)
 
         filtered_pairs, skipped_count = filter_transitive_pairs(
             remaining_pairs,
@@ -87,7 +87,7 @@ function process_in_batches(
         batch_pairs = filtered_pairs[1:batch_size_actual]
         remaining_pairs = filtered_pairs[(batch_size_actual+1):end]
 
-        @debug "Processing batch $batch_count" pairs = length(batch_pairs)
+        @debug "Processing batch $(batch_count)" pairs = length(batch_pairs)
 
         current_batch_results = process_concordance_batch(
             constraints, batch_pairs, concordance_tracker;
@@ -162,7 +162,7 @@ function process_in_batches(
         batch_results["pairs_processed"] += length(batch_pairs)
         batch_results["batches_completed"] = batch_count
 
-        @debug "Batch $batch_count complete" new_concordant = batch_concordant_count
+        @debug "Batch $(batch_count) complete" new_concordant = batch_concordant_count
 
         ProgressMeter.update!(prog, processed_pairs;
             showvalues=[
@@ -317,7 +317,7 @@ function process_concordance_batch(
     for (c1_idx, c2_idx, directions) in batch_pairs
         c1_id, c2_id = concordance_tracker.idx_to_id[c1_idx], concordance_tracker.idx_to_id[c2_idx]
         for direction in directions
-            target_value = direction == :positive ? 1.0 : -1.0
+            target_value = direction == :positive ? 1.0 : 1.0
             # Add both MIN (-1) and MAX (+1) tests
             push!(test_array, (c1_id, c2_id, direction, target_value, -1))  # MIN test
             push!(test_array, (c1_id, c2_id, direction, target_value, +1))  # MAX test
@@ -326,61 +326,107 @@ function process_concordance_batch(
 
     # Process using pure COBREXA pattern
     optimization_results = screen_dual_optimization_model(
+        (models_cache, (c1_id, c2_id, direction, target_value, dir_multiplier)) -> begin
+
+            om = direction == :positive ? models_cache.positive : models_cache.negative
+
+            # DEBUG: Track optimization details  
+            opt_num = models_cache.optimization_count[]
+            n_vars_before = JuMP.num_variables(om)
+            n_constraints_before = length(JuMP.all_constraints(om, include_variable_in_set_constraints=false))
+
+            # Set c2 constraint
+            c2_constraint = @constraint(om, c2_constraint,
+                C.substitute(constraints.activities[c2_id].value, om[:x]) == target_value)
+
+            # COBREXA style: Always maximize, use direction multiplier in the expression
+            @objective(om, JuMP.MAX_SENSE,
+                C.substitute(dir_multiplier * constraints.activities[c1_id].value, om[:x]))
+
+            # DEBUG: Check model state after constraint/objective addition
+            n_vars_after = JuMP.num_variables(om)
+            n_constraints_after = length(JuMP.all_constraints(om, include_variable_in_set_constraints=false))
+
+            optimize!(om)
+            status = termination_status(om)
+
+            # DEBUG: Log details for problematic cases
+            if status ∉ (OPTIMAL, LOCALLY_SOLVED)
+                # Get solver name for debugging comparison between GLPK and HiGHS
+                solver_name = string(typeof(JuMP.backend(om).optimizer))
+                @info "OPTIMIZATION FAILED" optimization = opt_num c1_id c2_id direction target_value dir_multiplier status solver = solver_name vars_before = n_vars_before vars_after = n_vars_after constraints_before = n_constraints_before constraints_after = n_constraints_after
+
+                # Check if this same pair works with the other solver by testing feasibility
+                try
+                    # Create a simple feasibility test model
+                    test_model = copy(om)
+                    # Need to set optimizer on copied model since it's not automatically copied
+                    JuMP.set_optimizer(test_model, optimizer)
+                    # Apply settings to the copied model
+                    for s in [COBREXA.configuration.default_solver_settings; settings]
+                        s(test_model)
+                    end
+                    # Remove objective to test pure feasibility
+                    @objective(test_model, JuMP.FEASIBILITY_SENSE, 0)
+                    optimize!(test_model)
+                    feasible_status = termination_status(test_model)
+                    @info "FEASIBILITY TEST" pair = "$(c1_id) vs $(c2_id)" direction = direction feasible_status = feasible_status solver = solver_name
+
+                    # If feasibility test passes but optimization failed, log this discrepancy
+                    if feasible_status == JuMP.OPTIMAL && status == JuMP.INFEASIBLE
+                        @warn "SOLVER INCONSISTENCY DETECTED" pair = "$(c1_id) vs $(c2_id)" direction = direction optimization_status = status feasibility_status = feasible_status solver = solver_name optimization_num = opt_num
+                    end
+                catch e
+                    @info "FEASIBILITY TEST FAILED" pair = "$(c1_id) vs $(c2_id)" error = "$(e)" solver = solver_name
+                end
+            end
+
+            # Handle different termination statuses according to JuMP best practices
+            raw_value = if status in (OPTIMAL, LOCALLY_SOLVED)
+                # Solution is acceptable
+                if is_solved_and_feasible(om)
+                    objective_value(om)
+                else
+                    @debug "Model solved but solution not feasible" c1_id c2_id direction status
+                    nothing
+                end
+            elseif status == INFEASIBLE
+                # Problem has no feasible solution - this is expected for some concordance tests
+                solver_name = string(typeof(JuMP.backend(om).optimizer))
+                @info "Optimization infeasible (expected)" c1_id c2_id direction solver = solver_name optimization = opt_num
+                nothing
+            elseif status == DUAL_INFEASIBLE
+                # Problem may be unbounded
+                solver_name = string(typeof(JuMP.backend(om).optimizer))
+                @warn "Dual infeasible (possibly unbounded)" c1_id c2_id direction solver = solver_name optimization = opt_num
+                nothing
+            elseif status == TIME_LIMIT
+                # Solver hit time limit
+                solver_name = string(typeof(JuMP.backend(om).optimizer))
+                @warn "Solver time limit reached" c1_id c2_id direction solver = solver_name optimization = opt_num
+                nothing
+            else
+                # Other errors (OTHER_ERROR, NUMERICAL_ERROR, etc.)
+                solver_name = string(typeof(JuMP.backend(om).optimizer))
+                @warn "Solver error" c1_id c2_id direction status solver = solver_name optimization = opt_num
+                nothing
+            end
+
+            # Convert back: if we maximized -f(x), negate result to get min f(x)
+            actual_value = dir_multiplier == -1 ? (raw_value !== nothing ? -raw_value : nothing) : raw_value
+
+            delete(om, c2_constraint)
+            JuMP.unregister(om, :c2_constraint)
+
+            # DEBUG: Return additional debugging info
+            return (c1_id, c2_id, direction, dir_multiplier, actual_value, status == TIME_LIMIT, status, opt_num)
+        end,
         constraints,
         test_array;
         optimizer=optimizer,
         settings=settings,
         workers=workers
-    ) do models_cache, (c1_id, c2_id, direction, target_value, dir_multiplier)
-
-        om = direction == :positive ? models_cache.positive : models_cache.negative
-
-        # Set c2 constraint
-        c2_constraint = @constraint(om, c2_constraint,
-            C.substitute(constraints.activities[c2_id].value, om[:x]) == target_value)
-
-        # COBREXA style: Always maximize, use direction multiplier in the expression
-        @objective(om, JuMP.MAX_SENSE,
-            C.substitute(dir_multiplier * constraints.activities[c1_id].value, om[:x]))
-
-        optimize!(om)
-        status = termination_status(om)
-
-        # Handle different termination statuses according to JuMP best practices
-        raw_value = if status in (OPTIMAL, LOCALLY_SOLVED)
-            # Solution is acceptable
-            if is_solved_and_feasible(om)
-                objective_value(om)
-            else
-                @debug "Model solved but solution not feasible" c1_id c2_id direction status
-                nothing
-            end
-        elseif status == INFEASIBLE
-            # Problem has no feasible solution - this is expected for some concordance tests
-            @warn "Optimization infeasible" c1_id c2_id direction
-            nothing
-        elseif status == DUAL_INFEASIBLE
-            # Problem may be unbounded
-            @warn "Dual infeasible (possibly unbounded)" c1_id c2_id direction
-            nothing
-        elseif status == TIME_LIMIT
-            # Solver hit time limit
-            @warn "Solver time limit reached" c1_id c2_id direction
-            nothing
-        else
-            # Other errors (OTHER_ERROR, NUMERICAL_ERROR, etc.)
-            @warn "Solver error" c1_id c2_id direction status
-            nothing
-        end
-
-        # Convert back: if we maximized -f(x), negate result to get min f(x)
-        actual_value = dir_multiplier == -1 ? (raw_value !== nothing ? -raw_value : nothing) : raw_value
-
-        delete(om, c2_constraint)
-        JuMP.unregister(om, :c2_constraint)
-
-        return (c1_id, c2_id, direction, dir_multiplier, actual_value, status == TIME_LIMIT)
-    end
+    )
 
     # Group results back into (min_val, max_val) pairs per direction
     batch_results = []
@@ -495,14 +541,14 @@ function concordance_analysis(
     settings=[],
     workers=D.workers(),
     tolerance::Float64=1e-2,
+    cv_threshold::Float64=0.01,
+    coarse_cv_threshold::Float64=0.1,
     coarse_sample_count::Int=20,
     sample_size::Int=100,
     batch_size::Int=50,
     min_valid_samples::Int=10,
-    seed::Union{Int,Nothing}=42,
+    seed::Union{Int,Nothing}=nothing,
     use_unidirectional_constraints::Bool=true,
-    cv_threshold::Float64=0.01,
-    coarse_cv_threshold::Float64=0.1,
     use_threads::Bool=false,
     chunk_size_filter::Int=100_000,
     max_pairs_in_memory::Int=100_000,
@@ -639,7 +685,7 @@ function concordance_analysis(
         for (c1, c2) in trivial_pairs if haskey(concordance_tracker.id_to_idx, c1) && haskey(concordance_tracker.id_to_idx, c2)
     )
 
-    rng = StableRNG(seed)
+    rng = isnothing(seed) ? Random.GLOBAL_RNG : StableRNG(seed)
     decimals = max(0, -floor(Int, log10(1e-9)))
     aggregate = rows -> round.(vec(hcat(rows...)), digits=decimals)
     @info "Sampling schedule"
@@ -911,7 +957,7 @@ function extract_modules(tracker::ConcordanceTracker, balanced_complexes::Set{In
             if !isempty(balanced_complexes) && issubset(Set(members), balanced_complexes)
                 continue
             end
-            module_id = Symbol("module_$module_idx")
+            module_id = Symbol("module_$(module_idx)")
             modules[module_id] = complex_ids
             module_idx += 1
         end
@@ -994,13 +1040,39 @@ function screen_dual_optimization_model(
                 s(pos_model)
                 s(neg_model)
             end
-            return (positive=pos_model, negative=neg_model)
+            return (
+                positive=pos_model,
+                negative=neg_model,
+                optimization_count=Ref(0),
+                infeasible_problems=Set{Tuple{Symbol,Symbol,Symbol}}()
+            )
         end,
         (pos_constraints, neg_constraints)
     )
 
     D.pmap(
-        (as...) -> f(COBREXA.get_worker_local_data(worker_cache), as...),
+        (as...) -> begin
+            cache = COBREXA.get_worker_local_data(worker_cache)
+            cache.optimization_count[] += 1
+
+            result = f(cache, as...)
+
+            # Track infeasible problems for debugging
+            if length(as) > 0 && length(as[1]) >= 3
+                c1_id, c2_id, direction = as[1][1], as[1][2], as[1][3]
+                # Check if result indicates infeasibility (depends on your result format)
+                if result isa Tuple && length(result) >= 8
+                    # Extract status from result tuple: (c1_id, c2_id, direction, dir_multiplier, actual_value, timeout, status, opt_num)
+                    status = result[7]
+                    if status == JuMP.INFEASIBLE
+                        push!(cache.infeasible_problems, (c1_id, c2_id, direction))
+                        @debug "INFEASIBLE pair logged" optimization = cache.optimization_count[] c1_id c2_id direction
+                    end
+                end
+            end
+
+            return result
+        end,
         D.CachingPool(workers),
         args...,
     )
