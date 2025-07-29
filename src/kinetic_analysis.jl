@@ -65,30 +65,37 @@ Extract Y (species-complex) and A (complex-reaction) matrices from model.
 Uses memory-efficient Int8 storage for stoichiometric coefficients.
 """
 function extract_network_matrices(model)
-    # Get model information
+    # Get model information and cache lengths
     metabolites = AbstractFBCModels.metabolites(model)
     reactions = AbstractFBCModels.reactions(model)
+    n_metabolites = length(metabolites)
+    n_reactions = length(reactions)
     
     # Build species-reaction stoichiometric matrix first
     S = AbstractFBCModels.stoichiometry(model)
     
-    # For now, we need to extract complexes from the model
-    # This is a simplified approach - in a full implementation,
-    # we'd extract the actual complex structure from the model
-    n_metabolites = length(metabolites)
-    n_reactions = length(reactions)
+    # Pre-allocate vectors with estimated sizes for better performance
+    estimated_complexes = 2 * n_reactions  # substrate + product per reaction
+    estimated_entries = n_metabolites * 2  # rough estimate for matrix entries
     
-    # Create simplified Y matrix where each reaction corresponds to substrate/product complexes
-    # This is a placeholder - real implementation would parse reaction complexes
     complexes = Vector{String}()
+    sizehint!(complexes, estimated_complexes)
+    
     Y_rows = Vector{Int}()
     Y_cols = Vector{Int}()
     Y_vals = Vector{Int8}()
+    sizehint!(Y_rows, estimated_entries)
+    sizehint!(Y_cols, estimated_entries)
+    sizehint!(Y_vals, estimated_entries)
     
-    complex_idx = 1
     A_rows = Vector{Int}()
     A_cols = Vector{Int}()
     A_vals = Vector{Int8}()
+    sizehint!(A_rows, estimated_complexes)
+    sizehint!(A_cols, estimated_complexes)
+    sizehint!(A_vals, estimated_complexes)
+    
+    complex_idx = 1
     
     # Simplified: create substrate and product complexes for each reaction
     for (rxn_idx, rxn_id) in enumerate(reactions)

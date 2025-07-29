@@ -37,24 +37,48 @@ mutable struct ConcordanceTracker
         n = length(complex_ids)
         parent = collect(1:n)
         rank = zeros(Int, n)
-        id_to_idx = Dict(id => i for (i, id) in enumerate(complex_ids))
+        
+        # Pre-allocate dictionary with known size for better performance
+        id_to_idx = Dict{Symbol,Int}()
+        sizehint!(id_to_idx, n)
+        @inbounds for (i, id) in enumerate(complex_ids)
+            id_to_idx[id] = i
+        end
+        
         idx_to_id = copy(complex_ids)
 
+        # Pre-allocate sets with estimated sizes
+        non_concordant_pairs = Set{Tuple{Int,Int}}()
+        sizehint!(non_concordant_pairs, n ÷ 10)  # Conservative estimate
+        
+        non_concordant_modules = Set{Tuple{Int,Int}}()
+        sizehint!(non_concordant_modules, n ÷ 20)  # Conservative estimate
+        
+        module_cache = Dict{Int,Vector{Int}}()
+        sizehint!(module_cache, n ÷ 5)  # Conservative estimate
+
         new(parent, rank, id_to_idx, idx_to_id,
-            Set{Tuple{Int,Int}}(),
-            # --- MODIFIED: Initialize as a Set ---
-            Set{Tuple{Int,Int}}(),
-            Dict{Int,Vector{Int}}())
+            non_concordant_pairs, non_concordant_modules, module_cache)
     end
 end
 
 
-# Union-Find operations for regular tracker
-function find_set!(tracker::ConcordanceTracker, x::Int)
-    if tracker.parent[x] != x
-        tracker.parent[x] = find_set!(tracker, tracker.parent[x])
+# Union-Find operations for regular tracker - optimized with iterative path compression
+@inline function find_set!(tracker::ConcordanceTracker, x::Int)
+    root = x
+    # Find root
+    while tracker.parent[root] != root
+        root = tracker.parent[root]
     end
-    return tracker.parent[x]
+    
+    # Path compression - flatten the path
+    while tracker.parent[x] != root
+        next = tracker.parent[x]
+        tracker.parent[x] = root
+        x = next
+    end
+    
+    return root
 end
 
 function union_sets!(tracker::ConcordanceTracker, x::Int, y::Int)
@@ -86,7 +110,7 @@ end
 
 
 # Generic operations
-function are_concordant(tracker::ConcordanceTracker, x::Int, y::Int)
+@inline function are_concordant(tracker::ConcordanceTracker, x::Int, y::Int)
     return find_set!(tracker, x) == find_set!(tracker, y)
 end
 
@@ -109,13 +133,13 @@ function add_non_concordant!(tracker::ConcordanceTracker, x::Int, y::Int)
 end
 
 function is_non_concordant(tracker::ConcordanceTracker, x::Int, y::Int)
-    # Direct check
+    # Direct check with canonical ordering
     pair = x < y ? (x, y) : (y, x)
     if pair in tracker.non_concordant_pairs
         return true
     end
 
-    # Get representatives
+    # Get representatives once and cache them
     rep_x = find_set!(tracker, x)
     rep_y = find_set!(tracker, y)
 
@@ -124,21 +148,25 @@ function is_non_concordant(tracker::ConcordanceTracker, x::Int, y::Int)
         return false
     end
 
-    # --- MODIFIED: Check for key in Set ---
-    # Cached module relationship
-    if (rep_x, rep_y) in tracker.non_concordant_modules
+    # Cached module relationship - check both orderings
+    if (rep_x, rep_y) in tracker.non_concordant_modules || (rep_y, rep_x) in tracker.non_concordant_modules
         return true
     end
 
-    # Transitivity check
+    # Transitivity check - ensure both modules are cached
     ensure_module_cached!(tracker, rep_x)
     ensure_module_cached!(tracker, rep_y)
 
-    for m1 in tracker.module_members_cache[rep_x]
-        for m2 in tracker.module_members_cache[rep_y]
+    # Cache module members for inner loop efficiency
+    members_x = tracker.module_members_cache[rep_x]
+    members_y = tracker.module_members_cache[rep_y]
+    non_concordant_pairs = tracker.non_concordant_pairs
+
+    @inbounds for m1 in members_x
+        for m2 in members_y
             pair_check = m1 < m2 ? (m1, m2) : (m2, m1)
-            if pair_check in tracker.non_concordant_pairs
-                # --- MODIFIED: Push to Set ---
+            if pair_check in non_concordant_pairs
+                # Cache the result in both directions
                 push!(tracker.non_concordant_modules, (rep_x, rep_y))
                 push!(tracker.non_concordant_modules, (rep_y, rep_x))
                 return true
@@ -152,8 +180,13 @@ end
 
 function ensure_module_cached!(tracker::ConcordanceTracker, rep::Int)
     if !haskey(tracker.module_members_cache, rep)
-        members = Int[]
-        for i in 1:length(tracker.parent)
+        # Pre-allocate with estimated size for better performance
+        members = Vector{Int}()
+        sizehint!(members, 10)  # Conservative estimate
+        
+        # Batch the find operations for better cache locality
+        n = length(tracker.parent)
+        @inbounds for i in 1:n
             if find_set!(tracker, i) == rep
                 push!(members, i)
             end
@@ -167,13 +200,14 @@ function on_module_merged!(tracker::ConcordanceTracker, old_rep1::Int, old_rep2:
     delete!(tracker.module_members_cache, old_rep1)
     delete!(tracker.module_members_cache, old_rep2)
 
-    # --- MODIFIED: This section is updated to work with Sets ---
-    # Update module relationships
-    keys_to_remove = Tuple{Int,Int}[]
+    # Update module relationships efficiently
+    # Pre-allocate vectors with estimated sizes
+    keys_to_remove = Vector{Tuple{Int,Int}}()
     new_relationships = Set{Tuple{Int,Int}}()
+    sizehint!(keys_to_remove, 20)  # Conservative estimate
+    sizehint!(new_relationships, 10)
 
-    # NOTE: A more efficient implementation might involve a reverse mapping
-    # from rep -> non-concordant set to avoid this linear scan.
+    # Single pass through non_concordant_modules
     for key in tracker.non_concordant_modules
         rep1, rep2 = key
 
@@ -188,10 +222,12 @@ function on_module_merged!(tracker::ConcordanceTracker, old_rep1::Int, old_rep2:
         end
     end
 
-    for key in keys_to_remove
+    # Batch removal for better performance
+    @inbounds for key in keys_to_remove
         delete!(tracker.non_concordant_modules, key)
     end
 
+    # Add new relationships in both directions
     for (rep1, rep2) in new_relationships
         push!(tracker.non_concordant_modules, (rep1, rep2))
         push!(tracker.non_concordant_modules, (rep2, rep1))
