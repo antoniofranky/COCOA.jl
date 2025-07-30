@@ -354,12 +354,12 @@ function create_charnes_cooper_template(
 
     # Replace flux bounds with scaled bounds
     if haskey(template_constraints, :fluxes_forward)
-        template_constraints.fluxes_forward = COBREXA.value_scaled_bound_constraints(
+        template_constraints.fluxes_forward = apply_charnes_cooper_scaling(
             template_constraints.fluxes_forward, template_constraints.t.value, direction
         )
     end
     if haskey(template_constraints, :fluxes_reverse)
-        template_constraints.fluxes_reverse = COBREXA.value_scaled_bound_constraints(
+        template_constraints.fluxes_reverse = apply_charnes_cooper_scaling(
             template_constraints.fluxes_reverse, template_constraints.t.value, direction
         )
     end
@@ -367,79 +367,57 @@ function create_charnes_cooper_template(
     return template_constraints
 end
 
-# Import both the singular and plural versions of the function
-import COBREXA: value_scaled_bound_constraint, value_scaled_bound_constraints
-
-# ------------------------------------------------------------------
-# CORRECTED OVERLOADS START HERE
-# ------------------------------------------------------------------
-
 """
 $(TYPEDSIGNATURES)
 
-Overload of `value_scaled_bound_constraint` for `C.Between` bounds that
-correctly handles the directionality of the Charnes-Cooper transformation.
+Apply Charnes-Cooper scaling to flux constraints with direction-aware bound handling.
+This replaces the complex method overwriting with a single focused function.
 """
-function COBREXA.value_scaled_bound_constraint(
-    x::C.Value,
-    b::C.Between,
-    scale::C.Value,
-    direction::Symbol,
-)
-    if direction == :negative
-        # NEGATIVE CASE: For t <= 0, inequalities flip: v_max*t <= w <= v_min*t
-        bounds = [
-            b.upper < Inf ? (:lower => C.Constraint(x - b.upper * scale, (0, Inf))) : nothing,
-            b.lower > -Inf ? (:upper => C.Constraint(x - b.lower * scale, (-Inf, 0))) : nothing,
-        ]
-        return C.ConstraintTree(b for b in bounds if !isnothing(b))
-    else
-        # POSITIVE CASE (default)
-        bounds = [
-            b.lower > -Inf ? (:lower => C.Constraint(x - b.lower * scale, (0, Inf))) : nothing,
-            b.upper < Inf ? (:upper => C.Constraint(x - b.upper * scale, (-Inf, 0))) : nothing,
-        ]
-        return C.ConstraintTree(b for b in bounds if !isnothing(b))
-    end
-end
-
-"""
-$(TYPEDSIGNATURES)
-
-Overload of `value_scaled_bound_constraint` for `C.EqualTo` bounds. The
-directionality does not change the resulting equality constraint.
-"""
-function COBREXA.value_scaled_bound_constraint(
-    x::C.Value,
-    b::C.EqualTo,
-    scale::C.Value,
-    direction::Symbol, # The direction argument is present for dispatch consistency
-)
-    # The original 3-argument function is correct for equality, regardless of direction.
-    return COBREXA.value_scaled_bound_constraint(x, b, scale)
-end
-
-
-# --- Recursive Wrapper Functions ---
-
-# Wrapper for ConstraintTree: Recursively calls the function, passing the direction.
-function COBREXA.value_scaled_bound_constraints(
-    x::C.ConstraintTree,
-    scale::C.Value,
-    direction::Symbol,
+function apply_charnes_cooper_scaling(
+    flux_constraints::C.ConstraintTree,
+    t_value::C.Value,
+    direction::Symbol
 )
     return C.ConstraintTree(
-        k => v for
-        (k, v) in (k => value_scaled_bound_constraints(v, scale, direction) for (k, v) in x) if
-        !(v isa C.ConstraintTree) || !isempty(v)
+        k => apply_charnes_cooper_scaling_to_constraint(v, t_value, direction)
+        for (k, v) in flux_constraints
     )
 end
 
-# Wrapper for Constraint: Calls the singular version with the direction.
-function COBREXA.value_scaled_bound_constraints(
-    x::C.Constraint,
-    scale::C.Value,
-    direction::Symbol,
+"""
+$(TYPEDSIGNATURES)
+
+Apply Charnes-Cooper scaling to a single constraint with directional bound handling.
+"""
+function apply_charnes_cooper_scaling_to_constraint(
+    constraint::C.Constraint,
+    t_value::C.Value,
+    direction::Symbol
 )
-    return value_scaled_bound_constraint(x.value, x.bound, scale, direction)
+    bound = constraint.bound
+    x = constraint.value
+    
+    if bound isa C.Between
+        if direction == :negative
+            # NEGATIVE CASE: For t <= 0, inequalities flip: v_max*t <= w <= v_min*t
+            bounds = [
+                bound.upper < Inf ? (:lower => C.Constraint(x - bound.upper * t_value, (0, Inf))) : nothing,
+                bound.lower > -Inf ? (:upper => C.Constraint(x - bound.lower * t_value, (-Inf, 0))) : nothing,
+            ]
+            return C.ConstraintTree(b for b in bounds if !isnothing(b))
+        else
+            # POSITIVE CASE (default)
+            bounds = [
+                bound.lower > -Inf ? (:lower => C.Constraint(x - bound.lower * t_value, (0, Inf))) : nothing,
+                bound.upper < Inf ? (:upper => C.Constraint(x - bound.upper * t_value, (-Inf, 0))) : nothing,
+            ]
+            return C.ConstraintTree(b for b in bounds if !isnothing(b))
+        end
+    elseif bound isa C.EqualTo
+        # For equality constraints, direction doesn't matter
+        return COBREXA.value_scaled_bound_constraint(x, bound, t_value)
+    else
+        # Fallback to COBREXA's original implementation for other bound types
+        return COBREXA.value_scaled_bound_constraint(x, bound, t_value)
+    end
 end

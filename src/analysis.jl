@@ -11,6 +11,14 @@ This module contains:
 import COBREXA: worker_local_data, get_worker_local_data
 import Base.Iterators
 
+# Helper function for iterating directions from bit flags
+@inline function iterate_directions(bits::UInt8)
+    directions = Symbol[]
+    (bits & 0x01) != 0 && push!(directions, :positive)  # DIRECTION_POSITIVE
+    (bits & 0x02) != 0 && push!(directions, :negative)  # DIRECTION_NEGATIVE
+    return directions
+end
+
 """
 $(TYPEDSIGNATURES)
 
@@ -47,7 +55,7 @@ function process_in_batches(
     sorted_pairs = sort(candidate_priorities,
         by=p -> (p.cv, p.c1_idx, p.c2_idx))
 
-    remaining_pairs = [(p.c1_idx, p.c2_idx, p.directions) for p in sorted_pairs]
+    remaining_pairs = [(p.c1_idx, p.c2_idx, p.directions_bits) for p in sorted_pairs]
 
     batch_count = 0
     total_pairs = length(remaining_pairs)
@@ -205,13 +213,13 @@ $(TYPEDSIGNATURES)
 Filter out pairs that can be inferred by transitivity to avoid redundant testing.
 """
 function filter_transitive_pairs(
-    remaining_pairs::Vector{Tuple{Int,Int,Set{Symbol}}},
+    remaining_pairs::Vector{Tuple{Int,Int,UInt8}},
     concordance_tracker::ConcordanceTracker
 )
-    filtered_pairs = Tuple{Int,Int,Set{Symbol}}[]
+    filtered_pairs = Tuple{Int,Int,UInt8}[]
     skipped_count = 0
 
-    for (c1_idx, c2_idx, directions) in remaining_pairs
+    for (c1_idx, c2_idx, directions_bits) in remaining_pairs
 
         if are_concordant(concordance_tracker, c1_idx, c2_idx)
             skipped_count += 1
@@ -223,7 +231,7 @@ function filter_transitive_pairs(
             continue
         end
 
-        push!(filtered_pairs, (c1_idx, c2_idx, directions))
+        push!(filtered_pairs, (c1_idx, c2_idx, directions_bits))
     end
 
     if skipped_count > 0
@@ -240,7 +248,7 @@ Reprioritize remaining pairs by moving pairs involving concordant complexes to t
 Pairs involving concordant complexes are sorted by correlation strength.
 """
 function reprioritize_by_concordant_complexes(
-    remaining_pairs::Vector{Tuple{Int,Int,Set{Symbol}}},
+    remaining_pairs::Vector{Tuple{Int,Int,UInt8}},
     concordant_complexes::Set{Symbol},
     concordance_tracker::ConcordanceTracker)
     if isempty(concordant_complexes)
@@ -249,22 +257,22 @@ function reprioritize_by_concordant_complexes(
 
     # Pre-allocate with size hints for better performance
     n_pairs = length(remaining_pairs)
-    priority_pairs = Vector{Tuple{Int,Int,Set{Symbol}}}()
-    regular_pairs = Vector{Tuple{Int,Int,Set{Symbol}}}()
+    priority_pairs = Vector{Tuple{Int,Int,UInt8}}()
+    regular_pairs = Vector{Tuple{Int,Int,UInt8}}()
     sizehint!(priority_pairs, n_pairs ÷ 2)  # Estimate
     sizehint!(regular_pairs, n_pairs ÷ 2)   # Estimate
 
     # Cache the idx_to_id lookups to avoid repeated dictionary access
     idx_to_id = concordance_tracker.idx_to_id
 
-    for (c1_idx, c2_idx, directions) in remaining_pairs
+    for (c1_idx, c2_idx, directions_bits) in remaining_pairs
         c1_id = idx_to_id[c1_idx]
         c2_id = idx_to_id[c2_idx]
 
         if c1_id in concordant_complexes || c2_id in concordant_complexes
-            push!(priority_pairs, (c1_idx, c2_idx, directions))
+            push!(priority_pairs, (c1_idx, c2_idx, directions_bits))
         else
-            push!(regular_pairs, (c1_idx, c2_idx, directions))
+            push!(regular_pairs, (c1_idx, c2_idx, directions_bits))
         end
     end
 
@@ -286,7 +294,7 @@ Apply transitivity elimination to remove pairs that are guaranteed to be concord
 based on already discovered concordant pairs.
 """
 function apply_transitivity_elimination(
-    remaining_pairs::Vector{Tuple{Int,Int,Set{Symbol}}},
+    remaining_pairs::Vector{Tuple{Int,Int,UInt8}},
     newly_concordant::Vector{Tuple{Symbol,Symbol}},
     concordance_tracker::ConcordanceTracker
 )
@@ -296,7 +304,7 @@ function apply_transitivity_elimination(
 
     # Count pairs that are now concordant through transitivity
     transitive_concordant_count = 0
-    filtered_pairs = filter(remaining_pairs) do (c1_idx, c2_idx, directions)
+    filtered_pairs = filter(remaining_pairs) do (c1_idx, c2_idx, directions_bits)
         if are_concordant(concordance_tracker, c1_idx, c2_idx)
             transitive_concordant_count += 1
             return false
@@ -380,7 +388,7 @@ Process a batch of concordance tests using ConstraintTrees templated approach wi
 """
 function process_concordance_batch(
     constraints::C.ConstraintTree,
-    batch_pairs::Vector{Tuple{Int,Int,Set{Symbol}}},
+    batch_pairs::Vector{Tuple{Int,Int,UInt8}},
     concordance_tracker::ConcordanceTracker;
     optimizer,
     settings=[],
@@ -389,9 +397,10 @@ function process_concordance_batch(
 )
     # Create COBREXA-style test array with direction multipliers
     test_array = []
-    for (c1_idx, c2_idx, directions) in batch_pairs
+    for (c1_idx, c2_idx, directions_bits) in batch_pairs
         c1_id, c2_id = concordance_tracker.idx_to_id[c1_idx], concordance_tracker.idx_to_id[c2_idx]
-        for direction in directions
+        # Iterate over directions using bit flags
+        for direction in iterate_directions(directions_bits)
             # Add both MIN (-1) and MAX (+1) tests
             push!(test_array, (c1_id, c2_id, direction, -1))  # MIN test
             push!(test_array, (c1_id, c2_id, direction, +1))  # MAX test
@@ -445,7 +454,7 @@ function process_concordance_batch(
 
     final_results = []
     for (i, pair_results_by_dir) in enumerate(batch_results)
-        c1_idx, c2_idx, original_directions = batch_pairs[i]
+        c1_idx, c2_idx, original_directions_bits = batch_pairs[i]
 
         all_concordant = true
         final_lambda = nothing
@@ -1012,14 +1021,14 @@ end
 
 function screen_dual_optimization_model(
     f,
-    base_constraints::C.ConstraintTree,
+    constraints::C.ConstraintTree,
     args...;
     optimizer,
     settings=[],
     workers=D.workers(),
 )
-    pos_constraints = base_constraints.charnes_cooper.positive
-    neg_constraints = base_constraints.charnes_cooper.negative
+    pos_constraints = constraints.charnes_cooper.positive
+    neg_constraints = constraints.charnes_cooper.negative
 
     worker_cache = COBREXA.worker_local_data(
         constraints_tuple -> begin
