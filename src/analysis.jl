@@ -11,6 +11,58 @@ This module contains:
 import COBREXA: worker_local_data, get_worker_local_data
 import Base.Iterators
 
+"""
+Extract numerical tolerance from JuMP optimizer for consistent thresholding.
+Creates a temporary model to query the optimizer's tolerance settings.
+"""
+function extract_solver_tolerance(optimizer, settings=[])::Float64
+    default_tolerance = 1e-6  # Conservative fallback
+
+    try
+        # Create a minimal model to query optimizer attributes
+        temp_model = JuMP.Model(optimizer)
+
+        # Apply settings to get the actual configured tolerances
+        for setting in [COBREXA.configuration.default_solver_settings; settings]
+            setting(temp_model)
+        end
+
+        # Try common tolerance attribute names across different solvers
+        tolerance_attrs = [
+            "primal_feasibility_tolerance",  # HiGHS, Gurobi
+            "dual_feasibility_tolerance",    # HiGHS, Gurobi  
+            "feasibility_tolerance",         # Some solvers
+            "FeasibilityTol",               # Gurobi
+            "OptimalityTol",                # Gurobi
+            "primal_tolerance",             # CPLEX-style
+            "dual_tolerance"                # CPLEX-style
+        ]
+
+        detected_tolerances = Float64[]
+
+        for attr in tolerance_attrs
+            try
+                tol = JuMP.get_optimizer_attribute(temp_model, attr)
+                if isa(tol, Real) && tol > 0 && tol < 1e-3
+                    push!(detected_tolerances, Float64(tol))
+                end
+            catch
+                # Attribute not supported by this solver, continue
+            end
+        end
+
+        # Return the most restrictive (smallest) tolerance found
+        if !isempty(detected_tolerances)
+            return minimum(detected_tolerances)
+        end
+
+    catch e
+        @debug "Could not extract solver tolerance" exception = e
+    end
+
+    return default_tolerance
+end
+
 # Helper function for iterating directions from bit flags
 @inline function iterate_directions(bits::UInt8)
     directions = Symbol[]
@@ -41,16 +93,15 @@ function process_in_batches(
     tolerance::Float64=1e-2,
     use_transitivity::Bool=true
 )
-    batch_results = Dict{String,Any}(
-        "batches_completed" => 0,
-        "pairs_processed" => 0,
-        "concordant_pairs" => Set{Tuple{Int,Int}}(),
-        "non_concordant_pairs" => 0,
-        "skipped_by_transitivity" => 0,
-        "transitive_pairs" => 0,
-        "timeout_pairs" => 0,
-        "optimization_results" => Dict{Tuple{Int,Int,Symbol},Float64}()
-    )
+    # Use separate variables - following Julia performance best practices
+    batches_completed = 0
+    pairs_processed = 0
+    concordant_pairs = Set{Tuple{Int,Int}}()
+    non_concordant_pairs = 0
+    skipped_by_transitivity = 0
+    transitive_pairs = 0
+    timeout_pairs = 0
+    optimization_results = Dict{Tuple{Int,Int,Symbol},Float64}()
 
     sorted_pairs = sort(candidate_priorities,
         by=p -> (p.cv, p.c1_idx, p.c2_idx))
@@ -89,7 +140,7 @@ function process_in_batches(
                 remaining_pairs,
                 concordance_tracker
             )
-            batch_results["skipped_by_transitivity"] += skipped_count
+            skipped_by_transitivity += skipped_count
         else
             filtered_pairs = remaining_pairs
             skipped_count = 0
@@ -130,25 +181,25 @@ function process_in_batches(
             c1_idx, c2_idx, direction, is_concordant, lambda, has_timeout = result
 
             if has_timeout
-                batch_results["timeout_pairs"] += 1
+                timeout_pairs += 1
             end
 
             if is_concordant
                 union_sets!(concordance_tracker, c1_idx, c2_idx)
-                push!(batch_results["concordant_pairs"], (c1_idx, c2_idx))
+                push!(concordant_pairs, (c1_idx, c2_idx))
                 push!(newly_concordant, (idx_to_id[c1_idx], idx_to_id[c2_idx]))
                 batch_concordant_count += 1
 
                 if !isnothing(lambda)
-                    batch_results["optimization_results"][(c1_idx, c2_idx, direction)] = lambda
+                    optimization_results[(c1_idx, c2_idx, direction)] = lambda
                 end
             else
                 add_non_concordant!(concordance_tracker, c1_idx, c2_idx)
-                batch_results["non_concordant_pairs"] += 1
+                non_concordant_pairs += 1
             end
         end
 
-        concordant_count = length(batch_results["concordant_pairs"])
+        concordant_count = length(concordant_pairs)
 
         if batch_concordant_count > 0 && use_transitivity
             prev_num_pairs = length(remaining_pairs)
@@ -159,7 +210,7 @@ function process_in_batches(
             )
             pairs_eliminated = prev_num_pairs - length(remaining_pairs)
             eliminated_count += pairs_eliminated
-            batch_results["transitive_pairs"] += transitive_count
+            transitive_pairs += transitive_count
         end
 
         if batch_concordant_count >= 1
@@ -181,8 +232,8 @@ function process_in_batches(
             prioritized_count = batch_prioritized_count
         end
 
-        batch_results["pairs_processed"] += length(batch_pairs)
-        batch_results["batches_completed"] = batch_count
+        pairs_processed += length(batch_pairs)
+        batches_completed = batch_count
 
         @debug "Batch $(batch_count) complete" new_concordant = batch_concordant_count
 
@@ -190,7 +241,7 @@ function process_in_batches(
             showvalues=[
                 (:batch, batch_count),
                 (:computed, concordant_count),
-                (:transitive, batch_results["transitive_pairs"]),
+                (:transitive, transitive_pairs),
                 (:eliminated, eliminated_count)
             ]
         )
@@ -200,11 +251,21 @@ function process_in_batches(
 
     @info "Concordance testing complete" (
         total_batches=batch_count,
-        total_concordant_pairs=length(batch_results["concordant_pairs"]),
+        total_concordant_pairs=length(concordant_pairs),
         total_concordant_complexes=length(all_concordant_complexes)
     )
 
-    return batch_results
+    # Return results as a named tuple for type stability
+    return (
+        batches_completed = batches_completed,
+        pairs_processed = pairs_processed,
+        concordant_pairs = concordant_pairs,
+        non_concordant_pairs = non_concordant_pairs,
+        skipped_by_transitivity = skipped_by_transitivity,
+        transitive_pairs = transitive_pairs,
+        timeout_pairs = timeout_pairs,
+        optimization_results = optimization_results
+    )
 end
 
 """
@@ -333,26 +394,31 @@ $(TYPEDSIGNATURES)
 
 Helper function to process optimization results into the expected format.
 """
+# Define concrete types for better type stability
+const OptValue = Union{Float64,Nothing}
+const TestResult = Tuple{OptValue,OptValue,Bool}  # (min_val, max_val, timeout)
+const DirectionResult = Tuple{Symbol,TestResult}  # (direction, test_result)
+
 function process_optimization_results(optimization_results, batch_pairs, concordance_tracker)
     # Group results by (c1_id, c2_id, direction) - use concrete types
-    result_dict = Dict{Tuple{Symbol,Symbol,Symbol},Dict{Int,Tuple{Union{Float64,Nothing},Bool}}}()
+    result_dict = Dict{Tuple{Symbol,Symbol,Symbol},Dict{Int,Tuple{OptValue,Bool}}}()
 
     for result in optimization_results
         c1_id, c2_id, direction, dir_multiplier, actual_value, timeout = result
         key = (c1_id, c2_id, direction)
         if !haskey(result_dict, key)
-            result_dict[key] = Dict{Int,Tuple{Union{Float64,Nothing},Bool}}()
+            result_dict[key] = Dict{Int,Tuple{OptValue,Bool}}()
         end
         result_dict[key][dir_multiplier] = (actual_value, timeout)
     end
 
     # Convert to pair format - use concrete types
-    pair_results_dict = Dict{Tuple{Symbol,Symbol},Vector{Tuple{Symbol,Tuple{Union{Float64,Nothing},Union{Float64,Nothing},Bool}}}}()
+    pair_results_dict = Dict{Tuple{Symbol,Symbol},Vector{DirectionResult}}()
 
     for ((c1_id, c2_id, direction), minmax_results) in result_dict
         key = (c1_id, c2_id)
         if !haskey(pair_results_dict, key)
-            pair_results_dict[key] = Tuple{Symbol,Tuple{Union{Float64,Nothing},Union{Float64,Nothing},Bool}}[]
+            pair_results_dict[key] = DirectionResult[]
         end
 
         min_result = get(minmax_results, -1, (nothing, false))
@@ -368,14 +434,14 @@ function process_optimization_results(optimization_results, batch_pairs, concord
     end
 
     # Pre-allocate results array
-    batch_results = Vector{Vector{Tuple{Symbol,Tuple{Union{Float64,Nothing},Union{Float64,Nothing},Bool}}}}(undef, length(batch_pairs))
+    batch_results = Vector{Vector{DirectionResult}}(undef, length(batch_pairs))
 
     # Cache idx_to_id for better performance
     idx_to_id = concordance_tracker.idx_to_id
 
     for (i, (c1_idx, c2_idx, _)) in enumerate(batch_pairs)
         c1_id, c2_id = idx_to_id[c1_idx], idx_to_id[c2_idx]
-        batch_results[i] = get(pair_results_dict, (c1_id, c2_id), Tuple{Symbol,Tuple{Union{Float64,Nothing},Union{Float64,Nothing},Bool}}[])
+        batch_results[i] = get(pair_results_dict, (c1_id, c2_id), DirectionResult[])
     end
 
     return batch_results
@@ -541,7 +607,9 @@ function concordance_analysis(
         model
     end
 
-    @info "Starting concordance analysis" n_workers = length(workers) tolerance coarse_cv_threshold cv_threshold sample_size use_unidirectional_constraints batch_size
+    # Detect solver tolerance for consistent numerical thresholds
+    solver_tolerance = extract_solver_tolerance(optimizer, settings)
+    @info "Starting concordance analysis" n_workers = length(workers) tolerance coarse_cv_threshold cv_threshold sample_size use_unidirectional_constraints batch_size solver_tolerance
 
     constraints, complexes =
         concordance_constraints(model; modifications, use_unidirectional_constraints, return_complexes=true)
@@ -692,8 +760,8 @@ function concordance_analysis(
     negative_complexes = falses(n_complexes)
     unrestricted_complexes = falses(n_complexes)
 
-    # MATLAB-style balanced complex detection with tighter threshold
-    balanced_threshold = 1e-9
+    # Use solver tolerance for balanced complex detection - ensures consistency with optimization
+    balanced_threshold = solver_tolerance
 
     # Process complexes using direct loop indices (no unnecessary lookups)
     for (i, cid) in enumerate(concordance_tracker.idx_to_id)
@@ -703,7 +771,7 @@ function concordance_analysis(
         if complex_ranges[i] !== nothing
             min_val, max_val = complex_ranges[i]
 
-            # MATLAB-style rounding to threshold precision - use more efficient operations
+            # Rounding thresholds to avoid numerical instability
             rounded_min = round(min_val / balanced_threshold) * balanced_threshold
             rounded_max = round(max_val / balanced_threshold) * balanced_threshold
 
@@ -746,7 +814,11 @@ function concordance_analysis(
         for (c1, c2) in trivial_pairs if haskey(concordance_tracker.id_to_idx, c1) && haskey(concordance_tracker.id_to_idx, c2)
     )
 
-    rng = isnothing(seed) ? Random.GLOBAL_RNG : StableRNG(seed)
+    rng = if seed === nothing
+        Random.GLOBAL_RNG
+    else
+        StableRNG(seed::Int)
+    end
     decimals = max(0, -floor(Int, log10(1e-9)))
     aggregate = rows -> round.(vec(hcat(rows...)), digits=decimals)
     @info "Sampling schedule"
@@ -892,13 +964,13 @@ function concordance_analysis(
 
     @info "Candidate pairs identified" n_pairs = length(candidate_priorities) filter_time_sec = round(filter_time, digits=2)
 
-    # Calculate adaptive batch size if not specified
+    # Calculate adaptive batch size if not specified - ensure type stability
     n_candidates = length(candidate_priorities)
-    adaptive_batch_size = if batch_size === nothing && n_candidates > 0
+    adaptive_batch_size::Int = if batch_size === nothing && n_candidates > 0
         # Aim for approximately 10 batches
         max(1, n_candidates ÷ 10)
     else
-        batch_size !== nothing ? batch_size : 50  # fallback to 50 if no candidates
+        batch_size !== nothing ? batch_size::Int : 50  # fallback to 50 if no candidates
     end
 
     @info "Processing concordance tests in batches" batch_size_used = adaptive_batch_size target_batches = (n_candidates > 0 ? n_candidates ÷ adaptive_batch_size : 0)
@@ -940,7 +1012,7 @@ function concordance_analysis(
                 min_activities[df_row_idx] = min_act
                 max_activities[df_row_idx] = max_act
                 if cid in trivially_balanced
-                    ava_confirms[df_row_idx] = abs(min_act) < tolerance && abs(max_act) < tolerance
+                    ava_confirms[df_row_idx] = abs(min_act) < solver_tolerance && abs(max_act) < solver_tolerance
                 else
                     ava_confirms[df_row_idx] = nothing
                 end
@@ -968,7 +1040,7 @@ function concordance_analysis(
         DataFrame(c1_idx=Int[], c2_idx=Int[], direction=Symbol[], lambda=Float64[])
 
     # Sort lambda results for deterministic output
-    sorted_lambda_results = sort(collect(batch_results["optimization_results"]), by=x -> x[1])
+    sorted_lambda_results = sort(collect(batch_results.optimization_results), by=x -> x[1])
     for ((c1_idx, c2_idx, direction), lambda) in sorted_lambda_results
         push!(lambda_df, (c1_idx, c2_idx, direction, lambda))
     end
@@ -981,14 +1053,14 @@ function concordance_analysis(
         "n_trivially_balanced" => length(trivially_balanced),
         "n_trivial_pairs" => length(trivial_pairs),
         "n_candidate_pairs" => length(candidate_priorities),
-        "n_computed_pairs" => length(batch_results["concordant_pairs"]),
-        "n_transitive_pairs" => batch_results["transitive_pairs"],
-        "n_concordant_pairs" => length(batch_results["concordant_pairs"]) + batch_results["transitive_pairs"] + length(trivial_pairs),
-        "n_non_concordant_pairs" => batch_results["non_concordant_pairs"],
-        "n_skipped_transitivity" => batch_results["skipped_by_transitivity"],
-        "n_timeout_pairs" => batch_results["timeout_pairs"],
+        "n_computed_pairs" => length(batch_results.concordant_pairs),
+        "n_transitive_pairs" => batch_results.transitive_pairs,
+        "n_concordant_pairs" => length(batch_results.concordant_pairs) + batch_results.transitive_pairs + length(trivial_pairs),
+        "n_non_concordant_pairs" => batch_results.non_concordant_pairs,
+        "n_skipped_transitivity" => batch_results.skipped_by_transitivity,
+        "n_timeout_pairs" => batch_results.timeout_pairs,
         "n_modules" => length(modules),
-        "batches_completed" => batch_results["batches_completed"],
+        "batches_completed" => batch_results.batches_completed,
         "elapsed_time" => elapsed,
     )
 

@@ -14,7 +14,7 @@ highs_settings = [
     COBREXA.set_optimizer_attribute("dual_feasibility_tolerance", 1e-10),
     COBREXA.set_optimizer_attribute("mip_feasibility_tolerance", 1e-10),
     COBREXA.set_optimizer_attribute("random_seed", 42),
-    COBREXA.set_optimizer_attribute("time_limit", 240.0),  # 1 minute per optimization
+    COBREXA.set_optimizer_attribute("time_limit", 600.0),  # 10 minutes per optimization
     COBREXA.set_optimizer_attribute("presolve", "on"),
 ]
 test_model = COBREXA.load_model(test_model_path)

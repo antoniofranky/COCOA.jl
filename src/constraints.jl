@@ -173,16 +173,18 @@ $(TYPEDSIGNATURES)
 Efficiently and deterministically extract all unique complexes from the model.
 """
 function extract_complexes_from_model(model::AbstractFBCModels.AbstractFBCModel)
-    # Step 1: Accumulate reaction contributions for each unique complex.
-    # The key is the canonical representation of the complex (a sorted vector of its metabolites).
-    complex_data = Dict{Vector{Tuple{Symbol,Float64}},Dict{Symbol,Float64}}()
-    
     # Pre-allocate and cache model data for better performance
     S = AbstractFBCModels.stoichiometry(model)
     reactions = AbstractFBCModels.reactions(model)
     metabolites = AbstractFBCModels.metabolites(model)
     n_reactions = length(reactions)
     n_metabolites = length(metabolites)
+    
+    # Step 1: Accumulate reaction contributions for each unique complex.
+    # The key is the canonical representation of the complex (a sorted vector of its metabolites).
+    # Pre-size for better performance - estimate 2x reactions for complexes
+    complex_data = Dict{Vector{Tuple{Symbol,Float64}},Dict{Symbol,Float64}}()
+    sizehint!(complex_data, n_reactions * 2)
     
     # Pre-allocate reaction map with known size
     reaction_map = Dict{String,Int}()
@@ -216,17 +218,31 @@ function extract_complexes_from_model(model::AbstractFBCModels.AbstractFBCModel)
             end
         end
 
-        # Process substrate side
+        # Process substrate side - pre-size reaction contributions dict
         if !isempty(substrate_mets)
             sort!(substrate_mets, by=x -> x[1])
-            reaction_contribs = get!(complex_data, copy(substrate_mets), Dict{Symbol,Float64}())
+            substrate_key = copy(substrate_mets)
+            if !haskey(complex_data, substrate_key)
+                reaction_contribs = Dict{Symbol,Float64}()
+                sizehint!(reaction_contribs, 10)  # Conservative estimate
+                complex_data[substrate_key] = reaction_contribs
+            else
+                reaction_contribs = complex_data[substrate_key]
+            end
             reaction_contribs[rxn_symbol] = get(reaction_contribs, rxn_symbol, 0.0) - 1.0
         end
 
-        # Process product side
+        # Process product side - pre-size reaction contributions dict
         if !isempty(product_mets)
             sort!(product_mets, by=x -> x[1])
-            reaction_contribs = get!(complex_data, copy(product_mets), Dict{Symbol,Float64}())
+            product_key = copy(product_mets)
+            if !haskey(complex_data, product_key)
+                reaction_contribs = Dict{Symbol,Float64}()
+                sizehint!(reaction_contribs, 10)  # Conservative estimate
+                complex_data[product_key] = reaction_contribs
+            else
+                reaction_contribs = complex_data[product_key]
+            end
             reaction_contribs[rxn_symbol] = get(reaction_contribs, rxn_symbol, 0.0) + 1.0
         end
     end
