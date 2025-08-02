@@ -6,7 +6,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
-#SBATCH --mem=60G
+#SBATCH --mem=128G
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=schaffran1@uni-potsdam.de
 #SBATCH --hint=nomultithread
@@ -14,12 +14,12 @@
 # Create a unique output directory based on job ID and timestamp
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
-# Calculate heap size hint (80% of available memory)
-HEAP_SIZE_GB=$(( 60 * 8 / 10 ))
+# Calculate heap size hint (80% of allocated memory from SLURM_MEM_PER_NODE)
+HEAP_SIZE_GB=$(( SLURM_MEM_PER_NODE * 8 / 10 / 1024 ))
 HEAP_SIZE="${HEAP_SIZE_GB}G"
 
 # HPC optimizations for Julia
-export JULIA_NUM_THREADS="auto"
+export JULIA_NUM_THREADS=1
 export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
@@ -28,7 +28,7 @@ export JULIA_GC_PARALLEL_COLLECT=1
 
 # Julia optimization flags
 JULIA_OPTS="--project=/work/schaffran1/COCOA.jl"
-JULIA_OPTS="$JULIA_OPTS -p 31 -t auto"
+JULIA_OPTS="$JULIA_OPTS -p 31"
 JULIA_OPTS="$JULIA_OPTS --heap-size-hint=$HEAP_SIZE"
 JULIA_OPTS="$JULIA_OPTS --startup-file=no"
 JULIA_OPTS="$JULIA_OPTS --history-file=no"
