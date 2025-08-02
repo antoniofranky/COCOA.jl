@@ -14,8 +14,8 @@ import Base.Iterators
 # Helper function for iterating directions from bit flags
 @inline function iterate_directions(bits::UInt8)
     directions = Symbol[]
-    (bits & 0x01) != 0 && push!(directions, :positive)  # DIRECTION_POSITIVE
-    (bits & 0x02) != 0 && push!(directions, :negative)  # DIRECTION_NEGATIVE
+    (bits & 0x01) != 0 && push!(directions, :positive)
+    (bits & 0x02) != 0 && push!(directions, :negative)
     return directions
 end
 
@@ -259,8 +259,8 @@ function reprioritize_by_concordant_complexes(
     n_pairs = length(remaining_pairs)
     priority_pairs = Vector{Tuple{Int,Int,UInt8}}()
     regular_pairs = Vector{Tuple{Int,Int,UInt8}}()
-    sizehint!(priority_pairs, n_pairs ÷ 2)  # Estimate
-    sizehint!(regular_pairs, n_pairs ÷ 2)   # Estimate
+    sizehint!(priority_pairs, n_pairs ÷ 2)
+    sizehint!(regular_pairs, n_pairs ÷ 2)
 
     # Cache the idx_to_id lookups to avoid repeated dictionary access
     idx_to_id = concordance_tracker.idx_to_id
@@ -522,7 +522,7 @@ function concordance_analysis(
     coarse_cv_threshold::Float64=0.1,
     sample_size::Int=100,
     coarse_sample_size::Int=Int(sample_size ÷ 5),
-    batch_size::Int=50,
+    batch_size::Union{Int,Nothing}=nothing,
     min_valid_samples::Int=10,
     seed::Union{Int,Nothing}=nothing,
     use_unidirectional_constraints::Bool=true,
@@ -544,7 +544,44 @@ function concordance_analysis(
     @info "Starting concordance analysis" n_workers = length(workers) tolerance coarse_cv_threshold cv_threshold sample_size use_unidirectional_constraints batch_size
 
     constraints, complexes =
-        concordance_constraints(model; modifications, use_unidirectional_constraints, objective_bound, optimizer, settings, return_complexes=true)
+        concordance_constraints(model; modifications, use_unidirectional_constraints, return_complexes=true)
+
+    # Add objective constraint if specified
+    if objective_bound !== nothing
+        # Validate objective_bound is callable
+        if !isa(objective_bound, Function)
+            throw(ArgumentError("objective_bound must be a function that takes optimal objective value and returns a constraint bound"))
+        end
+
+        # Get optimal objective value first
+        objective_flux = COBREXA.optimized_values(
+            constraints.balance;
+            objective=constraints.balance.objective.value,
+            output=constraints.balance.objective,
+            optimizer,
+            settings,
+        )
+
+        if objective_flux !== nothing
+            @info "Objective flux determined" objective_flux
+            # Add objective bound constraint to limit feasible space
+            constraints.balance *= :objective_bound^C.Constraint(
+                constraints.balance.objective.value,
+                objective_bound(objective_flux)
+            )
+            constraints.charnes_cooper.positive *= :objective_bound^C.Constraint(
+                constraints.charnes_cooper.positive.objective.value,
+                objective_bound(objective_flux)
+            )
+            constraints.charnes_cooper.negative *= :objective_bound^C.Constraint(
+                constraints.charnes_cooper.negative.objective.value,
+                objective_bound(objective_flux)
+            )
+            @info "Added objective bound constraint" optimal_value = objective_flux bound_value = objective_bound(objective_flux)
+        else
+            @warn "Could not determine optimal objective value, skipping objective constraint"
+        end
+    end
 
     n_complexes = length(complexes)
     complex_ids = sort(collect(keys(complexes)))
@@ -612,17 +649,56 @@ function concordance_analysis(
         warmup_matrix
     end
 
-    balanced_complexes = Set{Int}()
-    positive_complexes = Set{Int}()
-    negative_complexes = Set{Int}()
-    unrestricted_complexes = Set{Int}()
+    # # Check feasibility of warmup points if objective bound is applied
+    # if objective_bound !== nothing && !isempty(warmup_points) && haskey(constraints.balance, :objective_bound)
+    #     @info "Checking feasibility of warmup points with objective bound"
+    #     n_feasible = 0
+    #     n_infeasible = 0
+
+    #     obj_constraint = constraints.balance.objective_bound
+
+    #     for (i, point) in enumerate(warmup_points)
+    #         # Check if point satisfies the objective bound constraint
+    #         obj_value = sum(obj_constraint.value.weights[j] * point[obj_constraint.value.idxs[j]] for j in 1:length(obj_constraint.value.idxs) if obj_constraint.value.idxs[j] <= length(point))
+
+    #         bound = obj_constraint.bound
+    #         is_feasible = if bound isa C.Between
+    #             bound.lower <= obj_value <= bound.upper
+    #         elseif bound isa C.EqualTo
+    #             abs(obj_value - bound.equal_to) < 1e-9
+    #         else
+    #             true  # Unknown bound type, assume feasible
+    #         end
+
+    #         if is_feasible
+    #             n_feasible += 1
+    #         else
+    #             n_infeasible += 1
+    #             @debug "Infeasible warmup point" point_idx = i obj_value = obj_value bound = bound
+    #         end
+    #     end
+
+    #     @info "Warmup point feasibility check" n_total = length(warmup_points) n_feasible = n_feasible n_infeasible = n_infeasible
+
+    #     if n_infeasible > 0
+    #         @warn "$(n_infeasible) warmup points are infeasible with objective bound - this may cause sampling issues"
+    #     end
+    # end
+
+    # Use BitVectors consistently for optimal performance with large models (50K+ reactions)
+    n_complexes = length(concordance_tracker.idx_to_id)
+    balanced_complexes = falses(n_complexes)
+    positive_complexes = falses(n_complexes)
+    negative_complexes = falses(n_complexes)
+    unrestricted_complexes = falses(n_complexes)
 
     # MATLAB-style balanced complex detection with tighter threshold
     balanced_threshold = 1e-9
 
-    # Process complexes using proper concordance tracker indices
+    # Process complexes using direct loop indices (no unnecessary lookups)
     for (i, cid) in enumerate(concordance_tracker.idx_to_id)
-        idx = concordance_tracker.id_to_idx[cid]  # Use actual tracker index
+        # Use loop index directly - concordance_tracker ensures idx_to_id[i] maps to index i
+        idx = i
 
         if complex_ranges[i] !== nothing
             min_val, max_val = complex_ranges[i]
@@ -632,20 +708,20 @@ function concordance_analysis(
             rounded_max = round(max_val / balanced_threshold) * balanced_threshold
 
             if rounded_min == 0.0 && rounded_max == 0.0
-                push!(balanced_complexes, idx)
+                balanced_complexes[idx] = true
             elseif rounded_min >= 0.0
-                push!(positive_complexes, idx)
+                positive_complexes[idx] = true
             elseif rounded_max <= 0.0
-                push!(negative_complexes, idx)
+                negative_complexes[idx] = true
             else
-                push!(unrestricted_complexes, idx)
+                unrestricted_complexes[idx] = true
             end
         else
-            push!(unrestricted_complexes, idx)
+            unrestricted_complexes[idx] = true
         end
     end
 
-    @info "Complex classification" balanced = length(balanced_complexes) trivially_balanced = length(trivially_balanced) positive = length(positive_complexes) negative = length(negative_complexes) unrestricted = length(unrestricted_complexes)
+    @info "Complex classification" balanced = count(balanced_complexes) trivially_balanced = length(trivially_balanced) positive = count(positive_complexes) negative = count(negative_complexes) unrestricted = count(unrestricted_complexes)
 
     for (c1_id, c2_id) in trivial_pairs
         union_sets!(concordance_tracker, concordance_tracker.id_to_idx[c1_id], concordance_tracker.id_to_idx[c2_id])
@@ -684,7 +760,7 @@ function concordance_analysis(
     n_starting_points = sample_size  # Exactly sample_size starting points for sample_size samples
 
     # 2. Minimal burn-in since each starting point is already diverse
-    n_burnin = 500  # Short burn-in, diversity comes from different starting points
+    n_burnin = 50  # Short burn-in, diversity comes from different starting points
     n_spacing = 1   # No spacing needed since each starting point is independent
 
     # 3. Calculate expected total
@@ -808,7 +884,6 @@ function concordance_analysis(
         balanced_complexes,
         positive_complexes,
         negative_complexes,
-        unrestricted_complexes,
         trivial_pairs_indices,
         samples_tree, # Pass the collected samples
         concordance_tracker;
@@ -817,7 +892,16 @@ function concordance_analysis(
 
     @info "Candidate pairs identified" n_pairs = length(candidate_priorities) filter_time_sec = round(filter_time, digits=2)
 
-    @info "Processing concordance tests in batches"
+    # Calculate adaptive batch size if not specified
+    n_candidates = length(candidate_priorities)
+    adaptive_batch_size = if batch_size === nothing && n_candidates > 0
+        # Aim for approximately 10 batches
+        max(1, n_candidates ÷ 10)
+    else
+        batch_size !== nothing ? batch_size : 50  # fallback to 50 if no candidates
+    end
+
+    @info "Processing concordance tests in batches" batch_size_used = adaptive_batch_size target_batches = (n_candidates > 0 ? n_candidates ÷ adaptive_batch_size : 0)
     concordance_time = @elapsed batch_results = process_in_batches(
         constraints,
         candidate_priorities,
@@ -825,7 +909,7 @@ function concordance_analysis(
         optimizer=optimizer,
         settings=settings,
         workers=workers,
-        batch_size=batch_size,
+        batch_size=adaptive_batch_size,
         tolerance,
         use_transitivity=use_transitivity,
     )
@@ -893,7 +977,7 @@ function concordance_analysis(
 
     stats = Dict(
         "n_complexes" => n_complexes,
-        "n_balanced" => length(balanced_complexes),
+        "n_balanced" => count(balanced_complexes),
         "n_trivially_balanced" => length(trivially_balanced),
         "n_trivial_pairs" => length(trivial_pairs),
         "n_candidate_pairs" => length(candidate_priorities),
@@ -931,7 +1015,7 @@ function ava_output_with_warmup(dir, om; digits=6)
     return (activity, flux_vector)
 end
 
-function extract_modules(tracker::ConcordanceTracker, balanced_complexes::Set{Int})
+function extract_modules(tracker::ConcordanceTracker, balanced_complexes::BitVector)
     groups = Dict{Int,Vector{Int}}()
     n = length(tracker.parent)
 
@@ -945,15 +1029,16 @@ function extract_modules(tracker::ConcordanceTracker, balanced_complexes::Set{In
 
     modules = Dict{Symbol,Set{Symbol}}()
 
-    if !isempty(balanced_complexes)
-        modules[:balanced] = Set(tracker.idx_to_id[i] for i in balanced_complexes)
+    if any(balanced_complexes)
+        modules[:balanced] = Set(tracker.idx_to_id[i] for i in findall(balanced_complexes))
     end
 
     module_idx = 1
     for (root, members) in groups
         if length(members) > 1
             complex_ids = Set(tracker.idx_to_id[i] for i in members)
-            if !isempty(balanced_complexes) && issubset(Set(members), balanced_complexes)
+            # Check if all members are balanced using BitVector
+            if any(balanced_complexes) && all(i <= length(balanced_complexes) && balanced_complexes[i] for i in members)
                 continue
             end
             module_id = Symbol("module_$(module_idx)")

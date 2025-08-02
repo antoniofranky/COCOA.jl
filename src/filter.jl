@@ -72,7 +72,7 @@ mutable struct StableVariance
     n::Int
     mean::Float64
     m2::Float64  # Sum of squares of differences from current mean
-    
+
     StableVariance() = new(0, 0.0, 0.0)
 end
 
@@ -128,10 +128,10 @@ end
 
 # Generic CV computation that chooses algorithm based on config
 @inline function compute_cv_adaptive(
-    c1_samples::Vector{Float64}, 
+    c1_samples::Vector{Float64},
     c2_samples::Vector{Float64},
-    start_idx::Int, 
-    end_idx::Int, 
+    start_idx::Int,
+    end_idx::Int,
     config::FilterConfig
 )
     if config.use_stable_variance
@@ -227,7 +227,7 @@ Uses a max-heap so we can efficiently remove the worst (highest CV) candidates.
 mutable struct TopKHeap
     heap::BinaryMaxHeap{PairPriority}
     max_size::Int
-    
+
     function TopKHeap(max_size::Int)
         # Custom ordering: higher CV = higher priority (worse candidates)
         heap = BinaryMaxHeap{PairPriority}(Base.By(p -> p.cv))
@@ -258,12 +258,12 @@ end
 function extract_sorted_results(h::TopKHeap)::Vector{PairPriority}
     results = Vector{PairPriority}()
     sizehint!(results, length(h.heap))
-    
+
     # Extract all elements (this empties the heap)
     while !isempty(h.heap)
         push!(results, pop!(h.heap))
     end
-    
+
     # Reverse since we extracted from max-heap (worst first)
     reverse!(results)
     return results
@@ -277,34 +277,9 @@ Ultra-efficient three-stage streaming pipeline.
 """
 function streaming_filter(
     complexes::Vector,
-    balanced_complexes::Set{Int},
-    positive_complexes::Set{Int},
-    negative_complexes::Set{Int},
-    unrestricted_complexes::Set{Int},
-    trivial_pairs::Set{Tuple{Int,Int}},
-    samples_tree::C.Tree{Vector{Float64}},
-    concordance_tracker::ConcordanceTracker;
-    config::FilterConfig=FilterConfig()
-)
-    # Convert Sets to BitVectors for better performance
-    n = length(complexes)
-    balanced_bv = set_to_bitvector(balanced_complexes, n)
-    positive_bv = set_to_bitvector(positive_complexes, n)
-    negative_bv = set_to_bitvector(negative_complexes, n)
-    
-    return streaming_filter_bitvector(
-        complexes, balanced_bv, positive_bv, negative_bv, 
-        unrestricted_complexes, trivial_pairs, samples_tree,
-        concordance_tracker; config=config
-    )
-end
-
-function streaming_filter_bitvector(
-    complexes::Vector,
     balanced_complexes::BitVector,
     positive_complexes::BitVector,
     negative_complexes::BitVector,
-    unrestricted_complexes::Set{Int},
     trivial_pairs::Set{Tuple{Int,Int}},
     samples_tree::C.Tree{Vector{Float64}},
     concordance_tracker::ConcordanceTracker;
@@ -314,7 +289,7 @@ function streaming_filter_bitvector(
 
     # Stage 1: Count pairs without materializing
     stage1_start = time()
-    n_pairs = count_valid_pairs_bitvector(complexes, balanced_complexes, trivial_pairs, concordance_tracker)
+    n_pairs = count_valid_pairs(complexes, balanced_complexes, trivial_pairs, concordance_tracker)
     @info "Stage 1: Counted pairs" n_pairs time_sec = round(time() - stage1_start, digits=2)
 
     # Stage 2 & 3: Stream processing
@@ -322,18 +297,16 @@ function streaming_filter_bitvector(
     priorities = if n_pairs <= config.max_pairs_in_memory
         # Small enough to process directly
         @info "Processing all pairs directly (small dataset)"
-        process_all_pairs_bitvector(
+        process_all_pairs(
             complexes, balanced_complexes, trivial_pairs, samples_tree,
-            concordance_tracker, positive_complexes, negative_complexes,
-            unrestricted_complexes, config
+            concordance_tracker, positive_complexes, negative_complexes, config
         )
     else
         # Stream in chunks
         @info "Processing in streaming chunks (large dataset)" chunk_size = config.chunk_size
-        process_streaming_chunks_bitvector(
+        process_streaming_chunks(
             complexes, balanced_complexes, trivial_pairs, samples_tree,
-            concordance_tracker, positive_complexes, negative_complexes,
-            unrestricted_complexes, config
+            concordance_tracker, positive_complexes, negative_complexes, config
         )
     end
     stage23_time = time() - stage23_start
@@ -344,27 +317,8 @@ function streaming_filter_bitvector(
 end
 
 # --- Stage 1: Counting without allocation ---
-function count_valid_pairs(complexes, balanced, trivial, concordance_tracker)
-    count = 0
-    n = length(complexes)
-    @inbounds for i in 1:n
-        # Cache balanced check for i to avoid repeated lookups
-        i_balanced = i in balanced
-        if i_balanced
-            continue  # Skip entire inner loop if i is balanced
-        end
-
-        for j in (i+1):n
-            if should_test_pair_indices_optimized(i, j, balanced, trivial, concordance_tracker, i_balanced)
-                count += 1
-            end
-        end
-    end
-    return count
-end
-
-# BitVector version using BitVector for O(1) lookups
-function count_valid_pairs_bitvector(complexes, balanced::BitVector, trivial, concordance_tracker)
+# Optimized BitVector implementation for large models (50K+ reactions)
+function count_valid_pairs(complexes, balanced::BitVector, trivial, concordance_tracker)
     count = 0
     n = length(complexes)
     @inbounds for i in 1:n
@@ -375,7 +329,7 @@ function count_valid_pairs_bitvector(complexes, balanced::BitVector, trivial, co
         end
 
         for j in (i+1):n
-            if should_test_pair_indices_bitvector(i, j, balanced, trivial, concordance_tracker, i_balanced)
+            if should_test_pair_indices(i, j, balanced, trivial, concordance_tracker, i_balanced)
                 count += 1
             end
         end
@@ -384,100 +338,53 @@ function count_valid_pairs_bitvector(complexes, balanced::BitVector, trivial, co
 end
 
 
-# Optimized version that takes pre-computed i_balanced for better cache usage
-@inline function should_test_pair_indices_optimized(i::Int, j::Int, balanced, trivial, concordance_tracker, i_balanced::Bool)
-    # i_balanced already checked by caller - skip redundant lookup
-    i_balanced && return false
-    
-    # Fast Set lookup for j - most likely to fail after i check
-    j in balanced && return false
-    
-    # Trivial pairs check - relatively fast Set lookup
-    (i, j) in trivial && return false
-    
-    # Concordance checks - more expensive due to Union-Find operations
-    # Check concordant first as it's typically faster than non-concordant
-    are_concordant(concordance_tracker, i, j) && return false
-    is_non_concordant(concordance_tracker, i, j) && return false
-    
-    return true
-end
 
 # BitVector-optimized version with O(1) lookups
-@inline function should_test_pair_indices_bitvector(i::Int, j::Int, balanced::BitVector, trivial, concordance_tracker, i_balanced::Bool)
+@inline function should_test_pair_indices(i::Int, j::Int, balanced::BitVector, trivial, concordance_tracker, i_balanced::Bool)
     # i_balanced already checked by caller - skip redundant lookup
     i_balanced && return false
-    
+
     # Fast BitVector lookup for j - O(1) with better cache behavior
     balanced[j] && return false
-    
+
     # Trivial pairs check - relatively fast Set lookup
     (i, j) in trivial && return false
-    
+
     # Concordance checks - more expensive due to Union-Find operations
     are_concordant(concordance_tracker, i, j) && return false
     is_non_concordant(concordance_tracker, i, j) && return false
-    
+
     return true
 end
 
-# Keep original function for backward compatibility, but optimize with condition reordering
-@inline function should_test_pair_indices(i::Int, j::Int, balanced, trivial, concordance_tracker)
-    # Reorder conditions by expected frequency of failure for better branch prediction
-    j in balanced && return false  # Most common failure case
-    i in balanced && return false  # Second most common
-    (i, j) in trivial && return false
-    are_concordant(concordance_tracker, i, j) && return false
-    is_non_concordant(concordance_tracker, i, j) && return false
-    return true
-end
 
 # --- Direct processing for smaller datasets ---
+# Optimized BitVector implementation for large models
 function process_all_pairs(
-    complexes, balanced, trivial, samples_tree,
-    concordance_tracker, positive, negative, unrestricted, config
-)
-    # Generator for valid pairs
-    valid_pairs = (
-        (i, j) for i in 1:length(complexes)
-        for j in (i+1):length(complexes)
-        if should_test_pair_indices(i, j, balanced, trivial, concordance_tracker)
-    )
-
-    # Process with streaming statistics
-    priorities = process_pair_stream(
-        valid_pairs, samples_tree, concordance_tracker,
-        positive, negative, unrestricted, config
-    )
-
-    return priorities
-end
-
-# BitVector version using BitVectors
-function process_all_pairs_bitvector(
     complexes, balanced::BitVector, trivial, samples_tree,
-    concordance_tracker, positive::BitVector, negative::BitVector, unrestricted, config
+    concordance_tracker, positive::BitVector, negative::BitVector, config
 )
     # Generator for valid pairs with BitVector optimization
     valid_pairs = (
         (i, j) for i in 1:length(complexes)
         for j in (i+1):length(complexes)
-        if should_test_pair_indices_bitvector(i, j, balanced, trivial, concordance_tracker, balanced[i])
+        if should_test_pair_indices(i, j, balanced, trivial, concordance_tracker, balanced[i])
     )
 
     # Process with streaming statistics using BitVectors
-    priorities = process_pair_stream_bitvector(
+    priorities = process_pair_stream(
         valid_pairs, samples_tree, concordance_tracker,
-        positive, negative, unrestricted, config
+        positive, negative, config
     )
 
     return priorities
 end
 
 # --- Chunked streaming for huge datasets ---
+# Optimized BitVector implementation for large models
 function process_streaming_chunks(
-    complexes, balanced, trivial, samples_tree,
-    concordance_tracker, positive, negative, unrestricted, config
+    complexes, balanced::BitVector, trivial, samples_tree,
+    concordance_tracker, positive::BitVector, negative::BitVector, config
 )
     # Pre-allocate with type annotation for better performance
     all_priorities = Vector{PairPriority}()
@@ -487,21 +394,21 @@ function process_streaming_chunks(
 
     n = length(complexes)
     @inbounds for i in 1:n
-        # Cache balanced check for i to avoid repeated lookups
-        i_balanced = i in balanced
+        # Fast BitVector lookup for i
+        i_balanced = balanced[i]
         if i_balanced
             continue  # Skip entire inner loop if i is balanced
         end
 
         for j in (i+1):n
-            if should_test_pair_indices_optimized(i, j, balanced, trivial, concordance_tracker, i_balanced)
+            if should_test_pair_indices(i, j, balanced, trivial, concordance_tracker, i_balanced)
                 push!(chunk_pairs, (i, j))
 
                 if length(chunk_pairs) >= config.chunk_size
                     # Process chunk
                     chunk_priorities = process_pair_stream(
                         chunk_pairs, samples_tree, concordance_tracker,
-                        positive, negative, unrestricted, config
+                        positive, negative, config
                     )
                     append!(all_priorities, chunk_priorities)
 
@@ -534,7 +441,7 @@ function process_streaming_chunks(
     if !isempty(chunk_pairs)
         chunk_priorities = process_pair_stream(
             chunk_pairs, samples_tree, concordance_tracker,
-            positive, negative, unrestricted, config
+            positive, negative, config
         )
         append!(all_priorities, chunk_priorities)
     end
@@ -544,249 +451,28 @@ function process_streaming_chunks(
         sort!(all_priorities, by=p -> p.cv)
     end
     return all_priorities
-end
-
-# BitVector version using BitVectors
-function process_streaming_chunks_bitvector(
-    complexes, balanced::BitVector, trivial, samples_tree,
-    concordance_tracker, positive::BitVector, negative::BitVector, unrestricted, config
-)
-    # Pre-allocate with type annotation for better performance
-    all_priorities = Vector{PairPriority}()
-    sizehint!(all_priorities, config.max_pairs_in_memory)
-    chunk_pairs = Vector{Tuple{Int,Int}}()
-    sizehint!(chunk_pairs, config.chunk_size)
-
-    n = length(complexes)
-    @inbounds for i in 1:n
-        # Fast BitVector lookup for i
-        i_balanced = balanced[i]
-        if i_balanced
-            continue  # Skip entire inner loop if i is balanced
-        end
-
-        for j in (i+1):n
-            if should_test_pair_indices_bitvector(i, j, balanced, trivial, concordance_tracker, i_balanced)
-                push!(chunk_pairs, (i, j))
-
-                if length(chunk_pairs) >= config.chunk_size
-                    # Process chunk
-                    chunk_priorities = process_pair_stream_bitvector(
-                        chunk_pairs, samples_tree, concordance_tracker,
-                        positive, negative, unrestricted, config
-                    )
-                    append!(all_priorities, chunk_priorities)
-
-                    # Clear chunk
-                    empty!(chunk_pairs)
-
-                    # Keep only top candidates to save memory
-                    if length(all_priorities) > config.max_pairs_in_memory
-                        if config.use_heap_pruning
-                            # Use heap for O(n log k) pruning instead of O(n log n) sorting
-                            heap = TopKHeap(config.max_pairs_in_memory ÷ 2)
-                            for priority in all_priorities
-                                add_to_heap!(heap, priority)
-                            end
-                            all_priorities = extract_sorted_results(heap)
-                            @info "Memory pruning (heap)" kept_best = length(all_priorities)
-                        else
-                            # Fallback to sorting
-                            sort!(all_priorities, by=p -> p.cv)
-                            resize!(all_priorities, config.max_pairs_in_memory ÷ 2)
-                            @info "Memory pruning (sort)" kept_best = length(all_priorities)
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    # Process final chunk
-    if !isempty(chunk_pairs)
-        chunk_priorities = process_pair_stream_bitvector(
-            chunk_pairs, samples_tree, concordance_tracker,
-            positive, negative, unrestricted, config
-        )
-        append!(all_priorities, chunk_priorities)
-    end
-
-    # Final sort - only needed if not using heap (heap already maintains order)
-    if !config.use_heap_pruning
-        sort!(all_priorities, by=p -> p.cv)
-    end
-    return all_priorities
-end
-
-# --- Core streaming processor ---
-function process_pair_stream(
-    pairs, samples_tree, concordance_tracker,
-    positive, negative, unrestricted, config
-)
-    idx_to_id = concordance_tracker.idx_to_id
-
-    if config.use_threads
-        @info "Using parallel processing with threads"
-        process_pairs_parallel(pairs, samples_tree, idx_to_id, positive, negative, unrestricted, config)
-    else
-        @info "Using serial processing"
-        process_pairs_serial(pairs, samples_tree, idx_to_id, positive, negative, unrestricted, config)
-    end
 end
 
 # BitVector version of core streaming processor
-function process_pair_stream_bitvector(
+function process_pair_stream(
     pairs, samples_tree, concordance_tracker,
-    positive::BitVector, negative::BitVector, unrestricted, config
+    positive::BitVector, negative::BitVector, config
 )
     idx_to_id = concordance_tracker.idx_to_id
 
     if config.use_threads
         @info "Using parallel processing with threads"
-        process_pairs_parallel_bitvector(pairs, samples_tree, idx_to_id, positive, negative, unrestricted, config)
+        process_pairs_parallel(pairs, samples_tree, idx_to_id, positive, negative, config)
     else
         @info "Using serial processing"
-        process_pairs_serial_bitvector(pairs, samples_tree, idx_to_id, positive, negative, unrestricted, config)
+        process_pairs_serial(pairs, samples_tree, idx_to_id, positive, negative, config)
     end
-end
-
-# --- Serial processing ---
-function process_pairs_serial(
-    pairs, samples_tree, idx_to_id,
-    positive, negative, unrestricted, config
-)
-    # Pre-allocate with type annotation
-    priorities = Vector{PairPriority}()
-    sizehint!(priorities, 1000)  # Conservative estimate
-    pair_count = 0
-    stage2_passed = 0
-    stage3_passed = 0
-
-    for (i, j) in pairs
-        pair_count += 1
-
-        # Cache lookups to avoid repeated dictionary access
-        c1_id, c2_id = idx_to_id[i], idx_to_id[j]
-        c1_samples = samples_tree[c1_id]
-        c2_samples = samples_tree[c2_id]
-
-        # Early exit if samples are missing
-        if isnothing(c1_samples) || isnothing(c2_samples)
-            continue
-        end
-
-        # Cache sample lengths to avoid repeated calls
-        c1_len, c2_len = length(c1_samples), length(c2_samples)
-
-        # Stage 2: Coarse filter - use cached lengths
-        n_coarse = min(config.coarse_sample_size, c1_len, c2_len)
-        n_coarse < 2 && continue
-
-        ratio_stat = Variance()
-        compute_ratios_batch!(ratio_stat, c1_samples, c2_samples, 1, n_coarse, config.cv_epsilon)
-
-        cv_coarse = compute_cv(ratio_stat, config.cv_epsilon)
-        cv_coarse > config.coarse_cv_threshold && continue
-        stage2_passed += 1
-
-        # Stage 3: Full analysis - reuse and continue with same stat, use cached lengths
-        max_samples = min(c1_len, c2_len)
-        if max_samples > n_coarse
-            compute_ratios_batch!(ratio_stat, c1_samples, c2_samples, n_coarse + 1, max_samples, config.cv_epsilon)
-        end
-
-        n_samples = nobs(ratio_stat)
-        n_samples < config.min_valid_samples && continue
-
-        cv_full = compute_cv(ratio_stat, config.cv_epsilon)
-        cv_full > config.cv_threshold && continue
-        stage3_passed += 1
-
-        # Passed all filters
-        directions = determine_directions(j, positive, negative)
-        push!(priorities, PairPriority(i, j, directions, cv_full, n_samples))
-
-        if pair_count % 50_000 == 0
-            @info "Processing progress" pairs_tested = pair_count coarse_passed = stage2_passed cv_passed = stage3_passed candidates = length(priorities)
-        end
-    end
-
-    @info "Serial processing complete" pairs_tested = pair_count coarse_passed = stage2_passed cv_passed = stage3_passed final_candidates = length(priorities)
-    return priorities
-end
-
-# --- Parallel processing ---
-function process_pairs_parallel(
-    pairs, samples_tree, idx_to_id,
-    positive, negative, unrestricted, config
-)
-    # Convert to vector only if not already a vector, avoiding copy when possible
-    pairs_vec = if pairs isa AbstractVector
-        pairs
-    else
-        collect(pairs)
-    end
-    n_threads = Threads.nthreads()
-
-    # Pre-allocate thread-local results with type annotation and size hints
-    thread_results = Vector{Vector{PairPriority}}(undef, n_threads)
-    for i in 1:n_threads
-        thread_results[i] = Vector{PairPriority}()
-        sizehint!(thread_results[i], length(pairs_vec) ÷ n_threads + 100)
-    end
-
-    # Process in parallel
-    @threads for idx in eachindex(pairs_vec)
-        tid = Threads.threadid()
-        i, j = pairs_vec[idx]
-
-        # Cache lookups and get samples
-        c1_id, c2_id = idx_to_id[i], idx_to_id[j]
-        c1_samples = samples_tree[c1_id]
-        c2_samples = samples_tree[c2_id]
-
-        # Early exit if samples are missing
-        if isnothing(c1_samples) || isnothing(c2_samples)
-            continue
-        end
-
-        # Cache sample lengths to avoid repeated calls
-        c1_len, c2_len = length(c1_samples), length(c2_samples)
-
-        # Coarse filter - use cached lengths
-        n_coarse = min(config.coarse_sample_size, c1_len, c2_len)
-        n_coarse < 2 && continue
-
-        ratio_stat = Variance()
-        compute_ratios_batch!(ratio_stat, c1_samples, c2_samples, 1, n_coarse, config.cv_epsilon)
-
-        cv_coarse = compute_cv(ratio_stat, config.cv_epsilon)
-        cv_coarse > config.coarse_cv_threshold && continue
-
-        # Full analysis - use cached lengths
-        max_samples = min(c1_len, c2_len)
-        if max_samples > n_coarse
-            compute_ratios_batch!(ratio_stat, c1_samples, c2_samples, n_coarse + 1, max_samples, config.cv_epsilon)
-        end
-
-        n_samples = nobs(ratio_stat)
-        n_samples < config.min_valid_samples && continue
-
-        cv_full = compute_cv(ratio_stat, config.cv_epsilon)
-        cv_full > config.cv_threshold && continue
-
-        directions = determine_directions(j, positive, negative)
-        push!(thread_results[tid], PairPriority(i, j, directions, cv_full, n_samples))
-    end
-
-    # Merge thread results
-    return vcat(thread_results...)
 end
 
 # --- BitVector Serial processing ---
-function process_pairs_serial_bitvector(
+function process_pairs_serial(
     pairs, samples_tree, idx_to_id,
-    positive::BitVector, negative::BitVector, unrestricted, config
+    positive::BitVector, negative::BitVector, config
 )
     # Pre-allocate with type annotation
     priorities = Vector{PairPriority}()
@@ -836,7 +522,7 @@ function process_pairs_serial_bitvector(
         stage3_passed += 1
 
         # Passed all filters
-        directions_bits = determine_directions_bitvector_bits(j, positive, negative)
+        directions_bits = determine_directions(j, positive, negative)
         push!(priorities, PairPriority(i, j, directions_bits, cv_full, n_samples))
 
         if pair_count % 50_000 == 0
@@ -849,9 +535,9 @@ function process_pairs_serial_bitvector(
 end
 
 # --- BitVector Parallel processing ---
-function process_pairs_parallel_bitvector(
+function process_pairs_parallel(
     pairs, samples_tree, idx_to_id,
-    positive::BitVector, negative::BitVector, unrestricted, config
+    positive::BitVector, negative::BitVector, config
 )
     # Convert to vector only if not already a vector, avoiding copy when possible
     pairs_vec = if pairs isa AbstractVector
@@ -908,7 +594,7 @@ function process_pairs_parallel_bitvector(
         cv_full = compute_cv(ratio_stat, config.cv_epsilon)
         cv_full > config.cv_threshold && continue
 
-        directions_bits = determine_directions_bitvector_bits(j, positive, negative)
+        directions_bits = determine_directions(j, positive, negative)
         push!(thread_results[tid], PairPriority(i, j, directions_bits, cv_full, n_samples))
     end
 
@@ -943,7 +629,7 @@ end
 end
 
 # BitVector version of determine_directions with O(1) lookups, returns bit flags
-@inline function determine_directions_bitvector_bits(c2_idx::Int,
+@inline function determine_directions(c2_idx::Int,
     positive::BitVector, negative::BitVector
 )::UInt8
     # Fast BitVector lookups - O(1) with better cache behavior
@@ -964,12 +650,4 @@ end
     end
 
     return bits
-end
-
-# BitVector version of determine_directions with O(1) lookups (backward compatibility)
-@inline function determine_directions_bitvector(c2_idx::Int,
-    positive::BitVector, negative::BitVector
-)::Set{Symbol}
-    bits = determine_directions_bitvector_bits(c2_idx, positive, negative)
-    return bits_to_directions(bits)
 end
