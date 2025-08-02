@@ -225,12 +225,12 @@ Heap-based priority queue for maintaining top-k candidates by CV value.
 Uses a max-heap so we can efficiently remove the worst (highest CV) candidates.
 """
 mutable struct TopKHeap
-    heap::BinaryMaxHeap{PairPriority}
+    heap::BinaryHeap{PairPriority}
     max_size::Int
 
     function TopKHeap(max_size::Int)
         # Custom ordering: higher CV = higher priority (worse candidates)
-        heap = BinaryMaxHeap{PairPriority}(Base.By(p -> p.cv))
+        heap = BinaryHeap(Base.By(p -> p.cv), PairPriority[])
         new(heap, max_size)
     end
 end

@@ -51,6 +51,7 @@ module COCOA
 using COBREXA
 using AbstractFBCModels
 using DataFrames
+using DataStructures
 using SparseArrays
 using LinearAlgebra
 using Statistics
