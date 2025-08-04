@@ -32,9 +32,9 @@ JULIA_OPTS="$JULIA_OPTS -p 31"
 JULIA_OPTS="$JULIA_OPTS --heap-size-hint=$HEAP_SIZE"
 JULIA_OPTS="$JULIA_OPTS --startup-file=no"
 JULIA_OPTS="$JULIA_OPTS --history-file=no"
-JULIA_OPTS="$JULIA_OPTS --compiled-modules=yes"
-JULIA_OPTS="$JULIA_OPTS --optimize=2"
-JULIA_OPTS="$JULIA_OPTS --check-bounds=no"
+# JULIA_OPTS="$JULIA_OPTS --compiled-modules=yes"
+# JULIA_OPTS="$JULIA_OPTS --optimize=2"
+# JULIA_OPTS="$JULIA_OPTS --check-bounds=no"
 
 cd /work/schaffran1/COCOA.jl
 time julia $JULIA_OPTS analyse_model.jl
