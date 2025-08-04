@@ -28,7 +28,7 @@ export JULIA_GC_PARALLEL_COLLECT=1
 
 # Julia optimization flags
 JULIA_OPTS="--project=/work/schaffran1/COCOA.jl"
-JULIA_OPTS="$JULIA_OPTS -p 31 -t auto"
+JULIA_OPTS="$JULIA_OPTS -p 31"
 JULIA_OPTS="$JULIA_OPTS --heap-size-hint=$HEAP_SIZE"
 JULIA_OPTS="$JULIA_OPTS --startup-file=no"
 JULIA_OPTS="$JULIA_OPTS --history-file=no"

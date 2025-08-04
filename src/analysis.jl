@@ -681,7 +681,10 @@ function concordance_analysis(
     # Memory-efficient: extract warmup matrix and ranges directly without intermediate storage
     n_complexes = length(concordance_tracker.idx_to_id)
     warmup_points = Vector{Vector{Float64}}()
-    complex_ranges = Vector{Union{Tuple{Float64,Float64},Nothing}}(undef, n_complexes)
+    # Optimize: Use separate arrays to avoid Union overhead
+    active_ranges = Vector{Tuple{Float64,Float64}}()
+    inactive_mask = falses(n_complexes)
+    sizehint!(active_ranges, n_complexes)
 
     for (i, cid) in enumerate(concordance_tracker.idx_to_id)
         if haskey(ava_results, cid)
@@ -691,16 +694,16 @@ function concordance_analysis(
                 if min_res !== nothing && max_res !== nothing
                     min_activity, min_flux = min_res
                     max_activity, max_flux = max_res
-                    complex_ranges[i] = (min_activity, max_activity)
+                    push!(active_ranges, (min_activity, max_activity))
                     push!(warmup_points, min_flux, max_flux)
                 else
-                    complex_ranges[i] = nothing
+                    inactive_mask[i] = true
                 end
             else
-                complex_ranges[i] = nothing
+                inactive_mask[i] = true
             end
         else
-            complex_ranges[i] = nothing
+            inactive_mask[i] = true
         end
     end
 
@@ -764,12 +767,14 @@ function concordance_analysis(
     balanced_threshold = solver_tolerance
 
     # Process complexes using direct loop indices (no unnecessary lookups)
+    active_idx = 1
     for (i, cid) in enumerate(concordance_tracker.idx_to_id)
         # Use loop index directly - concordance_tracker ensures idx_to_id[i] maps to index i
         idx = i
 
-        if complex_ranges[i] !== nothing
-            min_val, max_val = complex_ranges[i]
+        if !inactive_mask[i]
+            min_val, max_val = active_ranges[active_idx]
+            active_idx += 1
 
             # Rounding thresholds to avoid numerical instability
             rounded_min = round(min_val / balanced_threshold) * balanced_threshold
@@ -998,17 +1003,20 @@ function concordance_analysis(
         :module => [get_module_id(cid, modules) for cid in concordance_tracker.idx_to_id],
     )
 
-    if any(x -> x !== nothing, complex_ranges) || !isempty(trivially_balanced)
-        # Use separate arrays for better type stability
-        min_activities = Vector{Union{Float64,Missing}}(undef, nrow(complexes_df))
-        max_activities = Vector{Union{Float64,Missing}}(undef, nrow(complexes_df))
-        ava_confirms = Vector{Union{Bool,Nothing}}(undef, nrow(complexes_df))
+    if !isempty(active_ranges) || !isempty(trivially_balanced)
+        # Pre-allocate all columns to avoid reallocations
+        n_complexes_df = nrow(complexes_df)
+        min_activities = Vector{Union{Float64,Missing}}(undef, n_complexes_df)
+        max_activities = Vector{Union{Float64,Missing}}(undef, n_complexes_df)
+        ava_confirms = Vector{Union{Bool,Nothing}}(undef, n_complexes_df)
 
         # Since DataFrame uses concordance_tracker ordering, row index = tracker index
+        active_idx = 1
         for (df_row_idx, cid) in enumerate(concordance_tracker.idx_to_id)
 
-            if complex_ranges[df_row_idx] !== nothing
-                min_act, max_act = complex_ranges[df_row_idx]
+            if !inactive_mask[df_row_idx]
+                min_act, max_act = active_ranges[active_idx]
+                active_idx += 1
                 min_activities[df_row_idx] = min_act
                 max_activities[df_row_idx] = max_act
                 if cid in trivially_balanced
