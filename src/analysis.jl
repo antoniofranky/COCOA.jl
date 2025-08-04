@@ -678,13 +678,14 @@ function concordance_analysis(
 
     concordance_tracker = ConcordanceTracker(complex_ids)
 
-    # Memory-efficient: extract warmup matrix and ranges directly without intermediate storage
+    # Memory-efficient: extract warmup matrix and activity ranges directly without intermediate storage
     n_complexes = length(concordance_tracker.idx_to_id)
     warmup_points = Vector{Vector{Float64}}()
-    # Optimize: Use separate arrays to avoid Union overhead
-    active_ranges = Vector{Tuple{Float64,Float64}}()
-    inactive_mask = falses(n_complexes)
-    sizehint!(active_ranges, n_complexes)
+    
+    # Memory-efficient activity ranges: use NaN for missing values instead of Union types
+    # NaN values indicate complexes without valid AVA results (more efficient than Union{Float64,Nothing})
+    activity_ranges = Vector{Tuple{Float64,Float64}}(undef, n_complexes)
+    sizehint!(warmup_points, n_complexes * 2)  # Estimate: 2 points per active complex
 
     for (i, cid) in enumerate(concordance_tracker.idx_to_id)
         if haskey(ava_results, cid)
@@ -694,16 +695,19 @@ function concordance_analysis(
                 if min_res !== nothing && max_res !== nothing
                     min_activity, min_flux = min_res
                     max_activity, max_flux = max_res
-                    push!(active_ranges, (min_activity, max_activity))
+                    activity_ranges[i] = (min_activity, max_activity)
                     push!(warmup_points, min_flux, max_flux)
                 else
-                    inactive_mask[i] = true
+                    # Mark as inactive using NaN values
+                    activity_ranges[i] = (NaN, NaN)
                 end
             else
-                inactive_mask[i] = true
+                # Mark as inactive using NaN values
+                activity_ranges[i] = (NaN, NaN)
             end
         else
-            inactive_mask[i] = true
+            # Mark as inactive using NaN values
+            activity_ranges[i] = (NaN, NaN)
         end
     end
 
@@ -766,31 +770,29 @@ function concordance_analysis(
     # Use solver tolerance for balanced complex detection - ensures consistency with optimization
     balanced_threshold = solver_tolerance
 
-    # Process complexes using direct loop indices (no unnecessary lookups)
-    active_idx = 1
-    for (i, cid) in enumerate(concordance_tracker.idx_to_id)
-        # Use loop index directly - concordance_tracker ensures idx_to_id[i] maps to index i
-        idx = i
-
-        if !inactive_mask[i]
-            min_val, max_val = active_ranges[active_idx]
-            active_idx += 1
-
+    # Process complexes using direct indexing - now 1:1 correspondence with activity_ranges
+    for i in 1:n_complexes
+        min_val, max_val = activity_ranges[i]
+        
+        # Check if complex has valid AVA results (NaN indicates inactive)
+        if isnan(min_val) || isnan(max_val)
+            # Complex is inactive (no valid AVA results)
+            unrestricted_complexes[i] = true
+        else
+            # Complex has valid activity range - classify based on activity bounds
             # Rounding thresholds to avoid numerical instability
             rounded_min = round(min_val / balanced_threshold) * balanced_threshold
             rounded_max = round(max_val / balanced_threshold) * balanced_threshold
 
             if rounded_min == 0.0 && rounded_max == 0.0
-                balanced_complexes[idx] = true
+                balanced_complexes[i] = true
             elseif rounded_min >= 0.0
-                positive_complexes[idx] = true
+                positive_complexes[i] = true
             elseif rounded_max <= 0.0
-                negative_complexes[idx] = true
+                negative_complexes[i] = true
             else
-                unrestricted_complexes[idx] = true
+                unrestricted_complexes[i] = true
             end
-        else
-            unrestricted_complexes[idx] = true
         end
     end
 
@@ -998,12 +1000,11 @@ function concordance_analysis(
     complexes_df = DataFrame(
         :id => concordance_tracker.idx_to_id,
         :n_metabolites => [length(complexes[cid].metabolites) for cid in concordance_tracker.idx_to_id],
-        :is_balanced => [concordance_tracker.id_to_idx[cid] in balanced_complexes for cid in concordance_tracker.idx_to_id],
         :is_trivially_balanced => [cid in trivially_balanced for cid in concordance_tracker.idx_to_id],
         :module => [get_module_id(cid, modules) for cid in concordance_tracker.idx_to_id],
     )
 
-    if !isempty(active_ranges) || !isempty(trivially_balanced)
+    if !isempty(activity_ranges) || !isempty(trivially_balanced)
         # Pre-allocate all columns to avoid reallocations
         n_complexes_df = nrow(complexes_df)
         min_activities = Vector{Union{Float64,Missing}}(undef, n_complexes_df)
@@ -1011,12 +1012,16 @@ function concordance_analysis(
         ava_confirms = Vector{Union{Bool,Nothing}}(undef, n_complexes_df)
 
         # Since DataFrame uses concordance_tracker ordering, row index = tracker index
-        active_idx = 1
         for (df_row_idx, cid) in enumerate(concordance_tracker.idx_to_id)
-
-            if !inactive_mask[df_row_idx]
-                min_act, max_act = active_ranges[active_idx]
-                active_idx += 1
+            min_act, max_act = activity_ranges[df_row_idx]
+            
+            if isnan(min_act) || isnan(max_act)
+                # Complex is inactive (no valid AVA results)
+                min_activities[df_row_idx] = missing
+                max_activities[df_row_idx] = missing
+                ava_confirms[df_row_idx] = !(cid in trivially_balanced)
+            else
+                # Complex has valid activity range
                 min_activities[df_row_idx] = min_act
                 max_activities[df_row_idx] = max_act
                 if cid in trivially_balanced
@@ -1024,10 +1029,6 @@ function concordance_analysis(
                 else
                     ava_confirms[df_row_idx] = nothing
                 end
-            else
-                min_activities[df_row_idx] = missing
-                max_activities[df_row_idx] = missing
-                ava_confirms[df_row_idx] = !(cid in trivially_balanced)
             end
         end
 

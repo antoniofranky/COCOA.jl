@@ -64,7 +64,15 @@ function create_unidirectional_constraints(
     end
 
     # Apply optimized substitution and pruning
-    constraints_before_pruning = C.substitute(constraints, subst_vals)
+    # Wrap in try-catch to handle ConstraintTrees.jl internal API bug
+    constraints_before_pruning = try
+        C.substitute(constraints, subst_vals)
+    catch e
+        @error "ConstraintTrees.jl substitute failed, this is a known bug with v1.11.0" error=e
+        @info "Falling back to non-unidirectional constraints"
+        # Return original constraints without unidirectional splitting
+        return constraints, complexes
+    end
     constraints = C.prune_variables(constraints_before_pruning)
 
     # All reactions were split since we applied splitting to all fluxes

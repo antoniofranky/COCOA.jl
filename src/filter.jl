@@ -34,8 +34,8 @@ function FilterConfig(;
     coarse_cv_threshold::Float64=0.1,
     cv_threshold::Float64=0.01,
     cv_epsilon::Float64=1e-15,
-    min_valid_samples::Int=50,
-    use_threads::Bool=true,
+    min_valid_samples::Int=10,
+    use_threads::Bool=false,
     chunk_size::Int=10_000,
     use_stable_variance::Bool=false,  # Default to false for backward compatibility
     use_heap_pruning::Bool=true,      # Default to true for better performance
