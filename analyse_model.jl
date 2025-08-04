@@ -5,8 +5,16 @@ using Distributed
 @everywhere using Pkg
 @everywhere Pkg.activate("/work/schaffran1/COCOA.jl")
 
+# Debug: Check package versions on all workers
+@everywhere println("Worker $(myid()) - ConstraintTrees version: $(Pkg.installed()["ConstraintTrees"])")
+@everywhere println("Worker $(myid()) - COBREXA version: $(Pkg.installed()["COBREXA"])")
+
 using SBMLFBCModels, AbstractFBCModels, COBREXA, JLD2
 @everywhere using COCOA, HiGHS
+
+# Also check main process
+println("Main process - ConstraintTrees version: $(Pkg.installed()["ConstraintTrees"])")
+println("Main process - COBREXA version: $(Pkg.installed()["COBREXA"])")
 # --- Hardcoded paths ---
 test_model_path = "/work/schaffran1/COCOA.jl/test/e_coli_core.xml"         # Change as needed
 model_path = "/work/schaffran1/toolbox/models/Schizosaccharomyces_pombe.xml"           # Change as needed
