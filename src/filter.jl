@@ -155,10 +155,17 @@ end
     end_idx::Int,
     epsilon::Float64
 )
+    # Collect all finite ratios first, then fit all at once
+    ratios = Float64[]
+    sizehint!(ratios, end_idx - start_idx + 1)
+
     @inbounds for k in start_idx:end_idx
         ratio = (c1_samples[k] + epsilon) / (c2_samples[k] + epsilon)
-        isfinite(ratio) && OnlineStats.fit!(variance_stat, ratio)
+        isfinite(ratio) && push!(ratios, ratio)
     end
+
+    # Fit all ratios at once - this is the correct OnlineStats usage
+    !isempty(ratios) && OnlineStats.fit!(variance_stat, ratios)
     return variance_stat
 end
 
@@ -480,7 +487,7 @@ function process_pairs_serial(
     pair_count = 0
     stage2_passed = 0
     stage3_passed = 0
-    
+
 
     for (i, j) in pairs
         pair_count += 1

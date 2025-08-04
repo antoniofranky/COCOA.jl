@@ -37,4 +37,10 @@ JULIA_OPTS="$JULIA_OPTS --history-file=no"
 # JULIA_OPTS="$JULIA_OPTS --check-bounds=no"
 
 cd /work/schaffran1/COCOA.jl
+
+# Force consistent package precompilation
+echo "Precompiling packages..."
+julia --project=/work/schaffran1/COCOA.jl -e "using Pkg; Pkg.precompile()"
+
+echo "Starting analysis..."
 time julia $JULIA_OPTS analyse_model.jl
