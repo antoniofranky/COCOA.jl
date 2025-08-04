@@ -481,8 +481,6 @@ function process_pairs_serial(
     stage2_passed = 0
     stage3_passed = 0
     
-    # Reuse variance statistics across iterations to reduce allocations
-    ratio_stat = Variance()
 
     for (i, j) in pairs
         pair_count += 1
@@ -504,8 +502,8 @@ function process_pairs_serial(
         n_coarse = min(config.coarse_sample_size, c1_len, c2_len)
         n_coarse < 2 && continue
 
-        # Reset and reuse the same variance statistic
-        OnlineStats.reset!(ratio_stat)
+        # Create new variance statistic (OnlineStats doesn't support reset)
+        ratio_stat = Variance()
         compute_ratios_batch!(ratio_stat, c1_samples, c2_samples, 1, n_coarse, config.cv_epsilon)
 
         cv_coarse = compute_cv(ratio_stat, config.cv_epsilon)
@@ -551,13 +549,11 @@ function process_pairs_parallel(
     end
     n_threads = Threads.nthreads()
 
-    # Pre-allocate thread-local results and variance objects
+    # Pre-allocate thread-local results
     thread_results = Vector{Vector{PairPriority}}(undef, n_threads)
-    thread_variance = Vector{Variance}(undef, n_threads)
     for i in 1:n_threads
         thread_results[i] = Vector{PairPriority}()
         sizehint!(thread_results[i], length(pairs_vec) ÷ n_threads + 100)
-        thread_variance[i] = Variance()
     end
 
     # Process in parallel
@@ -582,9 +578,8 @@ function process_pairs_parallel(
         n_coarse = min(config.coarse_sample_size, c1_len, c2_len)
         n_coarse < 2 && continue
 
-        # Reuse thread-local variance statistic
-        ratio_stat = thread_variance[tid]
-        OnlineStats.reset!(ratio_stat)
+        # Create new variance statistic (OnlineStats doesn't support reset)
+        ratio_stat = Variance()
         compute_ratios_batch!(ratio_stat, c1_samples, c2_samples, 1, n_coarse, config.cv_epsilon)
 
         cv_coarse = compute_cv(ratio_stat, config.cv_epsilon)
