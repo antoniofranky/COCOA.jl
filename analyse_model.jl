@@ -1,6 +1,10 @@
 using Pkg
 using Distributed
 
+# Activate project environment on all workers FIRST
+@everywhere using Pkg
+@everywhere Pkg.activate("/work/schaffran1/COCOA.jl")
+
 using SBMLFBCModels, AbstractFBCModels, COBREXA, JLD2
 @everywhere using COCOA, HiGHS
 # --- Hardcoded paths ---
