@@ -551,7 +551,7 @@ function identify_kinetic_modules(
     end
 
     # Add balanced complexes as separate module if they exist
-    balanced_complexes = filter(row -> row.is_balanced, complexes_df)
+    balanced_complexes = filter(row -> row.module == "balanced", complexes_df)
     if nrow(balanced_complexes) >= min_module_size
         balanced_names = Symbol[]
         for row in eachrow(balanced_complexes)
