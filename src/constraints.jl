@@ -55,7 +55,12 @@ function create_unidirectional_constraints(
         (var_idx,) = f.value.idxs
         subst_value = p.value - n.value
         subst_vals[var_idx] = subst_value
-        C.Constraint(subst_value) # bidirectional bound is dropped
+        # Try both API versions for compatibility
+        try
+            C.Constraint(value=subst_value) # New API
+        catch MethodError
+            C.Constraint(subst_value) # Old API
+        end
     end
 
     # Apply optimized substitution and pruning
