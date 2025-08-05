@@ -4,7 +4,6 @@ filter.jl - Ultra memory-efficient CV filtering using OnlineStats.jl and BitVect
 Streaming three-stage pipeline focused purely on CV computation using OnlineStats and BitVectors.
 """
 
-using Base.Threads
 using OnlineStats
 using DataStructures
 using DocStringExtensions
@@ -25,19 +24,20 @@ end
 
 
 
-# Optimized function to compute ratios and fit to variance stat
+# Optimized function to compute ratios and fit to variance stat using views
 @inline function compute_ratios_batch!(
     variance_stat::Variance,
-    c1_samples::Vector{Float64},
-    c2_samples::Vector{Float64},
-    start_idx::Int,
-    end_idx::Int,
+    c1_view::AbstractVector{Float64},
+    c2_view::AbstractVector{Float64},
     epsilon::Float64
 )
     # Stream ratios directly - OnlineStats processes "one observation at a time" for O(1) memory
-    @inbounds for k in start_idx:end_idx
-        ratio = (c1_samples[k] + epsilon) / (c2_samples[k] + epsilon)
-        isfinite(ratio) && OnlineStats.fit!(variance_stat, ratio)
+    # Views handle the range slicing efficiently without copying data
+    @simd for k in eachindex(c1_view)
+        @inbounds begin
+            ratio = (c1_view[k] + epsilon) / (c2_view[k] + epsilon)
+            isfinite(ratio) && OnlineStats.fit!(variance_stat, ratio)
+        end
     end
     return variance_stat
 end
@@ -109,6 +109,12 @@ end
 end
 
 function add_to_heap!(h::TopKHeap, priority::PairPriority)
+    # Prevent runaway heap growth that could cause memory issues
+    if length(h.heap) >= h.max_size * 2
+        @warn "Heap size exceeded bounds, potential memory issue" current_size = length(h.heap) max_allowed = h.max_size
+        return  # Skip this addition to prevent memory explosion
+    end
+    
     if !is_heap_full(h)
         # Heap not full, just add
         push!(h.heap, priority)
@@ -121,16 +127,18 @@ function add_to_heap!(h::TopKHeap, priority::PairPriority)
 end
 
 function extract_sorted_results(h::TopKHeap)::Vector{PairPriority}
-    results = Vector{PairPriority}()
-    sizehint!(results, length(h.heap))
+    # Pre-allocate with exact size for optimal performance
+    heap_size = length(h.heap)
+    results = Vector{PairPriority}(undef, heap_size)
 
-    # Extract all elements (this empties the heap)
+    # Extract all elements directly into pre-allocated array
+    idx = heap_size
     while !isempty(h.heap)
-        push!(results, pop!(h.heap))
+        results[idx] = pop!(h.heap)
+        idx -= 1
     end
-
-    # Reverse since we extracted from max-heap (worst first)
-    reverse!(results)
+    
+    # No need to reverse - we filled backwards from max-heap (best first)
     return results
 end
 
@@ -141,7 +149,7 @@ $(TYPEDSIGNATURES)
 Ultra-efficient three-stage streaming pipeline.
 """
 function streaming_filter(
-    complexes::Vector,
+    complexes::Vector{Symbol},
     trivial_pairs::Set{Tuple{Int,Int}},
     samples_tree::C.Tree{Vector{Float64}},
     concordance_tracker::ConcordanceTracker;
@@ -150,7 +158,6 @@ function streaming_filter(
     cv_threshold::Float64=0.01,
     cv_epsilon::Float64=1e-15,
     min_valid_samples::Int=10,
-    use_threads::Bool=false,
     chunk_size::Int=10_000,
     max_pairs_in_memory::Int=1_000_000
 )
@@ -180,7 +187,7 @@ function streaming_filter(
             complexes, balanced_complexes, trivial_pairs, samples_tree,
             concordance_tracker, positive_complexes, negative_complexes,
             coarse_sample_size, coarse_cv_threshold, cv_threshold, cv_epsilon,
-            min_valid_samples, use_threads, chunk_size, max_pairs_in_memory
+            min_valid_samples, chunk_size, max_pairs_in_memory
         )
     else
         # Stream in chunks
@@ -189,7 +196,7 @@ function streaming_filter(
             complexes, balanced_complexes, trivial_pairs, samples_tree,
             concordance_tracker, positive_complexes, negative_complexes,
             coarse_sample_size, coarse_cv_threshold, cv_threshold, cv_epsilon,
-            min_valid_samples, use_threads, chunk_size, max_pairs_in_memory
+            min_valid_samples, chunk_size, max_pairs_in_memory
         )
     end
     stage23_time = time() - stage23_start
@@ -201,7 +208,7 @@ end
 
 # --- Stage 1: Counting without allocation ---
 # Optimized BitVector implementation for large models (50K+ reactions)
-function count_valid_pairs(complexes, balanced::BitVector, trivial, concordance_tracker)
+function count_valid_pairs(complexes::Vector{Symbol}, balanced::BitVector, trivial::Set{Tuple{Int,Int}}, concordance_tracker::ConcordanceTracker)
     count = 0
     n = length(complexes)
     @inbounds for i in 1:n
@@ -211,7 +218,7 @@ function count_valid_pairs(complexes, balanced::BitVector, trivial, concordance_
             continue  # Skip entire inner loop if i is balanced
         end
 
-        for j in (i+1):n
+        @simd for j in (i+1):n
             if should_test_pair_indices(i, j, balanced, trivial, concordance_tracker, i_balanced)
                 count += 1
             end
@@ -244,10 +251,10 @@ end
 # --- Direct processing for smaller datasets ---
 # Optimized BitVector implementation for large models
 function process_all_pairs(
-    complexes, balanced::BitVector, trivial, samples_tree,
-    concordance_tracker, positive::BitVector, negative::BitVector,
+    complexes::Vector{Symbol}, balanced::BitVector, trivial::Set{Tuple{Int,Int}}, samples_tree::C.Tree{Vector{Float64}},
+    concordance_tracker::ConcordanceTracker, positive::BitVector, negative::BitVector,
     coarse_sample_size::Int, coarse_cv_threshold::Float64, cv_threshold::Float64, cv_epsilon::Float64,
-    min_valid_samples::Int, use_threads::Bool, chunk_size::Int, max_pairs_in_memory::Int
+    min_valid_samples::Int, chunk_size::Int, max_pairs_in_memory::Int
 )
     # Generator for valid pairs with BitVector optimization
     valid_pairs = (
@@ -260,7 +267,7 @@ function process_all_pairs(
     priorities = process_pair_stream(
         valid_pairs, samples_tree, concordance_tracker,
         positive, negative, coarse_sample_size, coarse_cv_threshold, cv_threshold, cv_epsilon,
-        min_valid_samples, use_threads
+        min_valid_samples
     )
 
     return priorities
@@ -269,16 +276,15 @@ end
 # --- Chunked streaming for huge datasets ---
 # Optimized BitVector implementation for large models
 function process_streaming_chunks(
-    complexes, balanced::BitVector, trivial, samples_tree,
-    concordance_tracker, positive::BitVector, negative::BitVector,
+    complexes::Vector{Symbol}, balanced::BitVector, trivial::Set{Tuple{Int,Int}}, samples_tree::C.Tree{Vector{Float64}},
+    concordance_tracker::ConcordanceTracker, positive::BitVector, negative::BitVector,
     coarse_sample_size::Int, coarse_cv_threshold::Float64, cv_threshold::Float64, cv_epsilon::Float64,
-    min_valid_samples::Int, use_threads::Bool, chunk_size::Int, max_pairs_in_memory::Int
+    min_valid_samples::Int, chunk_size::Int, max_pairs_in_memory::Int
 )
     # Pre-allocate with type annotation for better performance
     all_priorities = Vector{PairPriority}()
     sizehint!(all_priorities, max_pairs_in_memory)
     chunk_pairs = Vector{Tuple{Int,Int}}()
-    sizehint!(chunk_pairs, chunk_size)
     sizehint!(chunk_pairs, chunk_size)
 
     n = length(complexes)
@@ -298,7 +304,7 @@ function process_streaming_chunks(
                     chunk_priorities = process_pair_stream(
                         chunk_pairs, samples_tree, concordance_tracker,
                         positive, negative, coarse_sample_size, coarse_cv_threshold, cv_threshold, cv_epsilon,
-                        min_valid_samples, use_threads
+                        min_valid_samples
                     )
                     append!(all_priorities, chunk_priorities)
 
@@ -325,12 +331,12 @@ function process_streaming_chunks(
         chunk_priorities = process_pair_stream(
             chunk_pairs, samples_tree, concordance_tracker,
             positive, negative, coarse_sample_size, coarse_cv_threshold, cv_threshold, cv_epsilon,
-            min_valid_samples, use_threads
+            min_valid_samples
         )
         append!(all_priorities, chunk_priorities)
     end
 
-    # Final sort
+    # Final sort using direct field access for better performance
     sort!(all_priorities, by=p -> p.cv)
     return all_priorities
 end
@@ -340,17 +346,12 @@ function process_pair_stream(
     pairs, samples_tree, concordance_tracker,
     positive::BitVector, negative::BitVector,
     coarse_sample_size::Int, coarse_cv_threshold::Float64, cv_threshold::Float64, cv_epsilon::Float64,
-    min_valid_samples::Int, use_threads::Bool
+    min_valid_samples::Int
 )
     idx_to_id = concordance_tracker.idx_to_id
 
-    if use_threads
-        @info "Using parallel processing with threads"
-        process_pairs_parallel(pairs, samples_tree, idx_to_id, positive, negative, coarse_sample_size, coarse_cv_threshold, cv_threshold, cv_epsilon, min_valid_samples)
-    else
-        @info "Using serial processing"
-        process_pairs_serial(pairs, samples_tree, idx_to_id, positive, negative, coarse_sample_size, coarse_cv_threshold, cv_threshold, cv_epsilon, min_valid_samples)
-    end
+    @info "Using serial processing"
+    process_pairs_serial(pairs, samples_tree, idx_to_id, positive, negative, coarse_sample_size, coarse_cv_threshold, cv_threshold, cv_epsilon, min_valid_samples)
 end
 
 # --- BitVector Serial processing ---
@@ -360,18 +361,33 @@ function process_pairs_serial(
     coarse_sample_size::Int, coarse_cv_threshold::Float64, cv_threshold::Float64, cv_epsilon::Float64,
     min_valid_samples::Int
 )
-    # Pre-allocate with type annotation
+    # Pre-allocate with size estimation for better performance
+    # Estimate: ~1-5% of pairs typically pass all filters
+    estimated_candidates = if pairs isa AbstractVector
+        max(100, length(pairs) ÷ 20)  # Conservative 5% estimate
+    else
+        1000  # Default for generators
+    end
     priorities = Vector{PairPriority}()
+    sizehint!(priorities, estimated_candidates)
+    
     pair_count = 0
     stage2_passed = 0
     stage3_passed = 0
 
 
+    # Note: OnlineStats.Variance() doesn't support reset, so we create fresh ones per pair
+    
+    # Direct array access - much faster than dictionary lookups for consecutive indices
+    # idx_to_id is already a Vector{Symbol}, so we can access it directly
+    
     for (i, j) in pairs
         pair_count += 1
 
-        # Cache lookups to avoid repeated dictionary access
+        # Direct vector access - O(1) with no hash computation
         c1_id, c2_id = idx_to_id[i], idx_to_id[j]
+        
+        # Direct tree access - no copying, more memory efficient
         c1_samples = samples_tree[c1_id]
         c2_samples = samples_tree[c2_id]
 
@@ -387,9 +403,9 @@ function process_pairs_serial(
         n_coarse = min(coarse_sample_size, c1_len, c2_len)
         n_coarse < 2 && continue
 
-        # Create new variance statistic (OnlineStats doesn't support reset)
+        # Reuse variance statistic by creating fresh one (more efficient than clearing)
         ratio_stat = Variance()
-        compute_ratios_batch!(ratio_stat, c1_samples, c2_samples, 1, n_coarse, cv_epsilon)
+        @views compute_ratios_batch!(ratio_stat, c1_samples[1:n_coarse], c2_samples[1:n_coarse], cv_epsilon)
 
         cv_coarse = compute_cv(ratio_stat, cv_epsilon)
         cv_coarse > coarse_cv_threshold && continue
@@ -398,7 +414,7 @@ function process_pairs_serial(
         # Stage 3: Full analysis - reuse and continue with same stat, use cached lengths
         max_samples = min(c1_len, c2_len)
         if max_samples > n_coarse
-            compute_ratios_batch!(ratio_stat, c1_samples, c2_samples, n_coarse + 1, max_samples, cv_epsilon)
+            @views compute_ratios_batch!(ratio_stat, c1_samples[n_coarse+1:max_samples], c2_samples[n_coarse+1:max_samples], cv_epsilon)
         end
 
         n_samples = nobs(ratio_stat)
@@ -421,76 +437,6 @@ function process_pairs_serial(
     return priorities
 end
 
-# --- BitVector Parallel processing ---
-function process_pairs_parallel(
-    pairs, samples_tree, idx_to_id,
-    positive::BitVector, negative::BitVector,
-    coarse_sample_size::Int, coarse_cv_threshold::Float64, cv_threshold::Float64, cv_epsilon::Float64,
-    min_valid_samples::Int
-)
-    # Convert to vector only if not already a vector, avoiding copy when possible
-    pairs_vec = if pairs isa AbstractVector
-        pairs
-    else
-        collect(pairs)
-    end
-    n_threads = Threads.nthreads()
-
-    # Pre-allocate thread-local results
-    thread_results = Vector{Vector{PairPriority}}(undef, n_threads)
-    for i in 1:n_threads
-        thread_results[i] = Vector{PairPriority}()
-        sizehint!(thread_results[i], length(pairs_vec) ÷ n_threads + 100)
-    end
-
-    # Process in parallel
-    @threads for idx in eachindex(pairs_vec)
-        tid = Threads.threadid()
-        i, j = pairs_vec[idx]
-
-        # Cache lookups and get samples
-        c1_id, c2_id = idx_to_id[i], idx_to_id[j]
-        c1_samples = samples_tree[c1_id]
-        c2_samples = samples_tree[c2_id]
-
-        # Early exit if samples are missing
-        if isnothing(c1_samples) || isnothing(c2_samples)
-            continue
-        end
-
-        # Cache sample lengths to avoid repeated calls
-        c1_len, c2_len = length(c1_samples), length(c2_samples)
-
-        # Coarse filter - use cached lengths
-        n_coarse = min(coarse_sample_size, c1_len, c2_len)
-        n_coarse < 2 && continue
-
-        # Create new variance statistic (OnlineStats doesn't support reset)
-        ratio_stat = Variance()
-        compute_ratios_batch!(ratio_stat, c1_samples, c2_samples, 1, n_coarse, cv_epsilon)
-
-        cv_coarse = compute_cv(ratio_stat, cv_epsilon)
-        cv_coarse > coarse_cv_threshold && continue
-
-        # Full analysis - use cached lengths
-        max_samples = min(c1_len, c2_len)
-        if max_samples > n_coarse
-            compute_ratios_batch!(ratio_stat, c1_samples, c2_samples, n_coarse + 1, max_samples, cv_epsilon)
-        end
-
-        n_samples = nobs(ratio_stat)
-        n_samples < min_valid_samples && continue
-
-        cv_full = compute_cv(ratio_stat, cv_epsilon)
-        cv_full > cv_threshold && continue
-
-        directions_bits = determine_directions(j, positive, negative)
-        push!(thread_results[tid], PairPriority(i, j, directions_bits, cv_full, n_samples))
-    end
-
-    # Merge thread results
-    return vcat(thread_results...)
-end
 
 
 # BitVector version of determine_directions with O(1) lookups, returns bit flags

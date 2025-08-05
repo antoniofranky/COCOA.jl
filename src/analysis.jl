@@ -599,14 +599,13 @@ function concordance_analysis(
     balanced_tolerance::Union{Float64,Nothing}=nothing,
     cv_threshold::Union{Float64,Nothing}=nothing,
     coarse_cv_threshold::Union{Float64,Nothing}=nothing,
-    cv_epsilon::Union{Float64,Nothing}=1e-16,
+    cv_epsilon::Union{Float64,Nothing}=nothing,
     sample_size::Int=100,
     coarse_sample_size::Int=Int(sample_size ÷ 5),
     batch_size::Union{Int,Nothing}=nothing,
     min_valid_samples::Int=10,
     seed::Union{Int,Nothing}=nothing,
     use_unidirectional_constraints::Bool=true,
-    use_threads::Bool=false,
     chunk_size_filter::Int=100_000,
     max_pairs_in_memory::Int=500_000,
     objective_bound=nothing,
@@ -942,7 +941,7 @@ function concordance_analysis(
     else
         StableRNG(seed::Int)
     end
-    decimals = max(0, -floor(Int, log10(1e-9)))
+    decimals = max(0, -floor(Int, log10(solver_tolerance)))
     aggregate = rows -> round.(vec(hcat(rows...)), digits=decimals)
     @info "Sampling schedule"
 
@@ -1071,7 +1070,6 @@ function concordance_analysis(
         cv_epsilon=actual_cv_epsilon,
         coarse_sample_size=coarse_sample_size,
         min_valid_samples=min_valid_samples,
-        use_threads=use_threads,
         chunk_size=chunk_size_filter,
         max_pairs_in_memory=max_pairs_in_memory
     )
@@ -1105,20 +1103,33 @@ function concordance_analysis(
     modules = extract_modules(concordance_tracker)
 
     # Use concordance_tracker ordering as single source of truth for DataFrame
-    # Pre-allocate columns for better performance
+    # Pre-allocate all columns at once for optimal memory usage
     n_complexes_total = length(concordance_tracker.idx_to_id)
     ids = concordance_tracker.idx_to_id
+
+    # Pre-allocate all basic columns
     n_metabolites_col = Vector{Int}(undef, n_complexes_total)
     is_trivially_balanced_col = Vector{Bool}(undef, n_complexes_total)
     module_col = Vector{String}(undef, n_complexes_total)
 
-    # Fill columns using single pass iteration
+    # Pre-cache module lookups to avoid O(n*m) complexity
+    complex_to_module = Dict{Symbol,String}()
+    sizehint!(complex_to_module, n_complexes_total)
+    for (module_id, member_set) in modules
+        module_str = String(module_id)
+        for complex_id in member_set
+            complex_to_module[complex_id] = module_str
+        end
+    end
+
+    # Single pass to fill all basic columns efficiently
     for (i, cid) in enumerate(ids)
         n_metabolites_col[i] = length(complexes[cid].metabolites)
         is_trivially_balanced_col[i] = cid in trivially_balanced
-        module_col[i] = get_module_id(cid, modules)
+        module_col[i] = get(complex_to_module, cid, "none")  # Faster than get_module_id
     end
 
+    # Construct DataFrame with pre-allocated columns
     complexes_df = DataFrame(
         :id => ids,
         :n_metabolites => n_metabolites_col,
@@ -1159,26 +1170,44 @@ function concordance_analysis(
         complexes_df.ava_confirms_balanced = ava_confirms
     end
 
-    # Sort modules for deterministic output and pre-allocate columns
-    sorted_module_keys = sort!(collect(keys(modules)))
-    n_modules = length(sorted_module_keys)
+    # Optimize modules DataFrame construction for better performance
+    n_modules = length(modules)
+    if n_modules > 0
+        # Sort module keys once for deterministic output
+        sorted_module_keys = sort!(collect(keys(modules)))
 
-    module_ids = Vector{String}(undef, n_modules)
-    module_sizes = Vector{Int}(undef, n_modules)
-    module_complexes = Vector{String}(undef, n_modules)
+        # Pre-allocate all columns at once
+        module_ids = Vector{String}(undef, n_modules)
+        module_sizes = Vector{Int}(undef, n_modules)
+        module_complexes = Vector{String}(undef, n_modules)
 
-    # Single iteration to fill all columns
-    for (i, k) in enumerate(sorted_module_keys)
-        module_ids[i] = String(k)
-        module_sizes[i] = length(modules[k])
-        module_complexes[i] = join(sort!(String.(collect(modules[k]))), ", ")
+        # Pre-sort complex strings to avoid repeated sorting
+        sorted_complex_strings = Dict{Symbol,Vector{String}}()
+        sizehint!(sorted_complex_strings, n_modules)
+        for k in sorted_module_keys
+            sorted_complex_strings[k] = sort!(String.(collect(modules[k])))
+        end
+
+        # Single efficient iteration to fill all columns
+        for (i, k) in enumerate(sorted_module_keys)
+            module_ids[i] = String(k)
+            module_sizes[i] = length(modules[k])
+            module_complexes[i] = join(sorted_complex_strings[k], ", ")
+        end
+
+        modules_df = DataFrame(
+            module_id=module_ids,
+            size=module_sizes,
+            complexes=module_complexes,
+        )
+    else
+        # Handle empty case efficiently
+        modules_df = DataFrame(
+            module_id=String[],
+            size=Int[],
+            complexes=String[],
+        )
     end
-
-    modules_df = DataFrame(
-        module_id=module_ids,
-        size=module_sizes,
-        complexes=module_complexes,
-    )
 
     # Pre-allocate lambda DataFrame with known size
     n_lambda_results = length(batch_results.optimization_results)
@@ -1241,7 +1270,6 @@ function concordance_analysis(
         # Processing parameters
         "batch_size" => adaptive_batch_size,
         "min_valid_samples" => min_valid_samples,
-        "use_threads" => use_threads,
         "chunk_size_filter" => chunk_size_filter,
         "max_pairs_in_memory" => max_pairs_in_memory,
         "use_transitivity" => use_transitivity,
