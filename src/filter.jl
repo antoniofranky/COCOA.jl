@@ -155,17 +155,11 @@ end
     end_idx::Int,
     epsilon::Float64
 )
-    # Collect all finite ratios first, then fit all at once
-    ratios = Float64[]
-    sizehint!(ratios, end_idx - start_idx + 1)
-
+    # Stream ratios directly - OnlineStats processes "one observation at a time" for O(1) memory
     @inbounds for k in start_idx:end_idx
         ratio = (c1_samples[k] + epsilon) / (c2_samples[k] + epsilon)
-        isfinite(ratio) && push!(ratios, ratio)
+        isfinite(ratio) && OnlineStats.fit!(variance_stat, ratio)
     end
-
-    # Fit all ratios at once - this is the correct OnlineStats usage
-    !isempty(ratios) && OnlineStats.fit!(variance_stat, ratios)
     return variance_stat
 end
 

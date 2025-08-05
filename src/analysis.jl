@@ -678,15 +678,21 @@ function concordance_analysis(
 
     concordance_tracker = ConcordanceTracker(complex_ids)
 
-    # Memory-efficient: extract warmup matrix and activity ranges directly without intermediate storage
+    # Memory-efficient: pre-allocate warmup matrix directly using constraint dimensions
     n_complexes = length(concordance_tracker.idx_to_id)
-    warmup_points = Vector{Vector{Float64}}()
+    n_vars = C.variable_count(constraints.balance)
     
-    # Memory-efficient activity ranges: use NaN for missing values instead of Union types
-    # NaN values indicate complexes without valid AVA results (more efficient than Union{Float64,Nothing})
-    activity_ranges = Vector{Tuple{Float64,Float64}}(undef, n_complexes)
-    sizehint!(warmup_points, n_complexes * 2)  # Estimate: 2 points per active complex
-
+    # DEBUG: Print dimensions
+    @info "Warmup matrix dimensions" n_complexes n_vars estimated_rows=n_complexes*2
+    
+    # Pre-fill with NaN for dense data (most complexes have valid ranges)
+    activity_ranges = fill((NaN, NaN), n_complexes)
+    
+    # Pre-allocate warmup matrix (2 points per complex: min and max)
+    warmup_matrix = Matrix{Float64}(undef, n_complexes * 2, n_vars)
+    warmup_idx = 1
+    valid_complexes = 0
+    
     for (i, cid) in enumerate(concordance_tracker.idx_to_id)
         if haskey(ava_results, cid)
             result = ava_results[cid]
@@ -695,34 +701,35 @@ function concordance_analysis(
                 if min_res !== nothing && max_res !== nothing
                     min_activity, min_flux = min_res
                     max_activity, max_flux = max_res
+                    
+                    # DEBUG: Check flux vector dimensions
+                    if valid_complexes == 0
+                        @info "First valid flux dimensions" length_min=length(min_flux) length_max=length(max_flux) expected_n_vars=n_vars
+                        @assert length(min_flux) == n_vars "Min flux dimension mismatch: $(length(min_flux)) != $n_vars"
+                        @assert length(max_flux) == n_vars "Max flux dimension mismatch: $(length(max_flux)) != $n_vars"
+                    end
+                    
                     activity_ranges[i] = (min_activity, max_activity)
-                    push!(warmup_points, min_flux, max_flux)
-                else
-                    # Mark as inactive using NaN values
-                    activity_ranges[i] = (NaN, NaN)
+                    
+                    # Fill matrix rows directly - eliminates vector-of-vectors overhead
+                    @inbounds warmup_matrix[warmup_idx, :] = min_flux
+                    @inbounds warmup_matrix[warmup_idx + 1, :] = max_flux
+                    warmup_idx += 2
+                    valid_complexes += 1
                 end
-            else
-                # Mark as inactive using NaN values
-                activity_ranges[i] = (NaN, NaN)
             end
-        else
-            # Mark as inactive using NaN values
-            activity_ranges[i] = (NaN, NaN)
         end
     end
-
-    warmup = if isempty(warmup_points)
-        Matrix{Float64}(undef, 0, 0)
-    else
-        # Build matrix directly without transpose - more efficient
-        n_points = length(warmup_points)
-        n_vars = length(warmup_points[1])
-        warmup_matrix = Matrix{Float64}(undef, n_points, n_vars)
-        for (i, point) in enumerate(warmup_points)
-            warmup_matrix[i, :] = point
-        end
-        warmup_matrix
-    end
+    
+    # DEBUG: Check final dimensions
+    actual_rows = warmup_idx - 1
+    @info "Warmup matrix results" valid_complexes actual_rows expected_rows=valid_complexes*2
+    
+    # Trim matrix to actual used rows
+    warmup = actual_rows > 0 ? warmup_matrix[1:actual_rows, :] : Matrix{Float64}(undef, 0, 0)
+    
+    # DEBUG: Final matrix info
+    @info "Final warmup matrix" size=size(warmup)
 
     # # Check feasibility of warmup points if objective bound is applied
     # if objective_bound !== nothing && !isempty(warmup_points) && haskey(constraints.balance, :objective_bound)
