@@ -21,19 +21,22 @@ model = COBREXA.load_model(model_path)
 res = concordance_analysis(
     test_model;
     optimizer=HiGHS.Optimizer,
-    sample_size=10,                # Adjust as needed
+    sample_size=100,                # Adjust as needed
     batch_size=1000,
     seed=42,
     settings=highs_settings
 )
 model = COCOA.split_into_elementary_steps(model)
+model = COCOA.prepare_model_for_concordance(model, optimizer=HiGHS.Optimizer)
 # Run concordance analysis and capture timing
 results = COCOA.concordance_analysis(
     model;
     optimizer=HiGHS.Optimizer,
     settings=highs_settings,
     sample_size=100,                # Adjust as needed
-    seed=42
+    seed=42,
+    coarse_cv_threshold=0.001,
+    cv_threshold=0.0001,
 )
 
 # Save results and timing
