@@ -30,7 +30,7 @@ function extract_solver_tolerance(optimizer, settings=[])::Float64
         # Try common tolerance attribute names across different solvers
         tolerance_attrs = [
             "primal_feasibility_tolerance",  # HiGHS, Gurobi
-            "dual_feasibility_tolerance",    # HiGHS, Gurobi  
+            "dual_feasibility_tolerance",    # HiGHS, Gurobi
             "feasibility_tolerance",         # Some solvers
             "FeasibilityTol",               # Gurobi
             "OptimalityTol",                # Gurobi
@@ -78,7 +78,7 @@ Process concordance analysis in batches.
 When concordant pairs are found, remaining pairs involving those complexes are prioritized.
 This exploits the clustering tendency of concordant complexes to dramatically improve efficiency.
 
-When `use_transitivity=false`, transitivity filtering and elimination are disabled, 
+When `use_transitivity=false`, transitivity filtering and elimination are disabled,
 which forces testing of all candidate pairs regardless of already known concordant relationships.
 Trivially concordant pairs are still automatically recognized and don't need explicit testing.
 """
@@ -90,7 +90,7 @@ function process_in_batches(
     settings=[],
     workers=workers,
     batch_size::Int=50,
-    tolerance::Float64=1e-2,
+    tolerance::Float64=1e-6,
     use_transitivity::Bool=true
 )
     # Use separate variables - following Julia performance best practices
@@ -467,7 +467,7 @@ function process_concordance_batch(
     optimizer,
     settings=[],
     workers=workers,
-    tolerance::Float64=1e-2
+    tolerance::Float64=1e-6
 )
     # Create COBREXA-style test array with direction multipliers
     test_array = []
@@ -591,9 +591,10 @@ function concordance_analysis(
     optimizer,
     settings=[],
     workers=D.workers(),
-    tolerance::Float64=1e-2,
-    cv_threshold::Float64=0.01,
-    coarse_cv_threshold::Float64=0.1,
+    tolerance::Union{Float64,Nothing}=nothing,
+    cv_threshold::Union{Float64,Nothing}=nothing,
+    coarse_cv_threshold::Union{Float64,Nothing}=nothing,
+    cv_epsilon::Union{Float64,Nothing}=nothing,
     sample_size::Int=100,
     coarse_sample_size::Int=Int(sample_size ÷ 5),
     batch_size::Union{Int,Nothing}=nothing,
@@ -602,9 +603,12 @@ function concordance_analysis(
     use_unidirectional_constraints::Bool=true,
     use_threads::Bool=false,
     chunk_size_filter::Int=100_000,
+    use_heap_pruning::Bool=true,
     max_pairs_in_memory::Int=100_000,
     objective_bound=nothing,
-    use_transitivity::Bool=true
+    use_transitivity::Bool=true,
+    n_burnin::Int=50,
+    n_chains::Int=1,
 )
     start_time = time()
 
@@ -617,7 +621,14 @@ function concordance_analysis(
 
     # Detect solver tolerance for consistent numerical thresholds
     solver_tolerance = extract_solver_tolerance(optimizer, settings)
-    @info "Starting concordance analysis" n_workers = length(workers) tolerance coarse_cv_threshold cv_threshold sample_size use_unidirectional_constraints batch_size solver_tolerance
+
+    # Set default values based on solver tolerance if not provided
+    actual_tolerance = tolerance !== nothing ? tolerance : max(solver_tolerance * 10, 1e-6)
+    actual_cv_threshold = cv_threshold !== nothing ? cv_threshold : max(solver_tolerance * 10, 1e-6)
+    actual_coarse_cv_threshold = coarse_cv_threshold !== nothing ? coarse_cv_threshold : max(solver_tolerance * 100, 1e-3)
+    actual_cv_epsilon = cv_epsilon !== nothing ? cv_epsilon : max(solver_tolerance / 100, 1e-15)
+
+    @info "Starting concordance analysis" n_workers = length(workers) tolerance = actual_tolerance coarse_cv_threshold = actual_coarse_cv_threshold cv_threshold = actual_cv_threshold sample_size use_unidirectional_constraints batch_size solver_tolerance
 
     constraints, complexes =
         concordance_constraints(model; modifications, use_unidirectional_constraints, return_complexes=true)
@@ -673,13 +684,51 @@ function concordance_analysis(
     trivial_pairs = find_trivially_concordant_pairs(complexes)
     @info "Found trivially concordant pairs" n_trivially_concordant = length(trivial_pairs)
 
-    @info "Performing Activity Variability Analysis and generating warmup points"
+    # Calculate how many extreme points we'll actually need for sampling
+    n_extreme_points_needed = min(sample_size ÷ 3, length(complex_ids))
+
+    @info "Smart AVA: Random flux collection" total_complexes = length(complex_ids) n_extreme_needed = n_extreme_points_needed
+
+    # Calculate probability of collecting flux for each optimization
+    # Each complex generates 2 optimizations (min and max)
+    total_optimizations = length(complex_ids) * 2
+    flux_collection_probability = min(1.0, (n_extreme_points_needed * 2) / total_optimizations)
+
+    @info "Random flux collection strategy" flux_probability = round(flux_collection_probability, digits=3) expected_flux_vectors = round(total_optimizations * flux_collection_probability)
+
+    # Use the same RNG pattern as the rest of the function for consistency
+    flux_rng = if seed === nothing
+        Random.GLOBAL_RNG
+    else
+        StableRNG(seed::Int + 1000)  # Offset to avoid collision with main RNG
+    end
+
+    function random_ava_output(dir, om; digits=6)
+        if JuMP.termination_status(om) != JuMP.OPTIMAL
+            return (nothing, nothing)
+        end
+
+        # Always collect activity
+        objective_val = round(JuMP.objective_value(om), digits=digits)
+        activity = dir * objective_val
+
+        # Randomly decide whether to collect flux vector
+        if rand(flux_rng) < flux_collection_probability
+            flux_vector = round.(JuMP.value.(om[:x]), digits=digits)
+        else
+            flux_vector = Float64[]  # Empty vector to save memory
+        end
+
+        return (activity, flux_vector)
+    end
+
+    @info "Performing efficient Activity Variability Analysis"
     ava_time = @elapsed ava_results = COBREXA.constraints_variability(
         constraints.balance,
         constraints.activities;
         optimizer=optimizer,
         settings=settings,
-        output=ava_output_with_warmup,
+        output=random_ava_output,
         output_type=Tuple{Float64,Vector{Float64}},
         workers=workers,
     )
@@ -687,21 +736,17 @@ function concordance_analysis(
 
     concordance_tracker = ConcordanceTracker(complex_ids)
 
-    # Memory-efficient: pre-allocate warmup matrix directly using constraint dimensions
-    n_complexes = length(concordance_tracker.idx_to_id)
+    # Memory-efficient warmup matrix: work directly with the flux vectors we collected
     n_vars = C.variable_count(constraints.balance)
+    n_complexes = length(concordance_tracker.idx_to_id)
 
-    # DEBUG: Print dimensions
-    @info "Warmup matrix dimensions" n_complexes n_vars estimated_rows = n_complexes * 2
+    @info "Building warmup matrix from selective flux collection"
 
-    # Pre-fill with NaN for dense data (most complexes have valid ranges)
+    # Pre-fill activity ranges for all complexes
     activity_ranges = fill((NaN, NaN), n_complexes)
 
-    # Pre-allocate warmup matrix (2 points per complex: min and max)
-    warmup_matrix = Matrix{Float64}(undef, n_complexes * 2, n_vars)
-    warmup_idx = 1
-    valid_complexes = 0
-
+    # First pass: count how many flux vectors we collected
+    flux_vector_count = 0
     for (i, cid) in enumerate(concordance_tracker.idx_to_id)
         if haskey(ava_results, cid)
             result = ava_results[cid]
@@ -711,34 +756,56 @@ function concordance_analysis(
                     min_activity, min_flux = min_res
                     max_activity, max_flux = max_res
 
-                    # DEBUG: Check flux vector dimensions
-                    if valid_complexes == 0
-                        @info "First valid flux dimensions" length_min = length(min_flux) length_max = length(max_flux) expected_n_vars = n_vars
-                        @assert length(min_flux) == n_vars "Min flux dimension mismatch: $(length(min_flux)) != $n_vars"
-                        @assert length(max_flux) == n_vars "Max flux dimension mismatch: $(length(max_flux)) != $n_vars"
-                    end
-
+                    # Store activity ranges for all complexes (needed for classification)
                     activity_ranges[i] = (min_activity, max_activity)
 
-                    # Fill matrix rows directly - eliminates vector-of-vectors overhead
-                    @inbounds warmup_matrix[warmup_idx, :] = min_flux
-                    @inbounds warmup_matrix[warmup_idx+1, :] = max_flux
-                    warmup_idx += 2
-                    valid_complexes += 1
+                    # Count flux vectors that were collected (non-empty)
+                    if !isempty(min_flux) && !isempty(max_flux)
+                        flux_vector_count += 2  # min and max
+                    end
                 end
             end
         end
     end
 
-    # DEBUG: Check final dimensions
-    actual_rows = warmup_idx - 1
-    @info "Warmup matrix results" valid_complexes actual_rows expected_rows = valid_complexes * 2
+    # Memory-efficient: Build warmup matrix directly without intermediate storage
+    if flux_vector_count > 0
+        warmup = Matrix{Float64}(undef, flux_vector_count, n_vars)
+        warmup_idx = 1
 
-    # Trim matrix to actual used rows
-    warmup = actual_rows > 0 ? warmup_matrix[1:actual_rows, :] : Matrix{Float64}(undef, 0, 0)
+        for (i, cid) in enumerate(concordance_tracker.idx_to_id)
+            if haskey(ava_results, cid)
+                result = ava_results[cid]
+                if result !== nothing && length(result) == 2
+                    min_res, max_res = result
+                    if min_res !== nothing && max_res !== nothing
+                        min_activity, min_flux = min_res
+                        max_activity, max_flux = max_res
 
-    # DEBUG: Final matrix info
-    @info "Final warmup matrix" size = size(warmup)
+                        # Only use flux vectors if they were collected (non-empty)
+                        if !isempty(min_flux) && !isempty(max_flux)
+                            # Validate dimensions on first flux vector
+                            if warmup_idx == 1
+                                @info "Flux vector dimensions" length_min = length(min_flux) length_max = length(max_flux) expected_n_vars = n_vars
+                                @assert length(min_flux) == n_vars "Min flux dimension mismatch: $(length(min_flux)) != $n_vars"
+                                @assert length(max_flux) == n_vars "Max flux dimension mismatch: $(length(max_flux)) != $n_vars"
+                            end
+
+                            # Store flux vectors directly in matrix (no copying)
+                            @inbounds warmup[warmup_idx, :] = min_flux
+                            @inbounds warmup[warmup_idx+1, :] = max_flux
+                            warmup_idx += 2
+                        end
+                    end
+                end
+            end
+        end
+
+        @info "Memory-efficient warmup matrix created" collected_points = size(warmup, 1)
+    else
+        warmup = Matrix{Float64}(undef, 0, n_vars)
+        @info "No flux vectors available for warmup matrix"
+    end
 
     # # Check feasibility of warmup points if objective bound is applied
     # if objective_bound !== nothing && !isempty(warmup_points) && haskey(constraints.balance, :objective_bound)
@@ -887,18 +954,16 @@ function concordance_analysis(
     # Formula: n_samples_collected = n_chains × n_starting_points × n_iterations_collected
 
     # 1. Configure to produce exactly sample_size samples
-    n_chains = 1  # Single chain for precise control
     n_iterations_to_collect = 1  # Single sample per starting point
     n_starting_points = sample_size  # Exactly sample_size starting points for sample_size samples
 
     # 2. Minimal burn-in since each starting point is already diverse
-    n_burnin = 50  # Short burn-in, diversity comes from different starting points
-    n_spacing = 1   # No spacing needed since each starting point is independent
+    spacing = 1   # No spacing needed since each starting point is independent
 
     # 3. Calculate expected total
     expected_samples = n_chains * n_starting_points * n_iterations_to_collect
 
-    @info "Sampling configuration" n_chains n_starting_points n_iterations_to_collect n_burnin n_spacing target = sample_size expected = expected_samples warmup_size = size(warmup, 1)
+    @info "Sampling configuration" n_chains n_starting_points n_iterations_to_collect n_burnin spacing target = sample_size expected = expected_samples warmup_size = size(warmup, 1)
 
     # 4. Define single iteration to collect after burn-in
     iterations_to_collect = [n_burnin]  # Single well-converged sample per starting point
@@ -998,17 +1063,6 @@ function concordance_analysis(
     @info "First 5 samples collected" first_samples = collect(Iterators.take(samples_tree, 5))
     @info "Number of samples per activity variable" n_samples = length(first(samples_tree)[2])
 
-    # Adjust filter config for high-quality sampling strategy
-    filter_config = FilterConfig(
-        coarse_cv_threshold=coarse_cv_threshold,
-        cv_threshold=cv_threshold,
-        coarse_sample_size=coarse_sample_size,
-        min_valid_samples=min_valid_samples,
-        use_threads=use_threads,
-        chunk_size=chunk_size_filter,
-        max_pairs_in_memory=max_pairs_in_memory,
-    )
-
     @debug "type of samples_tree" typeof(samples_tree)
     @info "Generating candidate pairs via streaming filter..."
     filter_time = @elapsed candidate_priorities = streaming_filter(
@@ -1016,7 +1070,15 @@ function concordance_analysis(
         trivial_pairs_indices,
         samples_tree, # Pass the collected samples
         concordance_tracker;
-        config=filter_config # Pass the config object
+        coarse_sample_size=coarse_sample_size,
+        coarse_cv_threshold=actual_coarse_cv_threshold,
+        cv_threshold=actual_cv_threshold,
+        cv_epsilon=actual_cv_epsilon,
+        min_valid_samples=min_valid_samples,
+        use_threads=use_threads,
+        chunk_size=chunk_size_filter,
+        use_heap_pruning=use_heap_pruning,
+        max_pairs_in_memory=max_pairs_in_memory
     )
 
     @info "Candidate pairs identified" n_pairs = length(candidate_priorities) filter_time_sec = round(filter_time, digits=2)
@@ -1039,7 +1101,7 @@ function concordance_analysis(
         settings=settings,
         workers=workers,
         batch_size=adaptive_batch_size,
-        tolerance,
+        tolerance=actual_tolerance,
         use_transitivity=use_transitivity,
     )
 
@@ -1189,16 +1251,22 @@ function concordance_analysis(
     )
 end
 
-function ava_output_with_warmup(dir, om; digits=6)
+function ava_output_with_warmup(dir, om; digits=6, collect_flux=true)
     if JuMP.termination_status(om) != JuMP.OPTIMAL
         return (nothing, nothing)
     end
 
     # Round the results to a reasonable precision to mitigate floating point noise
     objective_val = round(JuMP.objective_value(om), digits=digits)
-    flux_vector = round.(JuMP.value.(om[:x]), digits=digits)
-
     activity = dir * objective_val
+
+    # Only collect flux vector if requested (for memory efficiency)
+    if collect_flux
+        flux_vector = round.(JuMP.value.(om[:x]), digits=digits)
+    else
+        flux_vector = Float64[]  # Empty vector to save memory
+    end
+
     return (activity, flux_vector)
 end
 
