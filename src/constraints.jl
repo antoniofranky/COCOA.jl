@@ -68,7 +68,7 @@ function create_unidirectional_constraints(
     constraints_before_pruning = try
         C.substitute(constraints, subst_vals)
     catch e
-        @error "ConstraintTrees.jl substitute failed, this is a known bug with v1.11.0" error=e
+        @error "ConstraintTrees.jl substitute failed, this is a known bug with v1.11.0" error = e
         @info "Falling back to non-unidirectional constraints"
         # Return original constraints without unidirectional splitting
         return constraints, complexes
@@ -153,8 +153,8 @@ struct MetabolicComplex
 
     function MetabolicComplex(id::Symbol, metabolites::Vector{Tuple{Symbol,Float64}}, reaction_contributions::Dict{Symbol,Float64})
         # Ensure canonical ordering by sorting all components
-        sorted_metabolites = sort(metabolites, by=x -> x[1])
-        sorted_reactions = sort([(k, v) for (k, v) in reaction_contributions], by=x -> x[1])
+        sorted_metabolites = sort!(metabolites, by=x -> x[1])
+        sorted_reactions = sort!([(k, v) for (k, v) in reaction_contributions], by=x -> x[1])
         new(id, sorted_metabolites, sorted_reactions)
     end
 end
@@ -192,20 +192,20 @@ function extract_complexes_from_model(model::AbstractFBCModels.AbstractFBCModel)
     metabolites = AbstractFBCModels.metabolites(model)
     n_reactions = length(reactions)
     n_metabolites = length(metabolites)
-    
+
     # Step 1: Accumulate reaction contributions for each unique complex.
     # The key is the canonical representation of the complex (a sorted vector of its metabolites).
     # Pre-size for better performance - estimate 2x reactions for complexes
     complex_data = Dict{Vector{Tuple{Symbol,Float64}},Dict{Symbol,Float64}}()
     sizehint!(complex_data, n_reactions * 2)
-    
+
     # Pre-allocate reaction map with known size
     reaction_map = Dict{String,Int}()
     sizehint!(reaction_map, n_reactions)
     for (i, id) in enumerate(reactions)
         reaction_map[id] = i
     end
-    
+
     # Pre-allocate temporary vectors to reuse in loops
     substrate_mets = Vector{Tuple{Symbol,Float64}}()
     product_mets = Vector{Tuple{Symbol,Float64}}()
@@ -264,10 +264,10 @@ function extract_complexes_from_model(model::AbstractFBCModels.AbstractFBCModel)
     # Pre-allocate complexes dictionary with estimated size
     complexes = Dict{Symbol,MetabolicComplex}()
     sizehint!(complexes, length(complex_data))
-    
+
     # Use keys directly without collecting to avoid allocation, sort them for determinism
     sorted_keys = sort!(collect(keys(complex_data)), by=x -> string(generate_complex_id(x)))
-    
+
     for canonical_mets in sorted_keys
         reaction_contribs = complex_data[canonical_mets]
         complex_id = generate_complex_id(canonical_mets)
@@ -306,7 +306,7 @@ function add_complex_activities_to_constraints(
 )
     complexes = extract_complexes_from_model(model)
     # Iterate over sorted complex IDs to ensure deterministic ConstraintTree construction
-    sorted_complex_ids = sort(collect(keys(complexes)))
+    sorted_complex_ids = sort!(collect(keys(complexes)))
 
     complex_activity_constraints = C.ConstraintTree(
         complex_id => C.Constraint(
@@ -391,7 +391,7 @@ function apply_charnes_cooper_scaling_to_constraint(
 )
     bound = constraint.bound
     x = constraint.value
-    
+
     if bound isa C.Between
         if direction == :negative
             # NEGATIVE CASE: For t <= 0, inequalities flip: v_max*t <= w <= v_min*t

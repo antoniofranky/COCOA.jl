@@ -17,6 +17,7 @@ This structure efficiently tracks:
 1. Concordant relationships using Union-Find
 2. Non-concordant relationships with transitivity inference
 3. Module membership caching for fast lookups
+4. BitVector-based boolean flags for memory-efficient complex state tracking
 """
 mutable struct ConcordanceTracker
     # Union-Find for concordant relationships
@@ -33,32 +34,49 @@ mutable struct ConcordanceTracker
     non_concordant_modules::Set{Tuple{Int,Int}}  # Module relationship cache
     module_members_cache::Dict{Int,Vector{Int}}  # Module membership cache
 
+    # BitVector-based boolean flags for memory-efficient tracking (8x memory reduction)
+    # These are optional and only allocated when needed for large-scale analyses
+    balanced_mask::Union{BitVector,Nothing}     # Tracks balanced complexes
+    positive_mask::Union{BitVector,Nothing}     # Tracks positive-only complexes  
+    negative_mask::Union{BitVector,Nothing}     # Tracks negative-only complexes
+    unrestricted_mask::Union{BitVector,Nothing} # Tracks unrestricted complexes
+    processed_mask::Union{BitVector,Nothing}    # Tracks which complexes have been processed
+
     function ConcordanceTracker(complex_ids::Vector{Symbol})
         n = length(complex_ids)
         parent = collect(1:n)
         rank = zeros(Int, n)
-        
+
         # Pre-allocate dictionary with known size for better performance
         id_to_idx = Dict{Symbol,Int}()
         sizehint!(id_to_idx, n)
         @inbounds for (i, id) in enumerate(complex_ids)
             id_to_idx[id] = i
         end
-        
+
         idx_to_id = copy(complex_ids)
 
         # Pre-allocate sets with estimated sizes
         non_concordant_pairs = Set{Tuple{Int,Int}}()
         sizehint!(non_concordant_pairs, n ÷ 10)  # Conservative estimate
-        
+
         non_concordant_modules = Set{Tuple{Int,Int}}()
         sizehint!(non_concordant_modules, n ÷ 20)  # Conservative estimate
-        
+
         module_cache = Dict{Int,Vector{Int}}()
         sizehint!(module_cache, n ÷ 5)  # Conservative estimate
 
+        # Initialize BitVector masks as nothing - they will be allocated on demand
+        # This saves memory for small models while enabling efficient tracking for large ones
+        balanced_mask = nothing
+        positive_mask = nothing
+        negative_mask = nothing
+        unrestricted_mask = nothing
+        processed_mask = nothing
+
         new(parent, rank, id_to_idx, idx_to_id,
-            non_concordant_pairs, non_concordant_modules, module_cache)
+            non_concordant_pairs, non_concordant_modules, module_cache,
+            balanced_mask, positive_mask, negative_mask, unrestricted_mask, processed_mask)
     end
 end
 
@@ -70,14 +88,14 @@ end
     while tracker.parent[root] != root
         root = tracker.parent[root]
     end
-    
+
     # Path compression - flatten the path
     while tracker.parent[x] != root
         next = tracker.parent[x]
         tracker.parent[x] = root
         x = next
     end
-    
+
     return root
 end
 
@@ -183,7 +201,7 @@ function ensure_module_cached!(tracker::ConcordanceTracker, rep::Int)
         # Pre-allocate with estimated size for better performance
         members = Vector{Int}()
         sizehint!(members, 10)  # Conservative estimate
-        
+
         # Batch the find operations for better cache locality
         n = length(tracker.parent)
         @inbounds for i in 1:n
@@ -236,4 +254,94 @@ end
 
 function clear_module_cache!(tracker::ConcordanceTracker)
     empty!(tracker.module_members_cache)
+end
+
+# --- BitVector mask management functions ---
+
+"""
+    ensure_mask_allocated!(tracker::ConcordanceTracker, mask_type::Symbol)
+
+Ensure that the specified BitVector mask is allocated. 
+Mask types: :balanced, :positive, :negative, :unrestricted, :processed
+"""
+function ensure_mask_allocated!(tracker::ConcordanceTracker, mask_type::Symbol)
+    n = length(tracker.idx_to_id)
+
+    if mask_type == :balanced
+        if tracker.balanced_mask === nothing
+            tracker.balanced_mask = falses(n)
+        end
+    elseif mask_type == :positive
+        if tracker.positive_mask === nothing
+            tracker.positive_mask = falses(n)
+        end
+    elseif mask_type == :negative
+        if tracker.negative_mask === nothing
+            tracker.negative_mask = falses(n)
+        end
+    elseif mask_type == :unrestricted
+        if tracker.unrestricted_mask === nothing
+            tracker.unrestricted_mask = falses(n)
+        end
+    elseif mask_type == :processed
+        if tracker.processed_mask === nothing
+            tracker.processed_mask = falses(n)
+        end
+    else
+        throw(ArgumentError("Unknown mask type: $mask_type. Valid types: :balanced, :positive, :negative, :unrestricted, :processed"))
+    end
+end
+
+"""
+    get_mask(tracker::ConcordanceTracker, mask_type::Symbol) -> BitVector
+
+Get the specified BitVector mask, allocating it if necessary.
+"""
+function get_mask(tracker::ConcordanceTracker, mask_type::Symbol)::BitVector
+    ensure_mask_allocated!(tracker, mask_type)
+
+    if mask_type == :balanced
+        return tracker.balanced_mask
+    elseif mask_type == :positive
+        return tracker.positive_mask
+    elseif mask_type == :negative
+        return tracker.negative_mask
+    elseif mask_type == :unrestricted
+        return tracker.unrestricted_mask
+    elseif mask_type == :processed
+        return tracker.processed_mask
+    else
+        throw(ArgumentError("Unknown mask type: $mask_type"))
+    end
+end
+
+"""
+    set_complex_flag!(tracker::ConcordanceTracker, complex_idx::Int, mask_type::Symbol, value::Bool)
+
+Set a boolean flag for a specific complex using BitVector for memory efficiency.
+"""
+@inline function set_complex_flag!(tracker::ConcordanceTracker, complex_idx::Int, mask_type::Symbol, value::Bool)
+    mask = get_mask(tracker, mask_type)
+    mask[complex_idx] = value
+end
+
+"""
+    get_complex_flag(tracker::ConcordanceTracker, complex_idx::Int, mask_type::Symbol) -> Bool
+
+Get a boolean flag for a specific complex. Returns false if mask is not allocated.
+"""
+@inline function get_complex_flag(tracker::ConcordanceTracker, complex_idx::Int, mask_type::Symbol)::Bool
+    if mask_type == :balanced && tracker.balanced_mask !== nothing
+        return tracker.balanced_mask[complex_idx]
+    elseif mask_type == :positive && tracker.positive_mask !== nothing
+        return tracker.positive_mask[complex_idx]
+    elseif mask_type == :negative && tracker.negative_mask !== nothing
+        return tracker.negative_mask[complex_idx]
+    elseif mask_type == :unrestricted && tracker.unrestricted_mask !== nothing
+        return tracker.unrestricted_mask[complex_idx]
+    elseif mask_type == :processed && tracker.processed_mask !== nothing
+        return tracker.processed_mask[complex_idx]
+    else
+        return false  # Default to false if mask not allocated
+    end
 end

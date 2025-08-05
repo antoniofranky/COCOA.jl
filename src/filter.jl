@@ -152,9 +152,6 @@ Ultra-efficient three-stage streaming pipeline.
 """
 function streaming_filter(
     complexes::Vector,
-    balanced_complexes::BitVector,
-    positive_complexes::BitVector,
-    negative_complexes::BitVector,
     trivial_pairs::Set{Tuple{Int,Int}},
     samples_tree::C.Tree{Vector{Float64}},
     concordance_tracker::ConcordanceTracker;
@@ -169,6 +166,16 @@ function streaming_filter(
 )
     @info "Starting memory-efficient CV filtering pipeline"
 
+    # Access BitVectors directly from ConcordanceTracker for maximum efficiency
+    # Ensure they are allocated first
+    ensure_mask_allocated!(concordance_tracker, :balanced)
+    ensure_mask_allocated!(concordance_tracker, :positive)
+    ensure_mask_allocated!(concordance_tracker, :negative)
+
+    balanced_complexes = concordance_tracker.balanced_mask
+    positive_complexes = concordance_tracker.positive_mask
+    negative_complexes = concordance_tracker.negative_mask
+
     # Stage 1: Count pairs without materializing
     stage1_start = time()
     n_pairs = count_valid_pairs(complexes, balanced_complexes, trivial_pairs, concordance_tracker)
@@ -176,6 +183,7 @@ function streaming_filter(
 
     # Stage 2 & 3: Stream processing
     stage23_start = time()
+    priorities = if n_pairs <= max_pairs_in_memory
     priorities = if n_pairs <= max_pairs_in_memory
         # Small enough to process directly
         @info "Processing all pairs directly (small dataset)"
@@ -187,6 +195,7 @@ function streaming_filter(
         )
     else
         # Stream in chunks
+        @info "Processing in streaming chunks (large dataset)" chunk_size = chunk_size
         @info "Processing in streaming chunks (large dataset)" chunk_size = chunk_size
         process_streaming_chunks(
             complexes, balanced_complexes, trivial_pairs, samples_tree,
@@ -282,6 +291,7 @@ function process_streaming_chunks(
     sizehint!(all_priorities, max_pairs_in_memory)
     chunk_pairs = Vector{Tuple{Int,Int}}()
     sizehint!(chunk_pairs, chunk_size)
+    sizehint!(chunk_pairs, chunk_size)
 
     n = length(complexes)
     @inbounds for i in 1:n
@@ -295,6 +305,7 @@ function process_streaming_chunks(
             if should_test_pair_indices(i, j, balanced, trivial, concordance_tracker, i_balanced)
                 push!(chunk_pairs, (i, j))
 
+                if length(chunk_pairs) >= chunk_size
                 if length(chunk_pairs) >= chunk_size
                     # Process chunk
                     chunk_priorities = process_pair_stream(
@@ -347,6 +358,7 @@ function process_pair_stream(
     idx_to_id = concordance_tracker.idx_to_id
 
     if use_threads
+    if use_threads
         @info "Using parallel processing with threads"
         process_pairs_parallel(pairs, samples_tree, idx_to_id, positive, negative, coarse_sample_size, coarse_cv_threshold, cv_threshold, cv_epsilon, min_valid_samples)
     else
@@ -364,7 +376,6 @@ function process_pairs_serial(
 )
     # Pre-allocate with type annotation
     priorities = Vector{PairPriority}()
-    sizehint!(priorities, 1000)  # Conservative estimate
     pair_count = 0
     stage2_passed = 0
     stage3_passed = 0
@@ -388,12 +399,16 @@ function process_pairs_serial(
 
         # Stage 2: Coarse filter - use cached lengths
         n_coarse = min(coarse_sample_size, c1_len, c2_len)
+        n_coarse = min(coarse_sample_size, c1_len, c2_len)
         n_coarse < 2 && continue
 
         # Create new variance statistic (OnlineStats doesn't support reset)
         ratio_stat = Variance()
         compute_ratios_batch!(ratio_stat, c1_samples, c2_samples, 1, n_coarse, cv_epsilon)
+        compute_ratios_batch!(ratio_stat, c1_samples, c2_samples, 1, n_coarse, cv_epsilon)
 
+        cv_coarse = compute_cv(ratio_stat, cv_epsilon)
+        cv_coarse > coarse_cv_threshold && continue
         cv_coarse = compute_cv(ratio_stat, cv_epsilon)
         cv_coarse > coarse_cv_threshold && continue
         stage2_passed += 1
@@ -402,11 +417,15 @@ function process_pairs_serial(
         max_samples = min(c1_len, c2_len)
         if max_samples > n_coarse
             compute_ratios_batch!(ratio_stat, c1_samples, c2_samples, n_coarse + 1, max_samples, cv_epsilon)
+            compute_ratios_batch!(ratio_stat, c1_samples, c2_samples, n_coarse + 1, max_samples, cv_epsilon)
         end
 
         n_samples = nobs(ratio_stat)
         n_samples < min_valid_samples && continue
+        n_samples < min_valid_samples && continue
 
+        cv_full = compute_cv(ratio_stat, cv_epsilon)
+        cv_full > cv_threshold && continue
         cv_full = compute_cv(ratio_stat, cv_epsilon)
         cv_full > cv_threshold && continue
         stage3_passed += 1
@@ -466,12 +485,16 @@ function process_pairs_parallel(
 
         # Coarse filter - use cached lengths
         n_coarse = min(coarse_sample_size, c1_len, c2_len)
+        n_coarse = min(coarse_sample_size, c1_len, c2_len)
         n_coarse < 2 && continue
 
         # Create new variance statistic (OnlineStats doesn't support reset)
         ratio_stat = Variance()
         compute_ratios_batch!(ratio_stat, c1_samples, c2_samples, 1, n_coarse, cv_epsilon)
+        compute_ratios_batch!(ratio_stat, c1_samples, c2_samples, 1, n_coarse, cv_epsilon)
 
+        cv_coarse = compute_cv(ratio_stat, cv_epsilon)
+        cv_coarse > coarse_cv_threshold && continue
         cv_coarse = compute_cv(ratio_stat, cv_epsilon)
         cv_coarse > coarse_cv_threshold && continue
 
@@ -479,11 +502,15 @@ function process_pairs_parallel(
         max_samples = min(c1_len, c2_len)
         if max_samples > n_coarse
             compute_ratios_batch!(ratio_stat, c1_samples, c2_samples, n_coarse + 1, max_samples, cv_epsilon)
+            compute_ratios_batch!(ratio_stat, c1_samples, c2_samples, n_coarse + 1, max_samples, cv_epsilon)
         end
 
         n_samples = nobs(ratio_stat)
         n_samples < min_valid_samples && continue
+        n_samples < min_valid_samples && continue
 
+        cv_full = compute_cv(ratio_stat, cv_epsilon)
+        cv_full > cv_threshold && continue
         cv_full = compute_cv(ratio_stat, cv_epsilon)
         cv_full > cv_threshold && continue
 
