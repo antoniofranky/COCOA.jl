@@ -631,7 +631,7 @@ function concordance_analysis(
     actual_balanced_tolerance = balanced_tolerance !== nothing ? balanced_tolerance : solver_tolerance
     actual_cv_threshold = cv_threshold !== nothing ? cv_threshold : max(solver_tolerance * 10, 1e-6)
     actual_coarse_cv_threshold = coarse_cv_threshold !== nothing ? coarse_cv_threshold : max(solver_tolerance * 100, 1e-3)
-    actual_cv_epsilon = cv_epsilon !== nothing ? cv_epsilon : max(solver_tolerance / 100, 1e-15)
+    actual_cv_epsilon = cv_epsilon !== nothing ? cv_epsilon : max(solver_tolerance / 10000, 1e-15)
 
     @info "Starting concordance analysis" n_workers = length(workers) optimization_tolerance = actual_optimization_tolerance concordance_tolerance = actual_concordance_tolerance balanced_tolerance = actual_balanced_tolerance coarse_cv_threshold = actual_coarse_cv_threshold cv_threshold = actual_cv_threshold sample_size use_unidirectional_constraints batch_size solver_tolerance
 
@@ -692,48 +692,75 @@ function concordance_analysis(
     # Calculate how many extreme points we'll actually need for sampling
     n_extreme_points_needed = min(sample_size ÷ 3, length(complex_ids))
 
-    @info "Smart AVA: Random flux collection" total_complexes = length(complex_ids) n_extreme_needed = n_extreme_points_needed
+    @info "Smart AVA: Deterministic flux collection" total_complexes = length(complex_ids) n_extreme_needed = n_extreme_points_needed
 
-    # Calculate probability of collecting flux for each optimization
-    # Each complex generates 2 optimizations (min and max)
-    total_optimizations = length(complex_ids) * 2
-    flux_collection_probability = min(1.0, (n_extreme_points_needed * 2) / total_optimizations)
+    # Deterministic selection strategy for optimal coverage and memory efficiency
+    # Pre-select which complexes should have their flux vectors collected
+    n_complexes_for_flux = min(n_extreme_points_needed, length(complex_ids))
 
-    @info "Random flux collection strategy" flux_probability = round(flux_collection_probability, digits=3) expected_flux_vectors = round(total_optimizations * flux_collection_probability)
-
-    # Use the same RNG pattern as the rest of the function for consistency
-    flux_rng = if seed === nothing
-        Random.GLOBAL_RNG
+    # Advanced selection strategy for better feasible space coverage:
+    # 1. Include complexes with largest metabolite counts (likely boundary-defining)
+    # 2. Ensure even distribution across the complex space
+    # 3. Include first and last complexes (boundary coverage)
+    selected_complex_indices = if n_complexes_for_flux >= length(complex_ids)
+        # Collect all if we need most of them
+        Set(1:length(complex_ids))
     else
-        StableRNG(seed::Int + 1000)  # Offset to avoid collision with main RNG
-    end
+        indices = Set{Int}()
 
-    function random_ava_output(dir, om; digits=6)
-        if JuMP.termination_status(om) != JuMP.OPTIMAL
-            return (nothing, nothing)
+        # Always include first and last complexes for boundary coverage
+        push!(indices, 1)
+        push!(indices, length(complex_ids))
+
+        # Add evenly spaced complexes for uniform coverage
+        if n_complexes_for_flux > 2
+            remaining_slots = n_complexes_for_flux - 2
+            if remaining_slots > 0
+                step_size = (length(complex_ids) - 1) / (remaining_slots + 1)
+                for i in 1:remaining_slots
+                    idx = round(Int, 1 + i * step_size)
+                    # Ensure we don't duplicate first/last
+                    if idx != 1 && idx != length(complex_ids)
+                        push!(indices, idx)
+                    end
+                end
+            end
         end
 
-        # Always collect activity
-        objective_val = round(JuMP.objective_value(om), digits=digits)
-        activity = dir * objective_val
+        # Fill remaining slots with complexes that have diverse metabolite counts
+        if length(indices) < n_complexes_for_flux
+            # Sort complexes by metabolite count for diversity
+            complex_sizes = [(i, length(complexes[complex_ids[i]].metabolites))
+                             for i in 1:length(complex_ids) if i ∉ indices]
+            sort!(complex_sizes, by=x -> x[2], rev=true)
 
-        # Randomly decide whether to collect flux vector
-        if rand(flux_rng) < flux_collection_probability
-            flux_vector = round.(JuMP.value.(om[:x]), digits=digits)
-        else
-            flux_vector = Float64[]  # Empty vector to save memory
+            slots_remaining = n_complexes_for_flux - length(indices)
+            for (i, _) in complex_sizes[1:min(slots_remaining, length(complex_sizes))]
+                push!(indices, i)
+            end
         end
 
-        return (activity, flux_vector)
+        indices
     end
 
-    @info "Performing efficient Activity Variability Analysis"
+    @info "Deterministic flux collection strategy" n_selected_complexes = length(selected_complex_indices) total_complexes = length(complex_ids) expected_flux_vectors = length(selected_complex_indices) * 2
+
+    # Selection complete - no need for runtime lookup function since we'll use separate AVA calls
+
+    @info "Performing efficient Activity Variability Analysis (activities only)"
     ava_time = @elapsed ava_results = COBREXA.constraints_variability(
         constraints.balance,
         constraints.activities;
         optimizer=optimizer,
         settings=settings,
-        output=random_ava_output,
+        output=(dir, om; digits=6) -> begin
+            if JuMP.termination_status(om) != JuMP.OPTIMAL
+                return (nothing, nothing)
+            end
+            objective_val = round(JuMP.objective_value(om), digits=digits)
+            activity = dir * objective_val
+            return (activity, Float64[])  # Empty flux vector to save memory
+        end,
         output_type=Tuple{Float64,Vector{Float64}},
         workers=workers,
     )
@@ -741,71 +768,74 @@ function concordance_analysis(
 
     concordance_tracker = ConcordanceTracker(complex_ids)
 
-    # Memory-efficient warmup matrix: work directly with the flux vectors we collected
+    # Memory-efficient warmup matrix: collect flux vectors for selected complexes only
     n_vars = C.variable_count(constraints.balance)
     n_complexes = length(concordance_tracker.idx_to_id)
 
-    @info "Building warmup matrix from selective flux collection"
+    @info "Building warmup matrix from deterministic flux collection"
 
-    # Pre-fill activity ranges for all complexes
+    # Pre-fill activity ranges for all complexes (needed for classification)
     activity_ranges = fill((NaN, NaN), n_complexes)
 
-    # First pass: count how many flux vectors we collected
-    flux_vector_count = 0
+    # Collect flux vectors for selected complexes using a targeted second AVA call
+    # This dual-call approach is actually optimal: 
+    # 1. First call: lightweight activities for ALL complexes
+    # 2. Second call: full flux vectors for ONLY selected complexes
+    # This avoids complex identification logic and minimizes memory usage
+    selected_ava_results = COBREXA.constraints_variability(
+        constraints.balance,
+        C.ConstraintTree(Symbol(complex_ids[i]) => constraints.activities[complex_ids[i]] for i in selected_complex_indices);
+        optimizer=optimizer,
+        settings=settings,
+        output=ava_output_with_warmup,
+        output_type=Tuple{Float64,Vector{Float64}},
+        workers=workers,
+    )
+
+    @info "Selected complexes flux collection complete" n_selected = length(selected_complex_indices)
+
+    # Single pass: build warmup matrix and activity ranges simultaneously
+    flux_vectors = Vector{Vector{Float64}}()
+    sizehint!(flux_vectors, length(selected_complex_indices) * 2)
+
+    # First, fill activity ranges from all AVA results
     for (i, cid) in enumerate(concordance_tracker.idx_to_id)
         if haskey(ava_results, cid)
             result = ava_results[cid]
             if result !== nothing && length(result) == 2
                 min_res, max_res = result
                 if min_res !== nothing && max_res !== nothing
-                    min_activity, min_flux = min_res
-                    max_activity, max_flux = max_res
-
-                    # Store activity ranges for all complexes (needed for classification)
+                    min_activity, max_activity = min_res[1], max_res[1]
                     activity_ranges[i] = (min_activity, max_activity)
+                end
+            end
+        end
+    end
 
-                    # Count flux vectors that were collected (non-empty)
+    # Then, collect flux vectors from selected complexes only
+    for i in selected_complex_indices
+        cid = complex_ids[i]
+        if haskey(selected_ava_results, cid)
+            result = selected_ava_results[cid]
+            if result !== nothing && length(result) == 2
+                min_res, max_res = result
+                if min_res !== nothing && max_res !== nothing
+                    min_flux, max_flux = min_res[2], max_res[2]
                     if !isempty(min_flux) && !isempty(max_flux)
-                        flux_vector_count += 2  # min and max
+                        push!(flux_vectors, min_flux)
+                        push!(flux_vectors, max_flux)
                     end
                 end
             end
         end
     end
 
-    # Memory-efficient: Build warmup matrix directly without intermediate storage
-    if flux_vector_count > 0
-        warmup = Matrix{Float64}(undef, flux_vector_count, n_vars)
-        warmup_idx = 1
-
-        for (i, cid) in enumerate(concordance_tracker.idx_to_id)
-            if haskey(ava_results, cid)
-                result = ava_results[cid]
-                if result !== nothing && length(result) == 2
-                    min_res, max_res = result
-                    if min_res !== nothing && max_res !== nothing
-                        min_activity, min_flux = min_res
-                        max_activity, max_flux = max_res
-
-                        # Only use flux vectors if they were collected (non-empty)
-                        if !isempty(min_flux) && !isempty(max_flux)
-                            # Validate dimensions on first flux vector
-                            if warmup_idx == 1
-                                @info "Flux vector dimensions" length_min = length(min_flux) length_max = length(max_flux) expected_n_vars = n_vars
-                                @assert length(min_flux) == n_vars "Min flux dimension mismatch: $(length(min_flux)) != $n_vars"
-                                @assert length(max_flux) == n_vars "Max flux dimension mismatch: $(length(max_flux)) != $n_vars"
-                            end
-
-                            # Store flux vectors directly in matrix (no copying)
-                            @inbounds warmup[warmup_idx, :] = min_flux
-                            @inbounds warmup[warmup_idx+1, :] = max_flux
-                            warmup_idx += 2
-                        end
-                    end
-                end
-            end
+    # Build warmup matrix efficiently
+    if !isempty(flux_vectors)
+        warmup = Matrix{Float64}(undef, length(flux_vectors), n_vars)
+        @inbounds for (i, flux_vec) in enumerate(flux_vectors)
+            warmup[i, :] = flux_vec
         end
-
         @info "Memory-efficient warmup matrix created" collected_points = size(warmup, 1)
     else
         warmup = Matrix{Float64}(undef, 0, n_vars)
@@ -980,12 +1010,22 @@ function concordance_analysis(
     start_variables_list = Vector{Vector{Float64}}()
     sizehint!(start_variables_list, sample_size)
 
-    # Strategy 1: Use extreme boundary points for maximum activity ranges
+    # Strategy 1: Use deterministic extreme boundary points for maximum coverage
     if n_extreme_points > 0 && !isempty(warmup)
-        # Select most diverse extreme points (max distance from each other)
-        extreme_indices = rand(rng, 1:size(warmup, 1), n_extreme_points)
-        for idx in extreme_indices
-            push!(start_variables_list, warmup[idx, :])
+        # Deterministic selection of most diverse extreme points
+        # Instead of random selection, use systematic sampling for better coverage
+        if n_extreme_points >= size(warmup, 1)
+            # Use all extreme points if we need most of them
+            for idx in 1:size(warmup, 1)
+                push!(start_variables_list, warmup[idx, :])
+            end
+        else
+            # Systematic sampling for maximum diversity
+            step_size = size(warmup, 1) / n_extreme_points
+            for i in 0:(n_extreme_points-1)
+                idx = max(1, min(size(warmup, 1), round(Int, 1 + i * step_size)))
+                push!(start_variables_list, warmup[idx, :])
+            end
         end
     end
 
@@ -996,18 +1036,44 @@ function concordance_analysis(
         push!(start_variables_list, center_point)
     end
 
-    # Generate feasible random points as convex combinations of known feasible points
+    # Strategy 3: Generate diverse random points as convex combinations
+    # Key fix: Exclude the extreme points already selected to ensure true diversity
     if n_random_points > 0 && size(warmup, 1) >= 2
+        @info "Generating diverse convex combination random points" n_random = n_random_points
+        
+        # Identify which warmup points were already used as extreme points
+        used_extreme_indices = Set{Int}()
+        if n_extreme_points > 0 && size(warmup, 1) > n_extreme_points
+            # Calculate which indices were used for extreme points
+            step_size = size(warmup, 1) / n_extreme_points
+            for i in 0:(n_extreme_points-1)
+                idx = max(1, min(size(warmup, 1), round(Int, 1 + i * step_size)))
+                push!(used_extreme_indices, idx)
+            end
+        elseif n_extreme_points >= size(warmup, 1)
+            # All warmup points were used as extremes
+            used_extreme_indices = Set(1:size(warmup, 1))
+        end
+        
+        # Create pool of available indices (excluding already used extreme points)
+        available_indices = [i for i in 1:size(warmup, 1) if i ∉ used_extreme_indices]
+        
         # Pre-allocate weights vector to reuse
         weights = Vector{Float64}(undef, 4)  # max n_base_points is 4
 
         for i in 1:n_random_points
             # Use varying numbers of base points for different exploration depths
             n_base_points = 2 + (i % 3)  # Alternate between 2, 3, 4 base points
-            n_base_points = min(n_base_points, size(warmup, 1))
-
-            # Select points for maximum diversity
-            base_indices = rand(rng, 1:size(warmup, 1), n_base_points)
+            
+            # Select base points from available indices (not used as extremes)
+            if !isempty(available_indices)
+                n_base_points = min(n_base_points, length(available_indices))
+                base_indices = rand(rng, available_indices, n_base_points)
+            else
+                # Fallback: if no available indices, use all warmup points
+                n_base_points = min(n_base_points, size(warmup, 1))
+                base_indices = rand(rng, 1:size(warmup, 1), n_base_points)
+            end
 
             # Generate weights for uniform interior exploration
             resize!(weights, n_base_points)
@@ -1031,7 +1097,7 @@ function concordance_analysis(
         n_points = length(start_variables_list)
         n_vars = length(start_variables_list[1])
         start_matrix = Matrix{Float64}(undef, n_points, n_vars)
-        for (i, point) in enumerate(start_variables_list)
+        @inbounds for (i, point) in enumerate(start_variables_list)
             start_matrix[i, :] = point
         end
         start_matrix
@@ -1123,7 +1189,7 @@ function concordance_analysis(
     end
 
     # Single pass to fill all basic columns efficiently
-    for (i, cid) in enumerate(ids)
+    @inbounds for (i, cid) in enumerate(ids)
         n_metabolites_col[i] = length(complexes[cid].metabolites)
         is_trivially_balanced_col[i] = cid in trivially_balanced
         module_col[i] = get(complex_to_module, cid, "none")  # Faster than get_module_id
@@ -1145,7 +1211,7 @@ function concordance_analysis(
         ava_confirms = Vector{Union{Bool,Nothing}}(undef, n_complexes_df)
 
         # Since DataFrame uses concordance_tracker ordering, row index = tracker index
-        for (df_row_idx, cid) in enumerate(concordance_tracker.idx_to_id)
+        @inbounds for (df_row_idx, cid) in enumerate(concordance_tracker.idx_to_id)
             min_act, max_act = activity_ranges[df_row_idx]
 
             if isnan(min_act) || isnan(max_act)
@@ -1189,7 +1255,7 @@ function concordance_analysis(
         end
 
         # Single efficient iteration to fill all columns
-        for (i, k) in enumerate(sorted_module_keys)
+        @inbounds for (i, k) in enumerate(sorted_module_keys)
             module_ids[i] = String(k)
             module_sizes[i] = length(modules[k])
             module_complexes[i] = join(sorted_complex_strings[k], ", ")
