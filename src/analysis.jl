@@ -90,7 +90,8 @@ function process_in_batches(
     settings=[],
     workers=workers,
     batch_size::Int=50,
-    tolerance::Float64=1e-6,
+    optimization_tolerance::Float64=1e-6,
+    concordance_tolerance::Float64=1e-4,
     use_transitivity::Bool=true
 )
     # Use separate variables - following Julia performance best practices
@@ -160,7 +161,8 @@ function process_in_batches(
                 optimizer=optimizer,
                 settings=settings,
                 workers=workers,
-                tolerance=tolerance
+                optimization_tolerance=optimization_tolerance,
+                concordance_tolerance=concordance_tolerance
             )
         catch e
             @warn "Error processing batch $(batch_count)" error = string(e)
@@ -467,7 +469,8 @@ function process_concordance_batch(
     optimizer,
     settings=[],
     workers=workers,
-    tolerance::Float64=1e-6
+    optimization_tolerance::Float64=1e-6,
+    concordance_tolerance::Float64=1e-4
 )
     # Create COBREXA-style test array with direction multipliers
     test_array = []
@@ -547,7 +550,7 @@ function process_concordance_batch(
                     has_timeout = true
                 end
 
-                if min_val === nothing || max_val === nothing || round(min_val, digits=2) != round(max_val, digits=2)
+                if min_val === nothing || max_val === nothing || abs(min_val - max_val) > concordance_tolerance
                     all_concordant = false
                     break
                 else
@@ -591,10 +594,12 @@ function concordance_analysis(
     optimizer,
     settings=[],
     workers=D.workers(),
-    tolerance::Union{Float64,Nothing}=nothing,
+    optimization_tolerance::Union{Float64,Nothing}=nothing,
+    concordance_tolerance::Union{Float64,Nothing}=nothing,
+    balanced_tolerance::Union{Float64,Nothing}=nothing,
     cv_threshold::Union{Float64,Nothing}=nothing,
     coarse_cv_threshold::Union{Float64,Nothing}=nothing,
-    cv_epsilon::Union{Float64,Nothing}=nothing,
+    cv_epsilon::Union{Float64,Nothing}=1e-16,
     sample_size::Int=100,
     coarse_sample_size::Int=Int(sample_size ÷ 5),
     batch_size::Union{Int,Nothing}=nothing,
@@ -603,8 +608,7 @@ function concordance_analysis(
     use_unidirectional_constraints::Bool=true,
     use_threads::Bool=false,
     chunk_size_filter::Int=100_000,
-    use_heap_pruning::Bool=true,
-    max_pairs_in_memory::Int=100_000,
+    max_pairs_in_memory::Int=500_000,
     objective_bound=nothing,
     use_transitivity::Bool=true,
     n_burnin::Int=50,
@@ -623,12 +627,14 @@ function concordance_analysis(
     solver_tolerance = extract_solver_tolerance(optimizer, settings)
 
     # Set default values based on solver tolerance if not provided
-    actual_tolerance = tolerance !== nothing ? tolerance : max(solver_tolerance * 10, 1e-6)
+    actual_optimization_tolerance = optimization_tolerance !== nothing ? optimization_tolerance : max(solver_tolerance * 10, 1e-6)
+    actual_concordance_tolerance = concordance_tolerance !== nothing ? concordance_tolerance : max(solver_tolerance * 100, 1e-4)
+    actual_balanced_tolerance = balanced_tolerance !== nothing ? balanced_tolerance : solver_tolerance
     actual_cv_threshold = cv_threshold !== nothing ? cv_threshold : max(solver_tolerance * 10, 1e-6)
     actual_coarse_cv_threshold = coarse_cv_threshold !== nothing ? coarse_cv_threshold : max(solver_tolerance * 100, 1e-3)
     actual_cv_epsilon = cv_epsilon !== nothing ? cv_epsilon : max(solver_tolerance / 100, 1e-15)
 
-    @info "Starting concordance analysis" n_workers = length(workers) tolerance = actual_tolerance coarse_cv_threshold = actual_coarse_cv_threshold cv_threshold = actual_cv_threshold sample_size use_unidirectional_constraints batch_size solver_tolerance
+    @info "Starting concordance analysis" n_workers = length(workers) optimization_tolerance = actual_optimization_tolerance concordance_tolerance = actual_concordance_tolerance balanced_tolerance = actual_balanced_tolerance coarse_cv_threshold = actual_coarse_cv_threshold cv_threshold = actual_cv_threshold sample_size use_unidirectional_constraints batch_size solver_tolerance
 
     constraints, complexes =
         concordance_constraints(model; modifications, use_unidirectional_constraints, return_complexes=true)
@@ -671,7 +677,7 @@ function concordance_analysis(
     end
 
     n_complexes = length(complexes)
-    # Use keys iterator directly instead of collecting and sorting
+    # Get sorted complex IDs for deterministic ConcordanceTracker initialization
     complex_ids = sort!(collect(keys(complexes)))
     n_reactions = length(AbstractFBCModels.reactions(model))
     @info "Model statistics" n_complexes n_reactions
@@ -858,8 +864,8 @@ function concordance_analysis(
     negative_complexes = get_mask(concordance_tracker, :negative)
     unrestricted_complexes = get_mask(concordance_tracker, :unrestricted)
 
-    # Use solver tolerance for balanced complex detection - ensures consistency with optimization
-    balanced_threshold = solver_tolerance
+    # Use balanced tolerance for balanced complex detection - ensures consistency with optimization
+    balanced_threshold = actual_balanced_tolerance
 
     # Process complexes using direct indexing - now 1:1 correspondence with activity_ranges
     for i in eachindex(activity_ranges)
@@ -897,16 +903,6 @@ function concordance_analysis(
 
     @info "Complex classification" balanced = count(balanced_complexes) trivially_balanced = length(trivially_balanced) positive = count(positive_complexes) negative = count(negative_complexes) unrestricted = count(unrestricted_complexes)
 
-    # Log memory efficiency gains from BitVector usage
-    if n_complexes >= 10_000  # Only show for larger models where benefits are significant
-        memory_stats = get_tracker_memory_stats(concordance_tracker)
-        @info "BitVector memory optimization" (
-            total_memory_mb=memory_stats["total_memory_mb"],
-            bitvector_memory_mb=round(memory_stats["bitvector_memory_bytes"] / 1024^2, digits=3),
-            memory_savings_percent=memory_stats["memory_savings_percent"],
-            efficiency_ratio=memory_stats["memory_efficiency_ratio"]
-        )
-    end
 
     for (c1_id, c2_id) in trivial_pairs
         union_sets!(concordance_tracker, concordance_tracker.id_to_idx[c1_id], concordance_tracker.id_to_idx[c2_id])
@@ -1070,8 +1066,9 @@ function concordance_analysis(
         trivial_pairs_indices,
         samples_tree, # Pass the collected samples
         concordance_tracker;
-        coarse_cv_threshold=coarse_cv_threshold,
-        cv_threshold=cv_threshold,
+        coarse_cv_threshold=actual_coarse_cv_threshold,
+        cv_threshold=actual_cv_threshold,
+        cv_epsilon=actual_cv_epsilon,
         coarse_sample_size=coarse_sample_size,
         min_valid_samples=min_valid_samples,
         use_threads=use_threads,
@@ -1099,7 +1096,8 @@ function concordance_analysis(
         settings=settings,
         workers=workers,
         batch_size=adaptive_batch_size,
-        tolerance=actual_tolerance,
+        optimization_tolerance=actual_optimization_tolerance,
+        concordance_tolerance=actual_concordance_tolerance,
         use_transitivity=use_transitivity,
     )
 
@@ -1149,7 +1147,7 @@ function concordance_analysis(
                 min_activities[df_row_idx] = min_act
                 max_activities[df_row_idx] = max_act
                 if cid in trivially_balanced
-                    ava_confirms[df_row_idx] = abs(min_act) < solver_tolerance && abs(max_act) < solver_tolerance
+                    ava_confirms[df_row_idx] = abs(min_act) < actual_balanced_tolerance && abs(max_act) < actual_balanced_tolerance
                 else
                     ava_confirms[df_row_idx] = nothing
                 end
@@ -1208,6 +1206,7 @@ function concordance_analysis(
     elapsed = time() - start_time
 
     stats = Dict(
+        # Analysis results
         "n_complexes" => n_complexes,
         "n_balanced" => count(balanced_complexes),
         "n_trivially_balanced" => length(trivially_balanced),
@@ -1222,6 +1221,35 @@ function concordance_analysis(
         "n_modules" => length(modules),
         "batches_completed" => batch_results.batches_completed,
         "elapsed_time" => elapsed,
+
+        # Algorithm parameters
+        "optimization_tolerance" => actual_optimization_tolerance,
+        "concordance_tolerance" => actual_concordance_tolerance,
+        "balanced_tolerance" => actual_balanced_tolerance,
+        "cv_threshold" => actual_cv_threshold,
+        "coarse_cv_threshold" => actual_coarse_cv_threshold,
+        "cv_epsilon" => actual_cv_epsilon,
+        "solver_tolerance" => solver_tolerance,
+
+        # Sampling parameters
+        "sample_size" => sample_size,
+        "coarse_sample_size" => coarse_sample_size,
+        "n_burnin" => n_burnin,
+        "n_chains" => n_chains,
+        "seed" => seed,
+
+        # Processing parameters
+        "batch_size" => adaptive_batch_size,
+        "min_valid_samples" => min_valid_samples,
+        "use_threads" => use_threads,
+        "chunk_size_filter" => chunk_size_filter,
+        "max_pairs_in_memory" => max_pairs_in_memory,
+        "use_transitivity" => use_transitivity,
+        "use_unidirectional_constraints" => use_unidirectional_constraints,
+
+        # Model parameters
+        "n_workers" => length(workers),
+        "objective_bound" => objective_bound !== nothing ? "applied" : "none",
     )
 
     # Add processing statistics if processed_mask is available
@@ -1231,13 +1259,6 @@ function concordance_analysis(
         stats["processing_completion_percent"] = round(n_processed / n_complexes * 100, digits=1)
     end
 
-    # Add memory statistics for large models
-    if n_complexes >= 10_000
-        memory_stats = get_tracker_memory_stats(concordance_tracker)
-        stats["memory_total_mb"] = memory_stats["total_memory_mb"]
-        stats["memory_savings_percent"] = memory_stats["memory_savings_percent"]
-        stats["memory_efficiency_ratio"] = memory_stats["memory_efficiency_ratio"]
-    end
 
     @info "Concordance analysis complete" stats
 

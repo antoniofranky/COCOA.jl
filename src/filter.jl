@@ -7,18 +7,8 @@ Streaming three-stage pipeline focused purely on CV computation using OnlineStat
 using Base.Threads
 using OnlineStats
 using DataStructures
-
-# --- Bit vector optimization helpers ---
-"""Convert Set{Int} to BitVector for O(1) lookups and better cache efficiency"""
-@inline function set_to_bitvector(indices_set::Set{Int}, n::Int)
-    bv = falses(n)
-    for idx in indices_set
-        if 1 <= idx <= n
-            bv[idx] = true
-        end
-    end
-    return bv
-end
+using DocStringExtensions
+import ConstraintTrees as C
 
 
 # --- Helper functions for CV ---
@@ -184,7 +174,6 @@ function streaming_filter(
     # Stage 2 & 3: Stream processing
     stage23_start = time()
     priorities = if n_pairs <= max_pairs_in_memory
-    priorities = if n_pairs <= max_pairs_in_memory
         # Small enough to process directly
         @info "Processing all pairs directly (small dataset)"
         process_all_pairs(
@@ -195,7 +184,6 @@ function streaming_filter(
         )
     else
         # Stream in chunks
-        @info "Processing in streaming chunks (large dataset)" chunk_size = chunk_size
         @info "Processing in streaming chunks (large dataset)" chunk_size = chunk_size
         process_streaming_chunks(
             complexes, balanced_complexes, trivial_pairs, samples_tree,
@@ -306,7 +294,6 @@ function process_streaming_chunks(
                 push!(chunk_pairs, (i, j))
 
                 if length(chunk_pairs) >= chunk_size
-                if length(chunk_pairs) >= chunk_size
                     # Process chunk
                     chunk_priorities = process_pair_stream(
                         chunk_pairs, samples_tree, concordance_tracker,
@@ -358,7 +345,6 @@ function process_pair_stream(
     idx_to_id = concordance_tracker.idx_to_id
 
     if use_threads
-    if use_threads
         @info "Using parallel processing with threads"
         process_pairs_parallel(pairs, samples_tree, idx_to_id, positive, negative, coarse_sample_size, coarse_cv_threshold, cv_threshold, cv_epsilon, min_valid_samples)
     else
@@ -399,16 +385,12 @@ function process_pairs_serial(
 
         # Stage 2: Coarse filter - use cached lengths
         n_coarse = min(coarse_sample_size, c1_len, c2_len)
-        n_coarse = min(coarse_sample_size, c1_len, c2_len)
         n_coarse < 2 && continue
 
         # Create new variance statistic (OnlineStats doesn't support reset)
         ratio_stat = Variance()
         compute_ratios_batch!(ratio_stat, c1_samples, c2_samples, 1, n_coarse, cv_epsilon)
-        compute_ratios_batch!(ratio_stat, c1_samples, c2_samples, 1, n_coarse, cv_epsilon)
 
-        cv_coarse = compute_cv(ratio_stat, cv_epsilon)
-        cv_coarse > coarse_cv_threshold && continue
         cv_coarse = compute_cv(ratio_stat, cv_epsilon)
         cv_coarse > coarse_cv_threshold && continue
         stage2_passed += 1
@@ -417,15 +399,11 @@ function process_pairs_serial(
         max_samples = min(c1_len, c2_len)
         if max_samples > n_coarse
             compute_ratios_batch!(ratio_stat, c1_samples, c2_samples, n_coarse + 1, max_samples, cv_epsilon)
-            compute_ratios_batch!(ratio_stat, c1_samples, c2_samples, n_coarse + 1, max_samples, cv_epsilon)
         end
 
         n_samples = nobs(ratio_stat)
         n_samples < min_valid_samples && continue
-        n_samples < min_valid_samples && continue
 
-        cv_full = compute_cv(ratio_stat, cv_epsilon)
-        cv_full > cv_threshold && continue
         cv_full = compute_cv(ratio_stat, cv_epsilon)
         cv_full > cv_threshold && continue
         stage3_passed += 1
@@ -485,16 +463,12 @@ function process_pairs_parallel(
 
         # Coarse filter - use cached lengths
         n_coarse = min(coarse_sample_size, c1_len, c2_len)
-        n_coarse = min(coarse_sample_size, c1_len, c2_len)
         n_coarse < 2 && continue
 
         # Create new variance statistic (OnlineStats doesn't support reset)
         ratio_stat = Variance()
         compute_ratios_batch!(ratio_stat, c1_samples, c2_samples, 1, n_coarse, cv_epsilon)
-        compute_ratios_batch!(ratio_stat, c1_samples, c2_samples, 1, n_coarse, cv_epsilon)
 
-        cv_coarse = compute_cv(ratio_stat, cv_epsilon)
-        cv_coarse > coarse_cv_threshold && continue
         cv_coarse = compute_cv(ratio_stat, cv_epsilon)
         cv_coarse > coarse_cv_threshold && continue
 
@@ -502,15 +476,11 @@ function process_pairs_parallel(
         max_samples = min(c1_len, c2_len)
         if max_samples > n_coarse
             compute_ratios_batch!(ratio_stat, c1_samples, c2_samples, n_coarse + 1, max_samples, cv_epsilon)
-            compute_ratios_batch!(ratio_stat, c1_samples, c2_samples, n_coarse + 1, max_samples, cv_epsilon)
         end
 
         n_samples = nobs(ratio_stat)
         n_samples < min_valid_samples && continue
-        n_samples < min_valid_samples && continue
 
-        cv_full = compute_cv(ratio_stat, cv_epsilon)
-        cv_full > cv_threshold && continue
         cv_full = compute_cv(ratio_stat, cv_epsilon)
         cv_full > cv_threshold && continue
 
@@ -522,31 +492,6 @@ function process_pairs_parallel(
     return vcat(thread_results...)
 end
 
-@inline function determine_directions(c2_idx::Int,
-    positive::Set{Int}, negative::Set{Int}
-)::Set{Symbol}
-    # Pre-allocate direction set with capacity hint
-    directions = Set{Symbol}()
-    sizehint!(directions, 2)
-
-    # Check constraints on both complexes to determine valid directions
-    c2_positive = c2_idx in positive
-    c2_negative = c2_idx in negative
-
-    # Positive direction test: set c2 = +1
-    # Only feasible if c2 can achieve positive values (not constrained to negative only)
-    if !c2_negative
-        push!(directions, :positive)
-    end
-
-    # Negative direction test: set c2 = -1  
-    # Only feasible if c2 can achieve negative values (not constrained to positive only)
-    if !c2_positive
-        push!(directions, :negative)
-    end
-
-    return directions
-end
 
 # BitVector version of determine_directions with O(1) lookups, returns bit flags
 @inline function determine_directions(c2_idx::Int,
