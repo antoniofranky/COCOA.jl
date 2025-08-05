@@ -952,17 +952,6 @@ function concordance_analysis(
     @info "First 5 samples collected" first_samples = collect(Iterators.take(samples_tree, 5))
     @info "Number of samples per activity variable" n_samples = length(first(samples_tree)[2])
 
-    # Adjust filter config for high-quality sampling strategy
-    filter_config = FilterConfig(
-        coarse_cv_threshold=coarse_cv_threshold,
-        cv_threshold=cv_threshold,
-        coarse_sample_size=coarse_sample_size,
-        min_valid_samples=min_valid_samples,
-        use_threads=use_threads,
-        chunk_size=chunk_size_filter,
-        max_pairs_in_memory=max_pairs_in_memory,
-    )
-
     @debug "type of samples_tree" typeof(samples_tree)
     @info "Generating candidate pairs via streaming filter..."
     filter_time = @elapsed candidate_priorities = streaming_filter(
@@ -973,7 +962,13 @@ function concordance_analysis(
         trivial_pairs_indices,
         samples_tree, # Pass the collected samples
         concordance_tracker;
-        config=filter_config # Pass the config object
+        coarse_cv_threshold=coarse_cv_threshold,
+        cv_threshold=cv_threshold,
+        coarse_sample_size=coarse_sample_size,
+        min_valid_samples=min_valid_samples,
+        use_threads=use_threads,
+        chunk_size=chunk_size_filter,
+        max_pairs_in_memory=max_pairs_in_memory
     )
 
     @info "Candidate pairs identified" n_pairs = length(candidate_priorities) filter_time_sec = round(filter_time, digits=2)
