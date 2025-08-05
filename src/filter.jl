@@ -278,15 +278,22 @@ Ultra-efficient three-stage streaming pipeline.
 """
 function streaming_filter(
     complexes::Vector,
-    balanced_complexes::BitVector,
-    positive_complexes::BitVector,
-    negative_complexes::BitVector,
     trivial_pairs::Set{Tuple{Int,Int}},
     samples_tree::C.Tree{Vector{Float64}},
     concordance_tracker::ConcordanceTracker;
     config::FilterConfig=FilterConfig()
 )
     @info "Starting memory-efficient CV filtering pipeline"
+
+    # Access BitVectors directly from ConcordanceTracker for maximum efficiency
+    # Ensure they are allocated first
+    ensure_mask_allocated!(concordance_tracker, :balanced)
+    ensure_mask_allocated!(concordance_tracker, :positive)
+    ensure_mask_allocated!(concordance_tracker, :negative)
+
+    balanced_complexes = concordance_tracker.balanced_mask
+    positive_complexes = concordance_tracker.positive_mask
+    negative_complexes = concordance_tracker.negative_mask
 
     # Stage 1: Count pairs without materializing
     stage1_start = time()
@@ -299,15 +306,15 @@ function streaming_filter(
         # Small enough to process directly
         @info "Processing all pairs directly (small dataset)"
         process_all_pairs(
-            complexes, balanced_complexes, trivial_pairs, samples_tree,
-            concordance_tracker, positive_complexes, negative_complexes, config
+            complexes, trivial_pairs, samples_tree,
+            concordance_tracker, config
         )
     else
         # Stream in chunks
         @info "Processing in streaming chunks (large dataset)" chunk_size = config.chunk_size
         process_streaming_chunks(
-            complexes, balanced_complexes, trivial_pairs, samples_tree,
-            concordance_tracker, positive_complexes, negative_complexes, config
+            complexes, trivial_pairs, samples_tree,
+            concordance_tracker, config
         )
     end
     stage23_time = time() - stage23_start
@@ -362,9 +369,14 @@ end
 # --- Direct processing for smaller datasets ---
 # Optimized BitVector implementation for large models
 function process_all_pairs(
-    complexes, balanced::BitVector, trivial, samples_tree,
-    concordance_tracker, positive::BitVector, negative::BitVector, config
+    complexes, trivial, samples_tree,
+    concordance_tracker, config
 )
+    # Access BitVectors directly from ConcordanceTracker for maximum efficiency
+    balanced = concordance_tracker.balanced_mask
+    positive = concordance_tracker.positive_mask
+    negative = concordance_tracker.negative_mask
+
     # Generator for valid pairs with BitVector optimization
     valid_pairs = (
         (i, j) for i in 1:length(complexes)
@@ -384,9 +396,14 @@ end
 # --- Chunked streaming for huge datasets ---
 # Optimized BitVector implementation for large models
 function process_streaming_chunks(
-    complexes, balanced::BitVector, trivial, samples_tree,
-    concordance_tracker, positive::BitVector, negative::BitVector, config
+    complexes, trivial, samples_tree,
+    concordance_tracker, config
 )
+    # Access BitVectors directly from ConcordanceTracker for maximum efficiency
+    balanced = concordance_tracker.balanced_mask
+    positive = concordance_tracker.positive_mask
+    negative = concordance_tracker.negative_mask
+
     # Pre-allocate with type annotation for better performance
     all_priorities = Vector{PairPriority}()
     sizehint!(all_priorities, config.max_pairs_in_memory)

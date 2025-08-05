@@ -177,8 +177,16 @@ function process_in_batches(
         # Cache idx_to_id for better performance
         idx_to_id = concordance_tracker.idx_to_id
 
+        # Track processed complexes for progress monitoring
+        ensure_mask_allocated!(concordance_tracker, :processed)
+        processed_mask = get_mask(concordance_tracker, :processed)
+
         for result in current_batch_results
             c1_idx, c2_idx, direction, is_concordant, lambda, has_timeout = result
+
+            # Mark both complexes as processed
+            processed_mask[c1_idx] = true
+            processed_mask[c2_idx] = true
 
             if has_timeout
                 timeout_pairs += 1
@@ -257,14 +265,14 @@ function process_in_batches(
 
     # Return results as a named tuple for type stability
     return (
-        batches_completed = batches_completed,
-        pairs_processed = pairs_processed,
-        concordant_pairs = concordant_pairs,
-        non_concordant_pairs = non_concordant_pairs,
-        skipped_by_transitivity = skipped_by_transitivity,
-        transitive_pairs = transitive_pairs,
-        timeout_pairs = timeout_pairs,
-        optimization_results = optimization_results
+        batches_completed=batches_completed,
+        pairs_processed=pairs_processed,
+        concordant_pairs=concordant_pairs,
+        non_concordant_pairs=non_concordant_pairs,
+        skipped_by_transitivity=skipped_by_transitivity,
+        transitive_pairs=transitive_pairs,
+        timeout_pairs=timeout_pairs,
+        optimization_results=optimization_results
     )
 end
 
@@ -652,7 +660,8 @@ function concordance_analysis(
     end
 
     n_complexes = length(complexes)
-    complex_ids = sort(collect(keys(complexes)))
+    # Use keys iterator directly instead of collecting and sorting
+    complex_ids = sort!(collect(keys(complexes)))
     n_reactions = length(AbstractFBCModels.reactions(model))
     @info "Model statistics" n_complexes n_reactions
 
@@ -681,18 +690,18 @@ function concordance_analysis(
     # Memory-efficient: pre-allocate warmup matrix directly using constraint dimensions
     n_complexes = length(concordance_tracker.idx_to_id)
     n_vars = C.variable_count(constraints.balance)
-    
+
     # DEBUG: Print dimensions
-    @info "Warmup matrix dimensions" n_complexes n_vars estimated_rows=n_complexes*2
-    
+    @info "Warmup matrix dimensions" n_complexes n_vars estimated_rows = n_complexes * 2
+
     # Pre-fill with NaN for dense data (most complexes have valid ranges)
     activity_ranges = fill((NaN, NaN), n_complexes)
-    
+
     # Pre-allocate warmup matrix (2 points per complex: min and max)
     warmup_matrix = Matrix{Float64}(undef, n_complexes * 2, n_vars)
     warmup_idx = 1
     valid_complexes = 0
-    
+
     for (i, cid) in enumerate(concordance_tracker.idx_to_id)
         if haskey(ava_results, cid)
             result = ava_results[cid]
@@ -701,35 +710,35 @@ function concordance_analysis(
                 if min_res !== nothing && max_res !== nothing
                     min_activity, min_flux = min_res
                     max_activity, max_flux = max_res
-                    
+
                     # DEBUG: Check flux vector dimensions
                     if valid_complexes == 0
-                        @info "First valid flux dimensions" length_min=length(min_flux) length_max=length(max_flux) expected_n_vars=n_vars
+                        @info "First valid flux dimensions" length_min = length(min_flux) length_max = length(max_flux) expected_n_vars = n_vars
                         @assert length(min_flux) == n_vars "Min flux dimension mismatch: $(length(min_flux)) != $n_vars"
                         @assert length(max_flux) == n_vars "Max flux dimension mismatch: $(length(max_flux)) != $n_vars"
                     end
-                    
+
                     activity_ranges[i] = (min_activity, max_activity)
-                    
+
                     # Fill matrix rows directly - eliminates vector-of-vectors overhead
                     @inbounds warmup_matrix[warmup_idx, :] = min_flux
-                    @inbounds warmup_matrix[warmup_idx + 1, :] = max_flux
+                    @inbounds warmup_matrix[warmup_idx+1, :] = max_flux
                     warmup_idx += 2
                     valid_complexes += 1
                 end
             end
         end
     end
-    
+
     # DEBUG: Check final dimensions
     actual_rows = warmup_idx - 1
-    @info "Warmup matrix results" valid_complexes actual_rows expected_rows=valid_complexes*2
-    
+    @info "Warmup matrix results" valid_complexes actual_rows expected_rows = valid_complexes * 2
+
     # Trim matrix to actual used rows
     warmup = actual_rows > 0 ? warmup_matrix[1:actual_rows, :] : Matrix{Float64}(undef, 0, 0)
-    
+
     # DEBUG: Final matrix info
-    @info "Final warmup matrix" size=size(warmup)
+    @info "Final warmup matrix" size = size(warmup)
 
     # # Check feasibility of warmup points if objective bound is applied
     # if objective_bound !== nothing && !isempty(warmup_points) && haskey(constraints.balance, :objective_bound)
@@ -769,18 +778,34 @@ function concordance_analysis(
 
     # Use BitVectors consistently for optimal performance with large models (50K+ reactions)
     n_complexes = length(concordance_tracker.idx_to_id)
-    balanced_complexes = falses(n_complexes)
-    positive_complexes = falses(n_complexes)
-    negative_complexes = falses(n_complexes)
-    unrestricted_complexes = falses(n_complexes)
+
+    # Initialize BitVector masks in the ConcordanceTracker for memory efficiency
+    ensure_mask_allocated!(concordance_tracker, :balanced)
+    ensure_mask_allocated!(concordance_tracker, :positive)
+    ensure_mask_allocated!(concordance_tracker, :negative)
+    ensure_mask_allocated!(concordance_tracker, :unrestricted)
+
+    # Get references to the BitVector masks for efficient access
+    balanced_complexes = get_mask(concordance_tracker, :balanced)
+    positive_complexes = get_mask(concordance_tracker, :positive)
+    negative_complexes = get_mask(concordance_tracker, :negative)
+    unrestricted_complexes = get_mask(concordance_tracker, :unrestricted)
 
     # Use solver tolerance for balanced complex detection - ensures consistency with optimization
     balanced_threshold = solver_tolerance
 
     # Process complexes using direct indexing - now 1:1 correspondence with activity_ranges
-    for i in 1:n_complexes
+    for i in eachindex(activity_ranges)
+        complex_id = concordance_tracker.idx_to_id[i]
+
+        # First check if complex is trivially balanced
+        if complex_id in trivially_balanced
+            balanced_complexes[i] = true
+            continue  # Skip AVA classification for trivially balanced complexes
+        end
+
         min_val, max_val = activity_ranges[i]
-        
+
         # Check if complex has valid AVA results (NaN indicates inactive)
         if isnan(min_val) || isnan(max_val)
             # Complex is inactive (no valid AVA results)
@@ -805,12 +830,40 @@ function concordance_analysis(
 
     @info "Complex classification" balanced = count(balanced_complexes) trivially_balanced = length(trivially_balanced) positive = count(positive_complexes) negative = count(negative_complexes) unrestricted = count(unrestricted_complexes)
 
+    # Log memory efficiency gains from BitVector usage
+    if n_complexes >= 10_000  # Only show for larger models where benefits are significant
+        memory_stats = get_tracker_memory_stats(concordance_tracker)
+        @info "BitVector memory optimization" (
+            total_memory_mb=memory_stats["total_memory_mb"],
+            bitvector_memory_mb=round(memory_stats["bitvector_memory_bytes"] / 1024^2, digits=3),
+            memory_savings_percent=memory_stats["memory_savings_percent"],
+            efficiency_ratio=memory_stats["memory_efficiency_ratio"]
+        )
+    end
+
     for (c1_id, c2_id) in trivial_pairs
         union_sets!(concordance_tracker, concordance_tracker.id_to_idx[c1_id], concordance_tracker.id_to_idx[c2_id])
     end
 
+    # CRITICAL: Union all balanced complexes into a single module
+    # This includes both trivially balanced complexes AND AVA-detected balanced complexes
+    # All balanced complexes have zero net flux and are therefore concordant with each other
+    balanced_indices = findall(balanced_complexes)
+    if length(balanced_indices) > 1
+        @info "Unioning all balanced complexes into single module" n_balanced = length(balanced_indices) n_trivially_balanced = length(trivially_balanced)
+        # Union all balanced complexes with the first balanced complex
+        first_balanced_idx = balanced_indices[1]
+        for i in eachindex(balanced_indices)[2:end]
+            union_sets!(concordance_tracker, first_balanced_idx, balanced_indices[i])
+        end
+    end
+
+    # Use tracker's idx_to_id directly as complexes_vector (it's already a Vector{Symbol})
     complexes_vector = concordance_tracker.idx_to_id
+
+    # Process trivial pairs into indices set
     trivial_pairs_indices = Set{Tuple{Int,Int}}()
+    sizehint!(trivial_pairs_indices, length(trivial_pairs))
     for (c1_id, c2_id) in trivial_pairs
         if haskey(concordance_tracker.id_to_idx, c1_id) && haskey(concordance_tracker.id_to_idx, c2_id)
             c1_idx = concordance_tracker.id_to_idx[c1_id]
@@ -820,13 +873,6 @@ function concordance_analysis(
         end
     end
     @info "Generating candidate pairs via coefficient of variance..."
-
-    # Use consistent ordering: build complexes_vector from tracker's idx_to_id  
-    complexes_vector = [complexes[id] for id in concordance_tracker.idx_to_id]
-    trivial_pairs_indices = Set(
-        (concordance_tracker.id_to_idx[c1], concordance_tracker.id_to_idx[c2])
-        for (c1, c2) in trivial_pairs if haskey(concordance_tracker.id_to_idx, c1) && haskey(concordance_tracker.id_to_idx, c2)
-    )
 
     rng = if seed === nothing
         Random.GLOBAL_RNG
@@ -967,9 +1013,6 @@ function concordance_analysis(
     @info "Generating candidate pairs via streaming filter..."
     filter_time = @elapsed candidate_priorities = streaming_filter(
         complexes_vector,
-        balanced_complexes,
-        positive_complexes,
-        negative_complexes,
         trivial_pairs_indices,
         samples_tree, # Pass the collected samples
         concordance_tracker;
@@ -1001,14 +1044,28 @@ function concordance_analysis(
     )
 
     @info "Building concordance modules" concordance_time_sec = round(concordance_time, digits=2)
-    modules = extract_modules(concordance_tracker, balanced_complexes)
+    modules = extract_modules(concordance_tracker)
 
     # Use concordance_tracker ordering as single source of truth for DataFrame
+    # Pre-allocate columns for better performance
+    n_complexes_total = length(concordance_tracker.idx_to_id)
+    ids = concordance_tracker.idx_to_id
+    n_metabolites_col = Vector{Int}(undef, n_complexes_total)
+    is_trivially_balanced_col = Vector{Bool}(undef, n_complexes_total)
+    module_col = Vector{String}(undef, n_complexes_total)
+
+    # Fill columns using single pass iteration
+    for (i, cid) in enumerate(ids)
+        n_metabolites_col[i] = length(complexes[cid].metabolites)
+        is_trivially_balanced_col[i] = cid in trivially_balanced
+        module_col[i] = get_module_id(cid, modules)
+    end
+
     complexes_df = DataFrame(
-        :id => concordance_tracker.idx_to_id,
-        :n_metabolites => [length(complexes[cid].metabolites) for cid in concordance_tracker.idx_to_id],
-        :is_trivially_balanced => [cid in trivially_balanced for cid in concordance_tracker.idx_to_id],
-        :module => [get_module_id(cid, modules) for cid in concordance_tracker.idx_to_id],
+        :id => ids,
+        :n_metabolites => n_metabolites_col,
+        :is_trivially_balanced => is_trivially_balanced_col,
+        :module => module_col,
     )
 
     if !isempty(activity_ranges) || !isempty(trivially_balanced)
@@ -1021,7 +1078,7 @@ function concordance_analysis(
         # Since DataFrame uses concordance_tracker ordering, row index = tracker index
         for (df_row_idx, cid) in enumerate(concordance_tracker.idx_to_id)
             min_act, max_act = activity_ranges[df_row_idx]
-            
+
             if isnan(min_act) || isnan(max_act)
                 # Complex is inactive (no valid AVA results)
                 min_activities[df_row_idx] = missing
@@ -1044,22 +1101,49 @@ function concordance_analysis(
         complexes_df.ava_confirms_balanced = ava_confirms
     end
 
-    # Sort modules for deterministic output
-    sorted_module_keys = sort(collect(keys(modules)))
+    # Sort modules for deterministic output and pre-allocate columns
+    sorted_module_keys = sort!(collect(keys(modules)))
+    n_modules = length(sorted_module_keys)
+
+    module_ids = Vector{String}(undef, n_modules)
+    module_sizes = Vector{Int}(undef, n_modules)
+    module_complexes = Vector{String}(undef, n_modules)
+
+    # Single iteration to fill all columns
+    for (i, k) in enumerate(sorted_module_keys)
+        module_ids[i] = String(k)
+        module_sizes[i] = length(modules[k])
+        module_complexes[i] = join(sort!(String.(collect(modules[k]))), ", ")
+    end
+
     modules_df = DataFrame(
-        module_id=String.(sorted_module_keys),
-        size=[length(modules[k]) for k in sorted_module_keys],
-        complexes=[join(sort(String.(modules[k])), ", ") for k in sorted_module_keys],
+        module_id=module_ids,
+        size=module_sizes,
+        complexes=module_complexes,
     )
 
-    lambda_df =
-        DataFrame(c1_idx=Int[], c2_idx=Int[], direction=Symbol[], lambda=Float64[])
+    # Pre-allocate lambda DataFrame with known size
+    n_lambda_results = length(batch_results.optimization_results)
+    lambda_c1_idx = Vector{Int}(undef, n_lambda_results)
+    lambda_c2_idx = Vector{Int}(undef, n_lambda_results)
+    lambda_direction = Vector{Symbol}(undef, n_lambda_results)
+    lambda_values = Vector{Float64}(undef, n_lambda_results)
 
-    # Sort lambda results for deterministic output
-    sorted_lambda_results = sort(collect(batch_results.optimization_results), by=x -> x[1])
-    for ((c1_idx, c2_idx, direction), lambda) in sorted_lambda_results
-        push!(lambda_df, (c1_idx, c2_idx, direction, lambda))
+    # Sort lambda results for deterministic output and fill columns
+    sorted_lambda_results = sort!(collect(batch_results.optimization_results), by=x -> x[1])
+    for (i, ((c1_idx, c2_idx, direction), lambda)) in enumerate(sorted_lambda_results)
+        lambda_c1_idx[i] = c1_idx
+        lambda_c2_idx[i] = c2_idx
+        lambda_direction[i] = direction
+        lambda_values[i] = lambda
     end
+
+    lambda_df = DataFrame(
+        c1_idx=lambda_c1_idx,
+        c2_idx=lambda_c2_idx,
+        direction=lambda_direction,
+        lambda=lambda_values
+    )
 
     elapsed = time() - start_time
 
@@ -1079,6 +1163,21 @@ function concordance_analysis(
         "batches_completed" => batch_results.batches_completed,
         "elapsed_time" => elapsed,
     )
+
+    # Add processing statistics if processed_mask is available
+    if concordance_tracker.processed_mask !== nothing
+        n_processed = count(concordance_tracker.processed_mask)
+        stats["n_processed_complexes"] = n_processed
+        stats["processing_completion_percent"] = round(n_processed / n_complexes * 100, digits=1)
+    end
+
+    # Add memory statistics for large models
+    if n_complexes >= 10_000
+        memory_stats = get_tracker_memory_stats(concordance_tracker)
+        stats["memory_total_mb"] = memory_stats["total_memory_mb"]
+        stats["memory_savings_percent"] = memory_stats["memory_savings_percent"]
+        stats["memory_efficiency_ratio"] = memory_stats["memory_efficiency_ratio"]
+    end
 
     @info "Concordance analysis complete" stats
 
@@ -1103,7 +1202,7 @@ function ava_output_with_warmup(dir, om; digits=6)
     return (activity, flux_vector)
 end
 
-function extract_modules(tracker::ConcordanceTracker, balanced_complexes::BitVector)
+function extract_modules(tracker::ConcordanceTracker)
     groups = Dict{Int,Vector{Int}}()
     n = length(tracker.parent)
 
@@ -1117,7 +1216,9 @@ function extract_modules(tracker::ConcordanceTracker, balanced_complexes::BitVec
 
     modules = Dict{Symbol,Set{Symbol}}()
 
-    if any(balanced_complexes)
+    # Get balanced complexes BitVector from tracker
+    balanced_complexes = tracker.balanced_mask
+    if balanced_complexes !== nothing && any(balanced_complexes)
         modules[:balanced] = Set(tracker.idx_to_id[i] for i in findall(balanced_complexes))
     end
 
@@ -1125,8 +1226,8 @@ function extract_modules(tracker::ConcordanceTracker, balanced_complexes::BitVec
     for (root, members) in groups
         if length(members) > 1
             complex_ids = Set(tracker.idx_to_id[i] for i in members)
-            # Check if all members are balanced using BitVector
-            if any(balanced_complexes) && all(i <= length(balanced_complexes) && balanced_complexes[i] for i in members)
+            # Check if all members are balanced using BitVector from tracker
+            if balanced_complexes !== nothing && any(balanced_complexes) && all(i <= length(balanced_complexes) && balanced_complexes[i] for i in members)
                 continue
             end
             module_id = Symbol("module_$(module_idx)")
