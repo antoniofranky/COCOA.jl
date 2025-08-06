@@ -698,48 +698,45 @@ function concordance_analysis(
     # Pre-select which complexes should have their flux vectors collected
     n_complexes_for_flux = min(n_extreme_points_needed, length(complex_ids))
 
-    # Advanced selection strategy for better feasible space coverage:
-    # 1. Include complexes with largest metabolite counts (likely boundary-defining)
-    # 2. Ensure even distribution across the complex space
-    # 3. Include first and last complexes (boundary coverage)
+    # Stratified random selection for better coverage with minimal overhead
     selected_complex_indices = if n_complexes_for_flux >= length(complex_ids)
         # Collect all if we need most of them
         Set(1:length(complex_ids))
     else
+        # Sort by complex size (metabolites + reactions) and stratify
+        complex_scores = [(length(complexes[complex_ids[i]].metabolites) + 
+                          length(complexes[complex_ids[i]].reaction_contributions), i) 
+                         for i in 1:length(complex_ids)]
+        sort!(complex_scores, by=x -> x[1], rev=true)
+        
+        # Stratified sampling: take from different size ranges
         indices = Set{Int}()
-
-        # Always include first and last complexes for boundary coverage
-        push!(indices, 1)
-        push!(indices, length(complex_ids))
-
-        # Add evenly spaced complexes for uniform coverage
-        if n_complexes_for_flux > 2
-            remaining_slots = n_complexes_for_flux - 2
-            if remaining_slots > 0
-                step_size = (length(complex_ids) - 1) / (remaining_slots + 1)
-                for i in 1:remaining_slots
-                    idx = round(Int, 1 + i * step_size)
-                    # Ensure we don't duplicate first/last
-                    if idx != 1 && idx != length(complex_ids)
-                        push!(indices, idx)
-                    end
+        n_strata = min(4, n_complexes_for_flux)  # Use 4 strata max
+        strata_size = length(complex_scores) ÷ n_strata
+        samples_per_stratum = n_complexes_for_flux ÷ n_strata
+        remaining_samples = n_complexes_for_flux % n_strata
+        
+        for stratum in 1:n_strata
+            start_idx = (stratum - 1) * strata_size + 1
+            end_idx = stratum == n_strata ? length(complex_scores) : stratum * strata_size
+            
+            n_samples = samples_per_stratum + (stratum <= remaining_samples ? 1 : 0)
+            stratum_range = start_idx:end_idx
+            
+            if n_samples >= length(stratum_range)
+                # Take all from this stratum
+                for idx in stratum_range
+                    push!(indices, complex_scores[idx][2])
+                end
+            else
+                # Random sample from this stratum
+                selected = randperm(length(stratum_range))[1:n_samples]
+                for s in selected
+                    push!(indices, complex_scores[stratum_range[s]][2])
                 end
             end
         end
-
-        # Fill remaining slots with complexes that have diverse metabolite counts
-        if length(indices) < n_complexes_for_flux
-            # Sort complexes by metabolite count for diversity
-            complex_sizes = [(i, length(complexes[complex_ids[i]].metabolites))
-                             for i in 1:length(complex_ids) if i ∉ indices]
-            sort!(complex_sizes, by=x -> x[2], rev=true)
-
-            slots_remaining = n_complexes_for_flux - length(indices)
-            for (i, _) in complex_sizes[1:min(slots_remaining, length(complex_sizes))]
-                push!(indices, i)
-            end
-        end
-
+        
         indices
     end
 
