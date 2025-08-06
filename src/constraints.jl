@@ -55,26 +55,13 @@ function create_unidirectional_constraints(
         (var_idx,) = f.value.idxs
         subst_value = p.value - n.value
         subst_vals[var_idx] = subst_value
-        # Try both API versions for compatibility
-        try
-            C.Constraint(value=subst_value) # New API
-        catch MethodError
-            C.Constraint(subst_value) # Old API
-        end
+        C.Constraint(subst_value)
     end
 
     # Apply optimized substitution and pruning
     # Wrap in try-catch to handle ConstraintTrees.jl internal API bug
-    constraints_before_pruning = try
-        C.substitute(constraints, subst_vals)
-    catch e
-        @error "ConstraintTrees.jl substitute failed, this is a known bug with v1.11.0" error = e
-        @info "Falling back to non-unidirectional constraints"
-        # Return original constraints without unidirectional splitting
-        return constraints, complexes
-    end
+    constraints_before_pruning = C.substitute(constraints, subst_vals)
     constraints = C.prune_variables(constraints_before_pruning)
-
     # All reactions were split since we applied splitting to all fluxes
     reactions = AbstractFBCModels.reactions(model)
     n_reactions = length(reactions)
