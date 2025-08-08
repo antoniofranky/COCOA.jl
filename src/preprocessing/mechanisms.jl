@@ -24,32 +24,39 @@ function add_ordered_reactions!(
     reaction_count::Int,
     rng::AbstractRNG
 )
-    # Randomize but fix the order for this enzyme
+    # MATLAB behavior: Copy objective to ALL elementary steps (not distribute)
+    objective_coefficient = original_rxn.objective_coefficient
+
+    # Get global bounds for reversible steps (matching MATLAB logic)
+    # Since bounds are already normalized, this will typically be -1000 and 1000
+    reversible_lb = -1000.0  # Could use min(-1000, minimum_model_lb) if needed
+    reversible_ub = 1000.0   # Could use max(1000, maximum_model_ub) if needed
+
+    # Randomize order
     substrates_ordered = shuffle(rng, substrates)
     products_ordered = shuffle(rng, products)
 
     current_intermediate_metabolites = String[]
 
-    # 1. Substrate binding steps
+    # 1. Substrate binding steps - ALWAYS REVERSIBLE
     for (idx, (met_id, coeff)) in enumerate(substrates_ordered)
         reaction_count += 1
         rxn_id = "$(original_rid)_$(enzyme_id)_S$(idx)"
 
         elem_rxn = CM.Reaction(
             name="$(original_rxn.name): substrate binding step $idx",
-            lower_bound=-1000.0,  # Reversible binding
-            upper_bound=1000.0,
-            gene_association_dnf=original_rxn.gene_association_dnf
+            lower_bound=reversible_lb,  # Always -1000
+            upper_bound=reversible_ub,  # Always 1000
+            gene_association_dnf=original_rxn.gene_association_dnf,
+            objective_coefficient=objective_coefficient  # Copy original objective (MATLAB behavior)
         )
 
-        # Add substrate
+        # Add stoichiometry (same as before)
         elem_rxn.stoichiometry[met_id] = -abs(coeff)
 
         if idx == 1
-            # First substrate binds to free enzyme
             elem_rxn.stoichiometry[enzyme_id] = -1.0
         else
-            # Subsequent substrates bind to intermediate
             prev_intermediate = get_or_create_intermediate!(
                 elementary_model, intermediate_registry,
                 current_intermediate_metabolites, enzyme_id
@@ -57,7 +64,6 @@ function add_ordered_reactions!(
             elem_rxn.stoichiometry[prev_intermediate] = -1.0
         end
 
-        # Create product intermediate
         push!(current_intermediate_metabolites, met_id)
         new_intermediate = get_or_create_intermediate!(
             elementary_model, intermediate_registry,
@@ -68,18 +74,26 @@ function add_ordered_reactions!(
         elementary_model.reactions[rxn_id] = elem_rxn
     end
 
-    # 2. Catalytic step
+    # 2. Catalytic step - SPECIAL HANDLING
     reaction_count += 1
     cat_rxn_id = "$(original_rid)_$(enzyme_id)_CAT"
+
+    # Match MATLAB logic for catalytic step bounds
+    cat_lower = if original_rxn.lower_bound >= 0
+        0.0  # Keep irreversible if original was forward-only
+    else
+        reversible_lb  # Otherwise make reversible
+    end
+
     cat_rxn = CM.Reaction(
         name="$(original_rxn.name): catalysis",
-        lower_bound=original_rxn.lower_bound >= 0 ? 0.0 : -1000.0,
-        upper_bound=1000.0,
+        lower_bound=cat_lower,
+        upper_bound=reversible_ub,  # Always use max bound
         gene_association_dnf=original_rxn.gene_association_dnf,
-        objective_coefficient=original_rxn.objective_coefficient  # Preserve objective
+        objective_coefficient=objective_coefficient  # Copy original objective (MATLAB behavior)
     )
 
-    # Substrate intermediate to product intermediate
+    # Add stoichiometry (same as before)
     substrate_intermediate = get_or_create_intermediate!(
         elementary_model, intermediate_registry,
         current_intermediate_metabolites, enzyme_id
@@ -95,47 +109,42 @@ function add_ordered_reactions!(
         cat_rxn.stoichiometry[product_intermediate] = 1.0
         current_intermediate_metabolites = product_metabolites
     else
-        # No products - release enzyme
         cat_rxn.stoichiometry[enzyme_id] = 1.0
         current_intermediate_metabolites = String[]
     end
 
     elementary_model.reactions[cat_rxn_id] = cat_rxn
 
-    # 3. Product release steps
+    # 3. Product release steps - ALWAYS REVERSIBLE
     for (idx, (met_id, coeff)) in enumerate(products_ordered)
         reaction_count += 1
         rxn_id = "$(original_rid)_$(enzyme_id)_P$(idx)"
 
         elem_rxn = CM.Reaction(
             name="$(original_rxn.name): product release step $idx",
-            lower_bound=-1000.0,  # Reversible release
-            upper_bound=1000.0,
-            gene_association_dnf=original_rxn.gene_association_dnf
+            lower_bound=reversible_lb,  # Always -1000
+            upper_bound=reversible_ub,  # Always 1000
+            gene_association_dnf=original_rxn.gene_association_dnf,
+            objective_coefficient=objective_coefficient  # Copy original objective (MATLAB behavior)
         )
 
-        # Current intermediate as substrate
+        # Add stoichiometry (same as before)
         current_intermediate = get_or_create_intermediate!(
             elementary_model, intermediate_registry,
             current_intermediate_metabolites, enzyme_id
         )
         elem_rxn.stoichiometry[current_intermediate] = -1.0
-
-        # Release product
         elem_rxn.stoichiometry[met_id] = abs(coeff)
 
-        # Remove this metabolite from intermediate
         filter!(m -> m != met_id, current_intermediate_metabolites)
 
         if !isempty(current_intermediate_metabolites)
-            # Create smaller intermediate
             new_intermediate = get_or_create_intermediate!(
                 elementary_model, intermediate_registry,
                 current_intermediate_metabolites, enzyme_id
             )
             elem_rxn.stoichiometry[new_intermediate] = 1.0
         else
-            # Last product - release enzyme
             elem_rxn.stoichiometry[enzyme_id] = 1.0
         end
 
@@ -161,10 +170,15 @@ function add_random_reactions!(
     max_orders::Int,
     rng::AbstractRNG
 )
-    n_substrates = length(substrates)
-    n_products = length(products)
+    # MATLAB behavior: Copy objective to ALL elementary steps (not distribute)
+    objective_coefficient = original_rxn.objective_coefficient
 
-    # Determine number of orders to generate
+    # ALL steps in random mechanism are fully reversible (matching MATLAB)
+    reversible_lb = -1000.0
+    reversible_ub = 1000.0
+
+    n_substrates = length(substrates)
+    n_products = length(products)    # Determine number of orders to generate
     n_possible_orders = factorial(n_substrates)
     n_orders = min(max_orders, n_possible_orders)
 
@@ -199,9 +213,10 @@ function add_random_reactions!(
 
             elem_rxn = CM.Reaction(
                 name="$(original_rxn.name): random binding order $order_idx level $level",
-                lower_bound=-1000.0,
-                upper_bound=1000.0,
-                gene_association_dnf=original_rxn.gene_association_dnf
+                lower_bound=reversible_lb,  # Always -1000
+                upper_bound=reversible_ub,  # Always 1000
+                gene_association_dnf=original_rxn.gene_association_dnf,
+                objective_coefficient=objective_coefficient  # Copy original objective (MATLAB behavior)
             )
 
             # Add new substrate
@@ -239,19 +254,28 @@ function add_random_reactions!(
     # Single catalytic step (all orders lead to same product intermediate)
     reaction_count += 1
     cat_rxn_id = "$(original_rid)_$(enzyme_id)_CAT"
-    cat_rxn = CM.Reaction(
-        name="$(original_rxn.name): catalysis",
-        lower_bound=original_rxn.lower_bound >= 0 ? 0.0 : -1000.0,
-        upper_bound=1000.0,
-        gene_association_dnf=original_rxn.gene_association_dnf,
-        objective_coefficient=original_rxn.objective_coefficient
-    )
+
+    # Match MATLAB logic for catalytic step bounds (same as ordered mechanism)
+    cat_lower = if original_rxn.lower_bound >= 0
+        0.0  # Keep irreversible if original was forward-only
+    else
+        reversible_lb  # Otherwise make reversible
+    end
+
+    # Distribute objective across all catalytic pathways (MATLAB behavior)
+    distributed_catalytic_objective = objective_coefficient / length(final_substrate_intermediates)
 
     # All substrate intermediates can undergo catalysis
     for substrate_intermediate in final_substrate_intermediates
         # Create separate catalytic reaction for each
         cat_rxn_specific_id = "$(cat_rxn_id)_$(substrate_intermediate)"
-        cat_rxn_specific = deepcopy(cat_rxn)
+        cat_rxn_specific = CM.Reaction(
+            name="$(original_rxn.name): catalysis",
+            lower_bound=cat_lower,
+            upper_bound=reversible_ub,
+            gene_association_dnf=original_rxn.gene_association_dnf,
+            objective_coefficient=distributed_catalytic_objective  # Distribute objective across catalytic steps
+        )
         cat_rxn_specific.stoichiometry[substrate_intermediate] = -1.0
 
         if !isempty(products)
@@ -279,9 +303,10 @@ function add_random_reactions!(
 
             elem_rxn = CM.Reaction(
                 name="$(original_rxn.name): product release step $idx",
-                lower_bound=-1000.0,
-                upper_bound=1000.0,
-                gene_association_dnf=original_rxn.gene_association_dnf
+                lower_bound=reversible_lb,  # Always -1000
+                upper_bound=reversible_ub,  # Always 1000
+                gene_association_dnf=original_rxn.gene_association_dnf,
+                objective_coefficient=objective_coefficient  # Copy original objective (MATLAB behavior)
             )
 
             current_intermediate = get_or_create_intermediate!(

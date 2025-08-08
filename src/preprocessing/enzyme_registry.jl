@@ -10,6 +10,8 @@ This module handles:
 using Random
 import AbstractFBCModels.CanonicalModel as CM
 
+export extract_reaction_enzymes, build_enzyme_registry
+
 """
 Build a registry of all enzymes from gene associations.
 """
@@ -60,6 +62,24 @@ function extract_reaction_enzymes(rxn::CM.Reaction, enzyme_registry::Dict{String
     end
 
     return enzyme_ids
+end
+
+"""
+Count the number of enzyme variants (isoenzymes) for a reaction.
+Used to properly distribute objective coefficients.
+"""
+function count_reaction_enzymes(rxn::CM.Reaction, enzyme_registry::Dict{String,String})::Int
+    # Extract enzyme IDs from gene association
+    if isnothing(rxn.gene_association_dnf) || isempty(rxn.gene_association_dnf)
+        return 0
+    end
+
+    enzyme_count = 0
+    for term in rxn.gene_association_dnf
+        # Each term represents an enzyme or enzyme complex
+        enzyme_count += 1
+    end
+    return max(1, enzyme_count)  # At least 1 to avoid division by zero
 end
 
 """

@@ -89,7 +89,7 @@ include("kinetic_analysis.jl")
 export concordance_constraints, concordance_analysis
 export split_into_elementary_steps
 export prepare_model_for_concordance
-
+export extract_reaction_enzymes, build_enzyme_registry
 # Export kinetic analysis functions
 export identify_kinetic_modules, identify_concentration_robustness, kinetic_concordance_analysis
 export KineticModuleResults, ConcentrationRobustnessResults
