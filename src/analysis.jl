@@ -485,7 +485,7 @@ function process_concordance_batch(
     end
 
     # Process using pure COBREXA pattern
-    optimization_results = screen_dual_optimization_model(
+    optimization_results = screen_directions_optimization_model(
         (models_cache, (c1_id, c2_id, direction, dir_multiplier)) -> begin
             om = direction == :positive ? models_cache.positive : models_cache.negative
 
@@ -1281,7 +1281,7 @@ function find_trivially_concordant_pairs(complexes::Dict{Symbol,MetabolicComplex
     return concordant_pairs
 end
 
-function screen_dual_optimization_model(
+function screen_directions_optimization_model(
     f,
     constraints::C.ConstraintTree,
     args...;
@@ -1289,6 +1289,9 @@ function screen_dual_optimization_model(
     settings=[],
     workers=D.workers(),
 )
+    # We pass one model for positive and one for negative constraints
+    # to avoid problems with constraint modification of cached models
+    # Otherwise would need to adjust the charnes cooper bounds of the cached models repeatedly
     pos_constraints = constraints.charnes_cooper.positive
     neg_constraints = constraints.charnes_cooper.negative
 

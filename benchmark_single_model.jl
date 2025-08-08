@@ -27,42 +27,35 @@ const HIGHS_SETTINGS = [
 
 # Benchmark configuration for different model sizes
 function get_benchmark_config(n_reactions::Int)
-    if n_reactions <= 100
-        return (
-            sample_size=50,
-            batch_size=100,
-            coarse_cv_threshold=0.01,
-            cv_threshold=0.001,
-            samples=5,
-            seconds=600  # 10 minutes max per benchmark
-        )
-    elseif n_reactions <= 1000
-        return (
-            sample_size=75,
-            batch_size=500,
-            coarse_cv_threshold=0.005,
-            cv_threshold=0.0005,
+    # Consistent parameters optimized for large to very large models (5000-28000+ reactions)
+    base_config = (
+        sample_size=200,              # Higher sample size for better statistical power in large solution spaces
+        coarse_cv_threshold=0.0005,  # Stricter coarse filtering for large models with more noise
+        cv_threshold=0.00005,        # Very strict final threshold for high precision
+    )
+
+    # Quadratic scaling for time limits: 48 hours for largest (28686 reactions)
+    # Scale down quadratically to smaller models
+    max_reactions = 28686  # Largest model size
+    max_seconds = 48 * 3600  # 48 hours in seconds
+
+    # Quadratic scaling: time = max_time * (reactions/max_reactions)²
+    # With minimum of 30 minutes for small models
+    time_fraction = (n_reactions / max_reactions)^2
+    scaled_seconds = max(1800, Int(round(max_seconds * time_fraction)))  # Minimum 30 minutes
+
+    if n_reactions <= 1000
+        # Small/medium models: multiple samples for better statistics
+        return merge(base_config, (
             samples=3,
-            seconds=1800  # 30 minutes max
-        )
-    elseif n_reactions <= 3000
-        return (
-            sample_size=100,
-            batch_size=1000,
-            coarse_cv_threshold=0.002,
-            cv_threshold=0.0002,
-            samples=2,
-            seconds=3600  # 1 hour max
-        )
+            seconds=scaled_seconds
+        ))
     else
-        return (
-            sample_size=100,
-            batch_size=2000,
-            coarse_cv_threshold=0.001,
-            cv_threshold=0.0001,
+        # Large models: single run with generous time limit
+        return merge(base_config, (
             samples=1,
-            seconds=5400  # 1.5 hours max
-        )
+            seconds=scaled_seconds
+        ))
     end
 end
 
@@ -126,17 +119,17 @@ function benchmark_single_model(model_file::String)
     # Pre-compile with a minimal run
     @info "Pre-compiling concordance_analysis..."
     precompile_start = time()
-
+    precomp_model = COBREXA.load_model("/work/schaffran1/COCOA.jl/test/e_coli_core.xml")
     try
         # Minimal run for precompilation
         concordance_analysis(
-            model;
+            precomp_model;
             optimizer=HiGHS.Optimizer,
             settings=HIGHS_SETTINGS,
-            sample_size=5,
-            batch_size=10,
-            coarse_cv_threshold=0.1,
-            cv_threshold=0.01,
+            sample_size=20,
+            batch_size=300,
+            coarse_cv_threshold=0.01,
+            cv_threshold=0.001,
             seed=42
         )
         precompile_time = time() - precompile_start
@@ -155,7 +148,6 @@ function benchmark_single_model(model_file::String)
         optimizer=HiGHS.Optimizer,
         settings=HIGHS_SETTINGS,
         sample_size=config.sample_size,
-        batch_size=config.batch_size,
         coarse_cv_threshold=config.coarse_cv_threshold,
         cv_threshold=config.cv_threshold,
         seed=42,
@@ -194,7 +186,6 @@ function benchmark_single_model(model_file::String)
 
         # Benchmark configuration
         "sample_size" => config.sample_size,
-        "batch_size" => config.batch_size,
         "coarse_cv_threshold" => config.coarse_cv_threshold,
         "cv_threshold" => config.cv_threshold,
         "benchmark_samples" => config.samples,

@@ -2,28 +2,27 @@
 #SBATCH --job-name=cocoa_benchmark
 #SBATCH --chdir=/work/schaffran1/COCOA.jl
 #SBATCH --output=/work/schaffran1/results_testjobs/cocoa_benchmark_%A_%a.out
-#SBATCH --error=/work/schaffran1/results_testjobs/cocoa_benchmark_%A_%a.err
-#SBATCH --time=6:00:00
+#SBATCH --time=48:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=128G
+#SBATCH --cpus-per-task=64
+#SBATCH --mem=256G
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=schaffran1@uni-potsdam.de
 #SBATCH --hint=nomultithread
-#SBATCH --array=1-7  # Adjust based on number of models
+#SBATCH --array=1-9  # Adjust based on number of models
 
 # Model files array (must match array indices)
 MODEL_FILES=(
     "e_coli_core.xml"
+    "ecoli567_splt_prpd.xml"
     "iJR904.xml"
     "iAF1260.xml"
     "iML1515.xml"
-    "ecoli567_splt_prpd.xml"
-    "iAF12599_splt_prpd.xml"
     "iJF4097_splt_prpd.xml"
+    "iAF12599_splt_prpd.xml"
     "iML15211_splt_prpd.xml"
-    "iML28654_splt_prpd.xml"
+    "iML28686_splt_prpd.xml"
 )
 
 # Get current model file
@@ -32,8 +31,8 @@ MODEL_FILE="${MODEL_FILES[$((SLURM_ARRAY_TASK_ID-1))]}"
 # Create results directory
 mkdir -p /work/schaffran1/results_testjobs/benchmark_results
 
-# Calculate heap size hint (70% of allocated memory for safety)
-HEAP_SIZE_GB=$(( SLURM_MEM_PER_NODE * 7 / 10 / 1024 ))
+# Calculate heap size hint (80% of allocated memory for safety)
+HEAP_SIZE_GB=$(( SLURM_MEM_PER_NODE * 8 / 10 / 1024 ))
 HEAP_SIZE="${HEAP_SIZE_GB}G"
 
 # HPC optimizations for Julia
@@ -67,7 +66,7 @@ echo "=========================="
 cd /work/schaffran1/COCOA.jl
 
 # Verify model exists
-MODEL_PATH="/work/schaffran1/COCOA.jl/benchmark/$MODEL_FILE"
+MODEL_PATH="/work/schaffran1/COCOA.jl/benchmark/models/$MODEL_FILE"
 if [ ! -f "$MODEL_PATH" ]; then
     echo "ERROR: Model file not found: $MODEL_PATH"
     exit 1
