@@ -48,13 +48,25 @@ function get_benchmark_config(n_reactions::Int)
         # Small/medium models: multiple samples for better statistics
         return merge(base_config, (
             samples=3,
-            seconds=scaled_seconds
+            seconds=scaled_seconds,
+            skip_precompile=false,
+            skip_final_result=false
         ))
-    else
-        # Large models: single run with generous time limit
+    elseif n_reactions <= 5000
+        # Medium-large models: single run, but still do precompile and final result
         return merge(base_config, (
             samples=1,
-            seconds=scaled_seconds
+            seconds=scaled_seconds,
+            skip_precompile=false,
+            skip_final_result=false
+        ))
+    else
+        # Very large models: minimal runs to avoid memory/time issues
+        return merge(base_config, (
+            samples=1,
+            seconds=scaled_seconds,
+            skip_precompile=true,    # Skip precompilation for very large models
+            skip_final_result=true   # Skip final result run, use benchmark result instead
         ))
     end
 end
@@ -116,27 +128,41 @@ function benchmark_single_model(model_file::String)
     config = get_benchmark_config(model_stats.n_reactions)
     @info "Benchmark configuration" config...
 
-    # Pre-compile with a minimal run
-    @info "Pre-compiling concordance_analysis..."
-    precompile_start = time()
-    precomp_model = COBREXA.load_model("/work/schaffran1/COCOA.jl/test/e_coli_core.xml")
-    try
-        # Minimal run for precompilation
-        concordance_analysis(
-            precomp_model;
-            optimizer=HiGHS.Optimizer,
-            settings=HIGHS_SETTINGS,
-            sample_size=20,
-            batch_size=300,
-            coarse_cv_threshold=0.01,
-            cv_threshold=0.001,
-            seed=42
-        )
-        precompile_time = time() - precompile_start
-        @info "Pre-compilation complete" precompile_time_sec = round(precompile_time, digits=2)
-    catch e
-        @warn "Pre-compilation failed, continuing anyway" error = string(e)
-        precompile_time = time() - precompile_start
+    # Log the strategy being used
+    if config.skip_precompile && config.skip_final_result
+        @info "Using minimal run strategy for very large model (>5000 reactions)"
+    elseif config.skip_precompile || config.skip_final_result
+        @info "Using reduced run strategy for large model"
+    else
+        @info "Using full benchmark strategy for small/medium model"
+    end
+
+    # Pre-compile with a minimal run (conditional for large models)
+    precompile_time = 0.0  # Initialize outside try-catch to ensure scope
+    if !config.skip_precompile
+        @info "Pre-compiling concordance_analysis..."
+        precompile_start = time()
+        precomp_model = COBREXA.load_model("/work/schaffran1/COCOA.jl/test/e_coli_core.xml")
+        try
+            # Minimal run for precompilation
+            concordance_analysis(
+                precomp_model;
+                optimizer=HiGHS.Optimizer,
+                settings=HIGHS_SETTINGS,
+                sample_size=20,
+                batch_size=300,
+                coarse_cv_threshold=0.01,
+                cv_threshold=0.001,
+                seed=42
+            )
+            precompile_time = time() - precompile_start
+            @info "Pre-compilation complete" precompile_time_sec = round(precompile_time, digits=2)
+        catch e
+            @warn "Pre-compilation failed, continuing anyway" error = string(e)
+            precompile_time = time() - precompile_start
+        end
+    else
+        @info "Skipping pre-compilation for very large model to save memory and time"
     end
 
     # Force garbage collection before benchmark
@@ -163,11 +189,22 @@ function benchmark_single_model(model_file::String)
 
     benchmark_total_time = time() - benchmark_start
 
-    # Get one final result for analysis statistics
-    @info "Getting final analysis results..."
-    final_result_start = time()
-    analysis_results, peak_memory_mb = track_memory_usage(analysis_func)
-    final_result_time = time() - final_result_start
+    # Get one final result for analysis statistics (conditional for large models)
+    analysis_results = nothing
+    peak_memory_mb = 0.0
+    final_result_time = 0.0
+
+    if !config.skip_final_result
+        @info "Getting final analysis results..."
+        final_result_start = time()
+        analysis_results, peak_memory_mb = track_memory_usage(analysis_func)
+        final_result_time = time() - final_result_start
+    else
+        @info "Skipping final result run for very large model - using benchmark result instead"
+        # For very large models, we'll use the benchmark result as our analysis result
+        # and estimate memory usage from the benchmark
+        peak_memory_mb = benchmark_result.memory / 1024^2
+    end
 
     # Compile comprehensive benchmark statistics
     benchmark_stats = Dict(
@@ -217,7 +254,7 @@ function benchmark_single_model(model_file::String)
     )
 
     # Add analysis statistics if available
-    if haskey(analysis_results, :stats)
+    if analysis_results !== nothing && haskey(analysis_results, :stats)
         for (key, value) in analysis_results.stats
             benchmark_stats["analysis_$(key)"] = value
         end
