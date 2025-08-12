@@ -630,7 +630,7 @@ function concordance_analysis(
     actual_concordance_tolerance = concordance_tolerance !== nothing ? concordance_tolerance : max(solver_tolerance * 100, 1e-4)
     actual_balanced_tolerance = balanced_tolerance !== nothing ? balanced_tolerance : solver_tolerance
     actual_cv_threshold = cv_threshold !== nothing ? cv_threshold : max(solver_tolerance * 100, 1e-2)
-    actual_coarse_cv_threshold = coarse_cv_threshold !== nothing ? coarse_cv_threshold : cv_threshold * 10
+    actual_coarse_cv_threshold = coarse_cv_threshold !== nothing ? coarse_cv_threshold : actual_cv_threshold * 10
 
     @info "Starting concordance analysis" n_workers = length(workers) optimization_tolerance = actual_optimization_tolerance concordance_tolerance = actual_concordance_tolerance balanced_tolerance = actual_balanced_tolerance coarse_cv_threshold = actual_coarse_cv_threshold cv_threshold = actual_cv_threshold sample_size use_unidirectional_constraints batch_size solver_tolerance
 

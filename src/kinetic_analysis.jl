@@ -27,8 +27,8 @@ struct KineticModuleResults
     interface_reactions::Vector{Symbol}
 
     # Essential matrices (sparse, memory-efficient)
-    Y_matrix::SparseArrays.SparseMatrixCSC{Int8}  # Species-complex matrix (m × n)
-    A_matrix::SparseArrays.SparseMatrixCSC{Int8}  # Complex-reaction matrix (n × r)
+    Y_matrix::SparseArrays.SparseMatrixCSC{Float64}  # Species-complex matrix (m × n) - stoichiometric coefficients
+    A_matrix::SparseArrays.SparseMatrixCSC{Int8}  # Complex-reaction matrix (n × r) - incidence matrix (1/-1)
 
     # Index mappings for network position queries
     metabolite_names::Vector{String}
@@ -61,8 +61,171 @@ end
 """
 $(TYPEDSIGNATURES)
 
+Extract Y (species-complex) and A (complex-reaction) matrices from COCOA constraints.
+Uses the actual complexes extracted by COCOA's constraint system for consistency.
+This ensures compatibility with concordance analysis and follows the paper's definitions.
+
+Y matrix: metabolites × complexes, entries are stoichiometric coefficients
+A matrix: complexes × reactions, entries are +1/-1 for product/substrate relationships
+"""
+function extract_network_matrices_from_constraints(constraints, model::AbstractFBCModels.AbstractFBCModel)
+    # Extract complexes using COCOA's system
+    complexes = COCOA.extract_complexes_from_model(model)
+
+    # Get reaction information - check if we have split reactions
+    if haskey(constraints.balance, :fluxes_forward) && haskey(constraints.balance, :fluxes_reverse)
+        # We have split reactions
+        forward_flux_vars = constraints.balance.fluxes_forward
+        reverse_flux_vars = constraints.balance.fluxes_reverse
+
+        reaction_names = collect(string.(keys(forward_flux_vars)))
+        n_base_reactions = length(reaction_names)
+
+        # Create full reaction list with forward and reverse directions
+        full_reaction_names = Vector{String}()
+        sizehint!(full_reaction_names, 2 * n_base_reactions)
+
+        for rxn_name in reaction_names
+            push!(full_reaction_names, rxn_name * "_forward")
+            push!(full_reaction_names, rxn_name * "_reverse")
+        end
+    else
+        # Standard reactions without splitting
+        reaction_names = collect(string.(keys(constraints.balance.fluxes)))
+        full_reaction_names = reaction_names
+    end
+
+    # Get metabolite information from the model
+    metabolites = AbstractFBCModels.metabolites(model)
+    metabolite_names = collect(metabolites)
+    n_metabolites = length(metabolite_names)
+
+    # Get complex information  
+    complex_names = collect(string.(keys(complexes)))
+    n_complexes = length(complex_names)
+
+    @info "Building matrices from COCOA complexes" n_metabolites = n_metabolites n_complexes = n_complexes n_reactions = length(full_reaction_names)
+
+    # Create index mappings
+    metabolite_to_idx = Dict{String,Int}()
+    for (i, met_name) in enumerate(metabolite_names)
+        metabolite_to_idx[met_name] = i
+    end
+
+    complex_to_idx = Dict{String,Int}()
+    for (i, complex_name) in enumerate(complex_names)
+        complex_to_idx[complex_name] = i
+    end
+
+    reaction_to_idx = Dict{String,Int}()
+    for (i, rxn_name) in enumerate(full_reaction_names)
+        reaction_to_idx[rxn_name] = i
+    end
+
+    # Build Y matrix: metabolites × complexes
+    Y_rows = Vector{Int}()
+    Y_cols = Vector{Int}()
+    Y_vals = Vector{Float64}()
+
+    for (complex_idx, (complex_id, complex_obj)) in enumerate(complexes)
+        for (met_symbol, stoich_coeff) in complex_obj.metabolites
+            met_name = string(met_symbol)
+            if haskey(metabolite_to_idx, met_name)
+                met_idx = metabolite_to_idx[met_name]
+                push!(Y_rows, met_idx)
+                push!(Y_cols, complex_idx)
+                push!(Y_vals, stoich_coeff)
+            end
+        end
+    end
+
+    Y_matrix = SparseArrays.sparse(Y_rows, Y_cols, Y_vals, n_metabolites, n_complexes)
+
+    # Build A matrix: complexes × reactions
+    A_rows = Vector{Int}()
+    A_cols = Vector{Int}()
+    A_vals = Vector{Int8}()
+
+    for (complex_idx, (complex_id, complex_obj)) in enumerate(complexes)
+        for (rxn_symbol, contribution) in complex_obj.reaction_contributions
+            rxn_name = string(rxn_symbol)
+
+            # Handle split reactions by checking both forward and reverse
+            if haskey(reaction_to_idx, rxn_name * "_forward")
+                # Split reaction case
+                forward_rxn_idx = reaction_to_idx[rxn_name*"_forward"]
+                reverse_rxn_idx = reaction_to_idx[rxn_name*"_reverse"]
+
+                if contribution > 0
+                    # This complex is a product of the forward reaction
+                    push!(A_rows, complex_idx)
+                    push!(A_cols, forward_rxn_idx)
+                    push!(A_vals, Int8(1))
+
+                    # And a substrate of the reverse reaction
+                    push!(A_rows, complex_idx)
+                    push!(A_cols, reverse_rxn_idx)
+                    push!(A_vals, Int8(-1))
+                elseif contribution < 0
+                    # This complex is a substrate of the forward reaction
+                    push!(A_rows, complex_idx)
+                    push!(A_cols, forward_rxn_idx)
+                    push!(A_vals, Int8(-1))
+
+                    # And a product of the reverse reaction
+                    push!(A_rows, complex_idx)
+                    push!(A_cols, reverse_rxn_idx)
+                    push!(A_vals, Int8(1))
+                end
+            elseif haskey(reaction_to_idx, rxn_name)
+                # Standard reaction case
+                rxn_idx = reaction_to_idx[rxn_name]
+                push!(A_rows, complex_idx)
+                push!(A_cols, rxn_idx)
+                push!(A_vals, Int8(sign(contribution)))
+            end
+        end
+    end
+
+    A_matrix = SparseArrays.sparse(A_rows, A_cols, A_vals, n_complexes, length(full_reaction_names))
+
+    # Return complex activities from constraints if available
+    complex_activities = haskey(constraints, :activities) ? constraints.activities : nothing
+
+    return (
+        Y_matrix=Y_matrix,
+        A_matrix=A_matrix,
+        metabolite_names=metabolite_names,
+        complex_names=complex_names,
+        reaction_names=full_reaction_names,
+        complex_to_idx=complex_to_idx,
+        metabolite_to_idx=metabolite_to_idx,
+        reaction_to_idx=reaction_to_idx,
+        complexes=complexes,  # Return the actual complex objects for validation
+        complex_activities=complex_activities
+    )
+end
+
+"""
+Helper function to extract coefficient of a variable from a ConstraintTrees LinearValue.
+"""
+function extract_coefficient(linear_value, target_var_idx)
+    # ConstraintTrees.LinearValue has idxs and weights fields
+    if hasfield(typeof(linear_value), :idxs) && hasfield(typeof(linear_value), :weights)
+        for (i, idx) in enumerate(linear_value.idxs)
+            if idx == target_var_idx
+                return linear_value.weights[i]
+            end
+        end
+    end
+    return 0.0
+end
+
+"""
+$(TYPEDSIGNATURES)
+
 Extract Y (species-complex) and A (complex-reaction) matrices from model.
-Uses memory-efficient Int8 storage for stoichiometric coefficients.
+Y matrix uses Float64 for stoichiometric coefficients, A matrix uses Int8 for incidence (1/-1).
 """
 function extract_network_matrices(model)
     # Get model information and cache lengths
@@ -83,7 +246,7 @@ function extract_network_matrices(model)
 
     Y_rows = Vector{Int}()
     Y_cols = Vector{Int}()
-    Y_vals = Vector{Int8}()
+    Y_vals = Vector{Float64}()
     sizehint!(Y_rows, estimated_entries)
     sizehint!(Y_cols, estimated_entries)
     sizehint!(Y_vals, estimated_entries)
@@ -109,7 +272,7 @@ function extract_network_matrices(model)
             for met_idx in substrate_indices
                 push!(Y_rows, met_idx)
                 push!(Y_cols, complex_idx)
-                push!(Y_vals, Int8(-rxn_stoich[met_idx]))
+                push!(Y_vals, -rxn_stoich[met_idx])
             end
             # Add to A matrix (substrate -> reaction)
             push!(A_rows, complex_idx)
@@ -125,7 +288,7 @@ function extract_network_matrices(model)
             for met_idx in product_indices
                 push!(Y_rows, met_idx)
                 push!(Y_cols, complex_idx)
-                push!(Y_vals, Int8(rxn_stoich[met_idx]))
+                push!(Y_vals, rxn_stoich[met_idx])
             end
             # Add to A matrix (reaction -> product)
             push!(A_rows, complex_idx)
@@ -475,14 +638,14 @@ end
 """
 $(TYPEDSIGNATURES)
 
-Identify kinetic modules from concordance analysis results.
+Identify kinetic modules from concordance analysis results using constraints.
 
-Takes concordance analysis results and applies the four-phase autonomy algorithm
-to identify kinetic modules according to the kinetic modules paper.
+Takes concordance analysis results and constraints to identify kinetic modules
+according to the kinetic modules paper, using the same split reactions as concordance.
 
 # Arguments
+- `constraints`: Constraint tree from `concordance_constraints`
 - `concordance_results`: Results from `concordance_analysis`
-- `model`: The metabolic model
 - `min_module_size::Int=2`: Minimum size for a kinetic module
 - `workers=D.workers()`: Worker processes for parallel computation
 
@@ -490,13 +653,14 @@ to identify kinetic modules according to the kinetic modules paper.
 `KineticModuleResults` containing kinetic modules and network topology.
 """
 function identify_kinetic_modules(
-    concordance_results,
-    model;
+    constraints,
+    model::AbstractFBCModels.AbstractFBCModel,
+    concordance_results;
     min_module_size::Int=2,
     workers=D.workers()
 )
-    @info "Extracting network matrices from model"
-    network_data = extract_network_matrices(model)
+    @info "Extracting network matrices from constraints"
+    network_data = extract_network_matrices_from_constraints(constraints, model)
 
     @info "Identifying kinetic modules from concordance results"
 
@@ -555,7 +719,7 @@ function identify_kinetic_modules(
     if nrow(balanced_complexes) >= min_module_size
         balanced_names = Symbol[]
         for row in eachrow(balanced_complexes)
-            push!(balanced_names, Symbol(row.complex_id))
+            push!(balanced_names, Symbol(row.id))
         end
         # Sort for deterministic output
         sort!(balanced_names)
@@ -719,10 +883,10 @@ end
 """
 $(TYPEDSIGNATURES)
 
-Complete kinetic concordance analysis pipeline.
+Complete kinetic concordance analysis pipeline with constraint-based workflow.
 
-Convenience wrapper that runs concordance analysis followed by kinetic module
-identification and concentration robustness analysis.
+Convenience wrapper that builds constraints once and reuses them for both
+concordance and kinetic analysis to ensure consistency.
 
 # Arguments
 - `model`: The metabolic model
@@ -749,25 +913,29 @@ function kinetic_concordance_analysis(
 )
     @info "Starting kinetic concordance analysis pipeline"
 
-    # Run existing concordance analysis
+    # Step 1: Run concordance analysis (this builds constraints internally)
     @info "Running concordance analysis"
     concordance_results = concordance_analysis(model; optimizer=optimizer, workers=workers, kwargs...)
+
+    # Step 2: Build constraints separately for kinetic analysis
+    @info "Building concordance constraints for kinetic analysis"
+    constraints = concordance_constraints(model; kwargs...)
 
     if !include_kinetic_modules
         @info "Kinetic concordance analysis complete (concordance only)"
         return concordance_results
     end
 
-    # Add kinetic module analysis
+    # Step 3: Run kinetic module analysis using constraints
     @info "Running kinetic module analysis"
-    kinetic_results = identify_kinetic_modules(concordance_results, model; min_module_size, workers)
+    kinetic_results = identify_kinetic_modules(constraints, model, concordance_results; min_module_size, workers)
 
     if !include_robustness
         @info "Kinetic concordance analysis complete (no robustness analysis)"
         return kinetic_results
     end
 
-    # Add concentration robustness analysis
+    # Step 4: Run concentration robustness analysis
     @info "Running concentration robustness analysis"
     robustness_results = identify_concentration_robustness(kinetic_results)
 

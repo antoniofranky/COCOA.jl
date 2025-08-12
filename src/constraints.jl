@@ -15,6 +15,7 @@ This module contains:
 $(TYPEDSIGNATURES)
 
 Create unidirectional constraints for concordance analysis by splitting reactions into forward and reverse fluxes.
+Uses COBREXA's symmetric approach when possible, falls back to asymmetric for compatibility.
 
 # Arguments
 - `model`: FBC model
@@ -26,50 +27,67 @@ Create unidirectional constraints for concordance analysis by splitting reaction
 function create_unidirectional_constraints(
     model::AbstractFBCModels.AbstractFBCModel
 )
-    # Start with standard flux balance constraints
-    constraints = COBREXA.flux_balance_constraints(model)
+    local constraints  # Declare in function scope
+    
+    # Try the symmetric approach first (preferred for its explicitness)
+    try
+        constraints = COBREXA.flux_balance_constraints(model)
+        constraints += COBREXA.sign_split_variables(
+            constraints.fluxes,
+            positive=:fluxes_forward,
+            negative=:fluxes_reverse
+        )
+        constraints *= :directional_flux_balance^COBREXA.sign_split_constraints(
+            positive=constraints.fluxes_forward,
+            negative=constraints.fluxes_reverse,
+            signed=constraints.fluxes,
+        )
 
-    # Use COBREXA's optimized sign splitting
-    constraints += COBREXA.sign_split_variables(
-        constraints.fluxes,
-        positive=:fluxes_forward,
-        negative=:fluxes_reverse
-    )
-
-    # Create directional constraints using hierarchical composition
-    constraints *= :directional_flux_balance^COBREXA.sign_split_constraints(
-        positive=constraints.fluxes_forward,
-        negative=constraints.fluxes_reverse,
-        signed=constraints.fluxes,
-    )
-
-    # Functional variable substitution and pruning - pre-allocate for better performance
-    n_vars = C.variable_count(constraints)
-    subst_vals = Vector{Any}(undef, n_vars)
-    @inbounds for idx in 1:n_vars
-        subst_vals[idx] = C.variable(; idx).value
+        # Apply the variable substitution and pruning from COBREXA documentation
+        subst_vals = [C.variable(; idx).value for idx = 1:C.var_count(constraints)]
+        
+        # Build new fluxes constraints manually
+        new_fluxes_dict = Dict{Symbol, C.Constraint}()
+        for (flux_key, f) in constraints.fluxes
+            p = constraints.fluxes_forward[flux_key]
+            n = constraints.fluxes_reverse[flux_key]
+            (var_idx,) = f.value.idxs
+            subst_value = p.value - n.value
+            subst_vals[var_idx] = subst_value
+            # Drop the bidirectional bound as per documentation
+            new_fluxes_dict[flux_key] = C.Constraint(subst_value)
+        end
+        
+        # Rebuild constraint tree
+        constraints = C.ConstraintTree(
+            :coupling => constraints.coupling,
+            :directional_flux_balance => constraints.directional_flux_balance,
+            :flux_stoichiometry => constraints.flux_stoichiometry,
+            :fluxes => C.ConstraintTree(new_fluxes_dict),
+            :fluxes_forward => constraints.fluxes_forward,
+            :fluxes_reverse => constraints.fluxes_reverse,
+            :objective => constraints.objective
+        )
+        
+        # Apply substitution and pruning - this is where some models fail
+        constraints = C.prune_variables(C.substitute(constraints, subst_vals))
+        
+        @info "Using symmetric unidirectional approach with variable pruning"
+        
+    catch e
+        @info "Symmetric approach failed, using asymmetric approach" exception=string(typeof(e))
+        
+        # Fall back to asymmetric approach which is more robust
+        constraints = COBREXA.flux_balance_constraints(model)
+        constraints += :fluxes_forward^COBREXA.unsigned_positive_contribution_variables(constraints.fluxes)
+        constraints *= :fluxes_reverse^COBREXA.unsigned_negative_contribution_constraints(constraints.fluxes, constraints.fluxes_forward)
+        
+        @info "Using asymmetric unidirectional approach"
     end
 
-    # Use C.zip for functional composition
-    constraints.fluxes = C.zip(constraints.fluxes, constraints.fluxes_forward, constraints.fluxes_reverse) do f, p, n
-        (var_idx,) = f.value.idxs
-        subst_value = p.value - n.value
-        subst_vals[var_idx] = subst_value
-        C.Constraint(subst_value)
-    end
-
-    # Apply optimized substitution and pruning
-    # Wrap in try-catch to handle ConstraintTrees.jl internal API bug
-    constraints_before_pruning = C.substitute(constraints, subst_vals)
-    constraints = C.prune_variables(constraints_before_pruning)
     # All reactions were split since we applied splitting to all fluxes
     reactions = AbstractFBCModels.reactions(model)
     n_reactions = length(reactions)
-    # Pre-allocate and build efficiently
-    rxn_ids = Vector{Symbol}(undef, n_reactions)
-    @inbounds for (i, rxn) in enumerate(reactions)
-        rxn_ids[i] = Symbol(rxn)
-    end
     all_indices = Set(1:n_reactions)
 
     return constraints, all_indices
@@ -170,7 +188,176 @@ end
 """
 $(TYPEDSIGNATURES)
 
+Extract complexes from split constraints that respect reaction directionality.
+This function builds complexes consistent with the unidirectional constraint system,
+ensuring that forward and reverse reactions are treated as separate elementary steps.
+"""
+function extract_complexes_from_constraints(
+    model::AbstractFBCModels.AbstractFBCModel,
+    constraints::C.ConstraintTree
+)
+    # Check if we have split constraints
+    if haskey(constraints, :fluxes_forward) && haskey(constraints, :fluxes_reverse)
+        return extract_complexes_from_split_constraints(model, constraints)
+    elseif haskey(constraints, :balance) &&
+           haskey(constraints.balance, :fluxes_forward) &&
+           haskey(constraints.balance, :fluxes_reverse)
+        # Split constraints are nested under balance
+        return extract_complexes_from_split_constraints(model, constraints.balance)
+    else
+        # Fall back to original model-based extraction
+        return extract_complexes_from_model(model)
+    end
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Extract complexes from split constraint system where reactions are decomposed into 
+forward and reverse elementary steps. This respects the paper's requirement that
+reversible reactions be split into irreversible ones for kinetic analysis.
+"""
+function extract_complexes_from_split_constraints(
+    model::AbstractFBCModels.AbstractFBCModel,
+    constraints::C.ConstraintTree
+)
+    # Get model data
+    S = AbstractFBCModels.stoichiometry(model)
+    reactions = AbstractFBCModels.reactions(model)
+    metabolites = AbstractFBCModels.metabolites(model)
+    n_reactions = length(reactions)
+    n_metabolites = length(metabolites)
+
+    # Get split flux variables
+    forward_flux_vars = constraints.fluxes_forward
+    reverse_flux_vars = constraints.fluxes_reverse
+
+    # Build complex data structure
+    complex_data = Dict{Vector{Tuple{Symbol,Float64}},Dict{Symbol,Float64}}()
+    sizehint!(complex_data, n_reactions * 4)  # More complexes due to splitting
+
+    # Pre-allocate reaction map
+    reaction_map = Dict{String,Int}()
+    sizehint!(reaction_map, n_reactions)
+    for (i, id) in enumerate(reactions)
+        reaction_map[id] = i
+    end
+
+    # Pre-allocate temporary vectors
+    substrate_mets = Vector{Tuple{Symbol,Float64}}()
+    product_mets = Vector{Tuple{Symbol,Float64}}()
+    sizehint!(substrate_mets, n_metabolites ÷ 4)
+    sizehint!(product_mets, n_metabolites ÷ 4)
+
+    # Process each base reaction for forward and reverse directions
+    for rxn_id in sort(reactions)
+        rxn_idx = reaction_map[rxn_id]
+        rxn_symbol = Symbol(rxn_id)
+        rxn_col = S[:, rxn_idx]
+
+        # Skip if this reaction is not in the split constraints
+        if !haskey(forward_flux_vars, rxn_symbol) || !haskey(reverse_flux_vars, rxn_symbol)
+            continue
+        end
+
+        # Clear and reuse pre-allocated vectors
+        empty!(substrate_mets)
+        empty!(product_mets)
+
+        # Build substrate and product lists
+        @inbounds for (i, s) in enumerate(rxn_col)
+            if s < 0
+                push!(substrate_mets, (Symbol(metabolites[i]), -s))
+            elseif s > 0
+                push!(product_mets, (Symbol(metabolites[i]), s))
+            end
+        end
+
+        # Forward reaction: rxn_id_forward
+        forward_rxn_symbol = Symbol(string(rxn_id) * "_forward")
+
+        # Process substrate side for forward reaction
+        if !isempty(substrate_mets)
+            sort!(substrate_mets, by=x -> x[1])
+            substrate_key = copy(substrate_mets)
+            if !haskey(complex_data, substrate_key)
+                reaction_contribs = Dict{Symbol,Float64}()
+                sizehint!(reaction_contribs, 10)
+                complex_data[substrate_key] = reaction_contribs
+            else
+                reaction_contribs = complex_data[substrate_key]
+            end
+            reaction_contribs[forward_rxn_symbol] = get(reaction_contribs, forward_rxn_symbol, 0.0) - 1.0
+        end
+
+        # Process product side for forward reaction
+        if !isempty(product_mets)
+            sort!(product_mets, by=x -> x[1])
+            product_key = copy(product_mets)
+            if !haskey(complex_data, product_key)
+                reaction_contribs = Dict{Symbol,Float64}()
+                sizehint!(reaction_contribs, 10)
+                complex_data[product_key] = reaction_contribs
+            else
+                reaction_contribs = complex_data[product_key]
+            end
+            reaction_contribs[forward_rxn_symbol] = get(reaction_contribs, forward_rxn_symbol, 0.0) + 1.0
+        end
+
+        # Reverse reaction: rxn_id_reverse
+        reverse_rxn_symbol = Symbol(string(rxn_id) * "_reverse")
+
+        # Process product side as substrate for reverse reaction
+        if !isempty(product_mets)
+            sort!(product_mets, by=x -> x[1])
+            product_key = copy(product_mets)
+            if !haskey(complex_data, product_key)
+                reaction_contribs = Dict{Symbol,Float64}()
+                sizehint!(reaction_contribs, 10)
+                complex_data[product_key] = reaction_contribs
+            else
+                reaction_contribs = complex_data[product_key]
+            end
+            reaction_contribs[reverse_rxn_symbol] = get(reaction_contribs, reverse_rxn_symbol, 0.0) - 1.0
+        end
+
+        # Process substrate side as product for reverse reaction
+        if !isempty(substrate_mets)
+            sort!(substrate_mets, by=x -> x[1])
+            substrate_key = copy(substrate_mets)
+            if !haskey(complex_data, substrate_key)
+                reaction_contribs = Dict{Symbol,Float64}()
+                sizehint!(reaction_contribs, 10)
+                complex_data[substrate_key] = reaction_contribs
+            else
+                reaction_contribs = complex_data[substrate_key]
+            end
+            reaction_contribs[reverse_rxn_symbol] = get(reaction_contribs, reverse_rxn_symbol, 0.0) + 1.0
+        end
+    end
+
+    # Build final MetabolicComplex structs
+    complexes = Dict{Symbol,MetabolicComplex}()
+    sizehint!(complexes, length(complex_data))
+
+    # Sort keys for determinism
+    sorted_keys = sort!(collect(keys(complex_data)), by=x -> string(generate_complex_id(x)))
+
+    for canonical_mets in sorted_keys
+        reaction_contribs = complex_data[canonical_mets]
+        complex_id = generate_complex_id(canonical_mets)
+        complexes[complex_id] = MetabolicComplex(complex_id, canonical_mets, reaction_contribs)
+    end
+
+    return complexes
+end
+
+"""
+$(TYPEDSIGNATURES)
+
 Efficiently and deterministically extract all unique complexes from the model.
+This is the original function that works with the model's stoichiometric matrix
+without considering reaction splitting.
 """
 function extract_complexes_from_model(model::AbstractFBCModels.AbstractFBCModel)
     # Pre-allocate and cache model data for better performance
@@ -286,12 +473,13 @@ end
 $(TYPEDSIGNATURES)
 
 Add complex activity variables and constraints to base constraints.
+Uses constraint-aware complex extraction to respect reaction splitting.
 """
 function add_complex_activities_to_constraints(
     model::AbstractFBCModels.AbstractFBCModel,
     base_constraints::C.ConstraintTree
 )
-    complexes = extract_complexes_from_model(model)
+    complexes = extract_complexes_from_constraints(model, base_constraints)
     # Iterate over sorted complex IDs to ensure deterministic ConstraintTree construction
     sorted_complex_ids = sort!(collect(keys(complexes)))
 
@@ -299,9 +487,9 @@ function add_complex_activities_to_constraints(
         complex_id => C.Constraint(
             value=C.sum(
                 (
-                    contribution * base_constraints.fluxes[Symbol(rxn_id)].value
+                    contribution * get_flux_variable(base_constraints, Symbol(rxn_id))
                     for (rxn_id, contribution) in complexes[complex_id].reaction_contributions
-                    if haskey(base_constraints.fluxes, Symbol(rxn_id))
+                    if flux_variable_exists(base_constraints, Symbol(rxn_id))
                 ),
                 init=zero(C.LinearValue)
             ),
@@ -311,6 +499,35 @@ function add_complex_activities_to_constraints(
 
     constraints_with_activities = base_constraints * (:activities^complex_activity_constraints)
     return constraints_with_activities, complexes
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Helper function to get flux variable value from constraints, handling both split and non-split cases.
+"""
+function get_flux_variable(constraints::C.ConstraintTree, rxn_symbol::Symbol)
+    # Check for split flux variables first (like "BIOMASS_Ecoli_core_w_GAM_forward")
+    if haskey(constraints, :fluxes_forward) && haskey(constraints.fluxes_forward, rxn_symbol)
+        return constraints.fluxes_forward[rxn_symbol].value
+    elseif haskey(constraints, :fluxes_reverse) && haskey(constraints.fluxes_reverse, rxn_symbol)
+        return constraints.fluxes_reverse[rxn_symbol].value
+    elseif haskey(constraints, :fluxes) && haskey(constraints.fluxes, rxn_symbol)
+        return constraints.fluxes[rxn_symbol].value
+    else
+        error("Flux variable $rxn_symbol not found in constraints")
+    end
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Helper function to check if flux variable exists in constraints.
+"""
+function flux_variable_exists(constraints::C.ConstraintTree, rxn_symbol::Symbol)
+    return (haskey(constraints, :fluxes_forward) && haskey(constraints.fluxes_forward, rxn_symbol)) ||
+           (haskey(constraints, :fluxes_reverse) && haskey(constraints.fluxes_reverse, rxn_symbol)) ||
+           (haskey(constraints, :fluxes) && haskey(constraints.fluxes, rxn_symbol))
 end
 
 
