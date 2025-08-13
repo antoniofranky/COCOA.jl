@@ -22,7 +22,7 @@ include("enzyme_registry.jl")
 include("intermediates.jl")
 include("mechanisms.jl")
 
-export split_into_elementary_steps, validate_split_model, normalize_bounds!
+export split_into_elementary_steps, validate_split_model, normalize_bounds!, fix_objective_after_conversion
 
 """
     normalize_bounds!(model::CM.Model; 
@@ -226,15 +226,76 @@ function split_into_elementary_steps(
     @info "Split $(length(work_model.reactions)) reactions into $(length(elementary_model.reactions)) elementary steps"
     @info "Created $(length(enzyme_registry)) enzymes and $(length(intermediate_registry)) intermediate complexes"
 
-    #TODO: Handle objective setting for conversion (e.g. SBML adds R_ and then can not find objective reaction)
-
     # Convert to requested output type
     exported_model = convert(output_type, elementary_model)
+
+    # Fix objective after conversion if we converted to SBML
+    if output_type == SBMLFBCModels.SBMLFBCModel
+        exported_model = fix_objective_after_conversion(exported_model)
+    end
 
     # Validate model integrity
     validate_split_model(model, exported_model)
 
     return exported_model
+end
+
+"""
+    fix_objective_after_conversion(model::SBMLFBCModels.SBMLFBCModel)
+
+Fix objective function after model conversion by updating reaction IDs to match the actual 
+reactions in the model. This handles cases where the objective references reaction IDs that 
+don't exist due to format conversion (e.g., missing R_ prefix).
+"""
+function fix_objective_after_conversion(model::SBMLFBCModels.SBMLFBCModel)
+    # Get all reaction IDs in the model
+    reaction_ids = Set(AbstractFBCModels.reactions(model))
+
+    # Check if we need to fix the objective
+    try
+        # Try to get the objective - if this fails, we need to fix it
+        obj_dict = AbstractFBCModels.objective(model)
+        return model  # If this succeeds, no fix needed
+    catch e
+        if e isa KeyError
+            @info "Fixing objective after model conversion: $(e.key) not found"
+
+            # Find the missing reaction ID and try to map it
+            missing_id = string(e.key)
+
+            # Try adding R_ prefix if missing
+            if !startswith(missing_id, "R_")
+                candidate_id = "R_" * missing_id
+                if candidate_id in reaction_ids
+                    @info "Mapping objective reaction $missing_id → $candidate_id"
+
+                    # Update the SBML objective directly
+                    for (obj_id, obj) in model.sbml.objectives
+                        # flux_objectives is a Dict{String, Float64}
+                        if haskey(obj.flux_objectives, missing_id)
+                            coeff = obj.flux_objectives[missing_id]
+                            delete!(obj.flux_objectives, missing_id)
+                            obj.flux_objectives[candidate_id] = coeff
+                            @info "Updated objective flux reference: $missing_id → $candidate_id (coeff=$coeff)"
+                        end
+                    end
+
+                    return model
+                end
+            end
+
+            # If we can't fix it, warn and clear the objective
+            @warn "Could not fix objective reference to $missing_id, clearing objective"
+            # Clear the objective by removing all flux objectives
+            for (obj_id, obj) in model.sbml.objectives
+                empty!(obj.flux_objectives)
+            end
+
+            return model
+        else
+            rethrow(e)
+        end
+    end
 end
 
 # For Julia < 1.7 compatibility

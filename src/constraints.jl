@@ -15,7 +15,7 @@ This module contains:
 $(TYPEDSIGNATURES)
 
 Create unidirectional constraints for concordance analysis by splitting reactions into forward and reverse fluxes.
-Uses COBREXA's symmetric approach when possible, falls back to asymmetric for compatibility.
+Uses COBREXA's symmetric approach with variable substitution and pruning.
 
 # Arguments
 - `model`: FBC model
@@ -27,63 +27,49 @@ Uses COBREXA's symmetric approach when possible, falls back to asymmetric for co
 function create_unidirectional_constraints(
     model::AbstractFBCModels.AbstractFBCModel
 )
-    local constraints  # Declare in function scope
-    
-    # Try the symmetric approach first (preferred for its explicitness)
-    try
-        constraints = COBREXA.flux_balance_constraints(model)
-        constraints += COBREXA.sign_split_variables(
-            constraints.fluxes,
-            positive=:fluxes_forward,
-            negative=:fluxes_reverse
-        )
-        constraints *= :directional_flux_balance^COBREXA.sign_split_constraints(
-            positive=constraints.fluxes_forward,
-            negative=constraints.fluxes_reverse,
-            signed=constraints.fluxes,
-        )
+    # Use symmetric approach for consistent constraint structure
+    constraints = COBREXA.flux_balance_constraints(model)
+    constraints += COBREXA.sign_split_variables(
+        constraints.fluxes,
+        positive=:fluxes_forward,
+        negative=:fluxes_reverse
+    )
+    constraints *= :directional_flux_balance^COBREXA.sign_split_constraints(
+        positive=constraints.fluxes_forward,
+        negative=constraints.fluxes_reverse,
+        signed=constraints.fluxes,
+    )
 
-        # Apply the variable substitution and pruning from COBREXA documentation
-        subst_vals = [C.variable(; idx).value for idx = 1:C.var_count(constraints)]
-        
-        # Build new fluxes constraints manually
-        new_fluxes_dict = Dict{Symbol, C.Constraint}()
-        for (flux_key, f) in constraints.fluxes
-            p = constraints.fluxes_forward[flux_key]
-            n = constraints.fluxes_reverse[flux_key]
-            (var_idx,) = f.value.idxs
-            subst_value = p.value - n.value
-            subst_vals[var_idx] = subst_value
-            # Drop the bidirectional bound as per documentation
-            new_fluxes_dict[flux_key] = C.Constraint(subst_value)
-        end
-        
-        # Rebuild constraint tree
-        constraints = C.ConstraintTree(
-            :coupling => constraints.coupling,
-            :directional_flux_balance => constraints.directional_flux_balance,
-            :flux_stoichiometry => constraints.flux_stoichiometry,
-            :fluxes => C.ConstraintTree(new_fluxes_dict),
-            :fluxes_forward => constraints.fluxes_forward,
-            :fluxes_reverse => constraints.fluxes_reverse,
-            :objective => constraints.objective
-        )
-        
-        # Apply substitution and pruning - this is where some models fail
-        constraints = C.prune_variables(C.substitute(constraints, subst_vals))
-        
-        @info "Using symmetric unidirectional approach with variable pruning"
-        
-    catch e
-        @info "Symmetric approach failed, using asymmetric approach" exception=string(typeof(e))
-        
-        # Fall back to asymmetric approach which is more robust
-        constraints = COBREXA.flux_balance_constraints(model)
-        constraints += :fluxes_forward^COBREXA.unsigned_positive_contribution_variables(constraints.fluxes)
-        constraints *= :fluxes_reverse^COBREXA.unsigned_negative_contribution_constraints(constraints.fluxes, constraints.fluxes_forward)
-        
-        @info "Using asymmetric unidirectional approach"
+    # Apply the variable substitution and pruning from COBREXA documentation
+    subst_vals = [C.variable(; idx).value for idx = 1:C.var_count(constraints)]
+
+    # Build new fluxes constraints manually
+    new_fluxes_dict = Dict{Symbol,C.Constraint}()
+    for (flux_key, f) in constraints.fluxes
+        p = constraints.fluxes_forward[flux_key]
+        n = constraints.fluxes_reverse[flux_key]
+        (var_idx,) = f.value.idxs
+        subst_value = p.value - n.value
+        subst_vals[var_idx] = subst_value
+        # Drop the bidirectional bound as per documentation
+        new_fluxes_dict[flux_key] = C.Constraint(subst_value)
     end
+
+    # Rebuild constraint tree
+    constraints = C.ConstraintTree(
+        :coupling => constraints.coupling,
+        :directional_flux_balance => constraints.directional_flux_balance,
+        :flux_stoichiometry => constraints.flux_stoichiometry,
+        :fluxes => C.ConstraintTree(new_fluxes_dict),
+        :fluxes_forward => constraints.fluxes_forward,
+        :fluxes_reverse => constraints.fluxes_reverse,
+        :objective => constraints.objective
+    )
+
+    # Apply substitution and pruning
+    constraints = C.prune_variables(C.substitute(constraints, subst_vals))
+
+    @info "Using symmetric unidirectional approach with variable pruning"
 
     # All reactions were split since we applied splitting to all fluxes
     reactions = AbstractFBCModels.reactions(model)
@@ -273,10 +259,10 @@ function extract_complexes_from_split_constraints(
             end
         end
 
-        # Forward reaction: rxn_id_forward
-        forward_rxn_symbol = Symbol(string(rxn_id) * "_forward")
+        # For split constraints, each reaction appears in both forward and reverse collections
+        # We need to track contributions to both directions using the original reaction symbol
 
-        # Process substrate side for forward reaction
+        # Process substrate side for forward reaction (consumption)
         if !isempty(substrate_mets)
             sort!(substrate_mets, by=x -> x[1])
             substrate_key = copy(substrate_mets)
@@ -287,10 +273,11 @@ function extract_complexes_from_split_constraints(
             else
                 reaction_contribs = complex_data[substrate_key]
             end
-            reaction_contribs[forward_rxn_symbol] = get(reaction_contribs, forward_rxn_symbol, 0.0) - 1.0
+            # For forward direction, substrates are consumed (negative contribution)
+            reaction_contribs[rxn_symbol] = get(reaction_contribs, rxn_symbol, 0.0) - 1.0
         end
 
-        # Process product side for forward reaction
+        # Process product side for forward reaction (production)
         if !isempty(product_mets)
             sort!(product_mets, by=x -> x[1])
             product_key = copy(product_mets)
@@ -301,39 +288,13 @@ function extract_complexes_from_split_constraints(
             else
                 reaction_contribs = complex_data[product_key]
             end
-            reaction_contribs[forward_rxn_symbol] = get(reaction_contribs, forward_rxn_symbol, 0.0) + 1.0
+            # For forward direction, products are produced (positive contribution)
+            reaction_contribs[rxn_symbol] = get(reaction_contribs, rxn_symbol, 0.0) + 1.0
         end
 
-        # Reverse reaction: rxn_id_reverse
-        reverse_rxn_symbol = Symbol(string(rxn_id) * "_reverse")
-
-        # Process product side as substrate for reverse reaction
-        if !isempty(product_mets)
-            sort!(product_mets, by=x -> x[1])
-            product_key = copy(product_mets)
-            if !haskey(complex_data, product_key)
-                reaction_contribs = Dict{Symbol,Float64}()
-                sizehint!(reaction_contribs, 10)
-                complex_data[product_key] = reaction_contribs
-            else
-                reaction_contribs = complex_data[product_key]
-            end
-            reaction_contribs[reverse_rxn_symbol] = get(reaction_contribs, reverse_rxn_symbol, 0.0) - 1.0
-        end
-
-        # Process substrate side as product for reverse reaction
-        if !isempty(substrate_mets)
-            sort!(substrate_mets, by=x -> x[1])
-            substrate_key = copy(substrate_mets)
-            if !haskey(complex_data, substrate_key)
-                reaction_contribs = Dict{Symbol,Float64}()
-                sizehint!(reaction_contribs, 10)
-                complex_data[substrate_key] = reaction_contribs
-            else
-                reaction_contribs = complex_data[substrate_key]
-            end
-            reaction_contribs[reverse_rxn_symbol] = get(reaction_contribs, reverse_rxn_symbol, 0.0) + 1.0
-        end
+        # Note: For split constraints, we only need to process each reaction once
+        # The forward and reverse flux variables in the constraint system will handle
+        # the directional contributions automatically through the optimization
     end
 
     # Build final MetabolicComplex structs
@@ -507,13 +468,19 @@ $(TYPEDSIGNATURES)
 Helper function to get flux variable value from constraints, handling both split and non-split cases.
 """
 function get_flux_variable(constraints::C.ConstraintTree, rxn_symbol::Symbol)
-    # Check for split flux variables first (like "BIOMASS_Ecoli_core_w_GAM_forward")
-    if haskey(constraints, :fluxes_forward) && haskey(constraints.fluxes_forward, rxn_symbol)
+    # For split constraints, reaction contributions should be based on net flux
+    # which is represented by forward_flux - reverse_flux
+    # However, this is already handled by the constraint substitution in the symmetric approach
+
+    # First check if we have the standard flux variable (after substitution)
+    if haskey(constraints, :fluxes) && haskey(constraints.fluxes, rxn_symbol)
+        return constraints.fluxes[rxn_symbol].value
+        # If not available in fluxes, check forward flux variables
+    elseif haskey(constraints, :fluxes_forward) && haskey(constraints.fluxes_forward, rxn_symbol)
         return constraints.fluxes_forward[rxn_symbol].value
+        # Check reverse flux variables
     elseif haskey(constraints, :fluxes_reverse) && haskey(constraints.fluxes_reverse, rxn_symbol)
         return constraints.fluxes_reverse[rxn_symbol].value
-    elseif haskey(constraints, :fluxes) && haskey(constraints.fluxes, rxn_symbol)
-        return constraints.fluxes[rxn_symbol].value
     else
         error("Flux variable $rxn_symbol not found in constraints")
     end

@@ -10,7 +10,8 @@ This module contains:
 
 import COBREXA: worker_local_data, get_worker_local_data
 import Base.Iterators
-
+import SBML: Objective
+import SBMLFBCModels.SBMLFBCModels
 """
 Extract numerical tolerance from JuMP optimizer for consistent thresholding.
 Creates a temporary model to query the optimizer's tolerance settings.
@@ -614,14 +615,17 @@ function concordance_analysis(
     n_chains::Int=1,
 )
     start_time = time()
-
-    model = if !isa(model, AbstractFBCModels.CanonicalModel.Model)
-        @info "Converting model to CanonicalModel for optimal performance"
-        convert(AbstractFBCModels.CanonicalModel.Model, model)
-    else
-        model
-    end
-
+    # if isa(model, SBMLFBCModels.SBMLFBCModel)
+    #     # Remove original objective
+    #     model.sbml.objectives["objective"] = Objective("maximize", Dict())
+    #     @info "Removed original objective from SBML model"
+    # end
+    # model = if !isa(model, AbstractFBCModels.CanonicalModel.Model)
+    #     @info "Converting model to CanonicalModel for optimal performance"
+    #     convert(AbstractFBCModels.CanonicalModel.Model, model)
+    # else
+    #     model
+    # end
     # Detect solver tolerance for consistent numerical thresholds
     solver_tolerance = extract_solver_tolerance(optimizer, settings)
 
@@ -633,6 +637,11 @@ function concordance_analysis(
     actual_coarse_cv_threshold = coarse_cv_threshold !== nothing ? coarse_cv_threshold : actual_cv_threshold * 10
 
     @info "Starting concordance analysis" n_workers = length(workers) optimization_tolerance = actual_optimization_tolerance concordance_tolerance = actual_concordance_tolerance balanced_tolerance = actual_balanced_tolerance coarse_cv_threshold = actual_coarse_cv_threshold cv_threshold = actual_cv_threshold sample_size use_unidirectional_constraints batch_size solver_tolerance
+
+    # Fix model objective if it has conversion issues (e.g., missing R_ prefix)
+    if isa(model, SBMLFBCModels.SBMLFBCModel)
+        model = COCOA.ElementarySteps.fix_objective_after_conversion(model)
+    end
 
     constraints, complexes =
         concordance_constraints(model; modifications, use_unidirectional_constraints, return_complexes=true)
