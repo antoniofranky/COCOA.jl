@@ -148,7 +148,7 @@ function split_into_elementary_steps(
     end
 
     # Extract and prepare enzyme information
-    enzyme_registry = build_enzyme_registry(work_model)
+    enzyme_registry, enzyme_id_map = build_enzyme_registry(work_model)
 
     # Assign mechanisms to reactions
     if isnothing(mechanism_assignment)

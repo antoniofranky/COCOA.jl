@@ -10,6 +10,7 @@ This module contains:
 
 import COBREXA: worker_local_data, get_worker_local_data
 import Base.Iterators
+using JLD2  # For loading preprocessed constraints
 
 """
 Extract numerical tolerance from JuMP optimizer for consistent thresholding.
@@ -615,11 +616,78 @@ function concordance_analysis(
 )
     start_time = time()
 
-    model = if !isa(model, AbstractFBCModels.CanonicalModel.Model)
-        @info "Converting model to CanonicalModel for optimal performance"
-        convert(AbstractFBCModels.CanonicalModel.Model, model)
+    # Handle different input types following COBREXA patterns
+    constraints, complexes = if isa(model, String)
+        if endswith(model, ".jld2")
+            # Load preprocessed constraints (recommended approach)
+            @info "Loading preprocessed constraints" file = model
+            data = JLD2.load(model)
+            (data["constraints"], data["complexes"])
+        else
+            # Load model and create constraints with preprocessing
+            @info "Loading model and creating elementary step constraints" file = model
+            model_obj = COBREXA.load_model(model)
+            concordance_constraints(
+                model_obj;
+                use_elementary_steps=true,
+                remove_blocked=true,
+                remove_orphaned=true,
+                use_unidirectional_constraints,
+                optimizer,
+                return_complexes=true
+            )
+        end
+    elseif isa(model, Dict) && haskey(model, :fluxes)
+        # Constraint tree loaded from JLD2
+        @info "Using provided constraint tree from JLD2"
+        (model["constraints"], model.get("complexes", nothing))
+    elseif hasmethod(keys, (typeof(model),)) && haskey(model, :fluxes)
+        # Already a constraint tree
+        @info "Using provided constraint tree"
+        (model, nothing) # complexes need to be provided separately
     else
-        model
+        # Model object - handle with objective clearing for robustness
+        @info "Creating constraints from model object"
+        work_model = if !isa(model, AbstractFBCModels.CanonicalModel.Model)
+            # Clear objective if problematic before conversion
+            temp_model = deepcopy(model)
+            if hasproperty(temp_model, :objective) && !isempty(temp_model.objective)
+                temp_model.objective = Dict{String,Float64}()
+                @info "Cleared problematic objective function before conversion"
+            end
+            @info "Converting model to CanonicalModel for optimal performance"
+            convert(AbstractFBCModels.CanonicalModel.Model, temp_model)
+        else
+            model
+        end
+
+        # Use constraint-based approach for preprocessing
+        concordance_constraints(
+            work_model;
+            use_elementary_steps=true,
+            remove_blocked=true,
+            remove_orphaned=true,
+            use_unidirectional_constraints,
+            optimizer,
+            return_complexes=true
+        )
+    end
+
+    # Fall back to legacy approach if constraint-based approach not available
+    if isnothing(constraints)
+        @info "Falling back to legacy model-based approach"
+        work_model = if !isa(model, AbstractFBCModels.CanonicalModel.Model)
+            @info "Converting model to CanonicalModel for optimal performance"
+            convert(AbstractFBCModels.CanonicalModel.Model, model)
+        else
+            model
+        end
+        constraints, complexes = concordance_constraints(
+            work_model;
+            modifications,
+            use_unidirectional_constraints,
+            return_complexes=true
+        )
     end
 
     # Detect solver tolerance for consistent numerical thresholds
@@ -633,9 +701,6 @@ function concordance_analysis(
     actual_coarse_cv_threshold = coarse_cv_threshold !== nothing ? coarse_cv_threshold : actual_cv_threshold * 10
 
     @info "Starting concordance analysis" n_workers = length(workers) optimization_tolerance = actual_optimization_tolerance concordance_tolerance = actual_concordance_tolerance balanced_tolerance = actual_balanced_tolerance coarse_cv_threshold = actual_coarse_cv_threshold cv_threshold = actual_cv_threshold sample_size use_unidirectional_constraints batch_size solver_tolerance
-
-    constraints, complexes =
-        concordance_constraints(model; modifications, use_unidirectional_constraints, return_complexes=true)
 
     # Add objective constraint if specified
     if objective_bound !== nothing

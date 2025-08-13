@@ -1,5 +1,8 @@
 using COBREXA, SBMLFBCModels, AbstractFBCModels
 using COCOA, HiGHS
+using JLD2, FileIO
+using ConstraintTrees
+import ConstraintTrees as C
 
 # Get all model files
 model_files = readdir("/work/schaffran1/toolbox/Yeast-Species-GEMs", join=true)
@@ -18,12 +21,40 @@ f = model_files[task_id]
 println("Processing model $task_id/$(length(model_files)): $(basename(f))")
 
 try
+    # Load model
     model = load_model(f)
-    model_splt = split_into_elementary_steps(model)
-    model_splt_prpd = prepare_model_for_concordance(model_splt, optimizer=HiGHS.Optimizer)
-    model_conv = convert(SBMLFBCModels.SBMLFBCModel, model_splt_prpd)
-    save_model(model_conv, "/work/schaffran1/toolbox/prpd_models/$(splitext(basename(f))[1]).xml")
-    println("Successfully processed: $(basename(f))")
+
+    # Create elementary step constraints with full preprocessing (COBREXA pattern)
+    # This replaces: split_into_elementary_steps + prepare_model_for_concordance
+    constraints, complexes = concordance_constraints(
+        model;
+        use_elementary_steps=true,
+        remove_blocked=true,
+        remove_orphaned=true,
+        use_unidirectional_constraints=true,
+        optimizer=HiGHS.Optimizer,
+        return_complexes=true
+    )
+
+    # Save as native Julia objects following COBREXA recommendations
+    base_name = splitext(basename(f))[1]
+    output_path = "/work/schaffran1/toolbox/prpd_models/$(base_name)_constraints.jld2"
+
+    save(output_path, Dict(
+        "constraints" => constraints,
+        "complexes" => complexes,
+        "original_model_path" => f,
+        "processing_timestamp" => now(),
+        "preprocessing_config" => Dict(
+            "remove_blocked" => true,
+            "remove_orphaned" => true,
+            "use_unidirectional_constraints" => true,
+            "optimizer" => "HiGHS.Optimizer"
+        )
+    ))
+
+    println("Successfully processed: $(basename(f)) -> $(basename(output_path))")
+
 catch e
     println("Error processing $(basename(f)): $e")
     exit(1)

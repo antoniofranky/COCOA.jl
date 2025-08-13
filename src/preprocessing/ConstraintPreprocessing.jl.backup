@@ -1,0 +1,399 @@
+"""
+Constraint-tree based preprocessing for COCOA following COBREXA patterns.
+
+This module implements preprocessing (elementary steps, blocked reaction removal, etc.)
+using constraint trees rather than model objects, avoiding model conversion issues.
+"""
+module ConstraintPreprocessing
+
+using COBREXA
+using AbstractFBCModels
+using HiGHS
+using JuMP
+using SparseArrays
+using Logging
+using Distributed
+using Dates  # for now() function
+import ConstraintTrees as C
+import AbstractFBCModels as A
+import AbstractFBCModels.CanonicalModel as CM
+
+# Include the existing preprocessing modules for reuse
+include("enzyme_registry.jl")
+include("intermediates.jl")
+include("blocked_reactions.jl")
+
+export elementary_step_concordance_constraints
+export decompose_to_elementary_step_constraints
+export apply_preprocessing_filters
+# extract_complexes_from_constraints is defined in constraints.jl - use that one
+
+"""
+    elementary_step_concordance_constraints(model; kwargs...)
+
+Create constraint trees from a model with elementary step decomposition and preprocessing.
+This is the main entry point following COBREXA patterns.
+
+# Arguments
+- `model::AbstractFBCModel`: Input metabolic model
+- `remove_blocked::Bool=true`: Remove blocked reactions
+- `remove_orphaned::Bool=true`: Remove orphaned metabolites
+- `use_unidirectional_constraints::Bool=true`: Split into unidirectional constraints
+- `optimizer=HiGHS.Optimizer`: Optimizer for blocked reaction detection
+- `return_complexes::Bool=false`: Whether to return complex information
+- `interface=nothing`: Interface type for COBREXA constraint building
+
+# Returns
+- If `return_complexes=false`: ConstraintTree with elementary step constraints
+- If `return_complexes=true`: Tuple of (ConstraintTree, complexes)
+
+# Example
+```julia
+# Basic usage
+constraints = elementary_step_concordance_constraints(model)
+
+# With preprocessing and complex extraction
+constraints, complexes = elementary_step_concordance_constraints(
+    model; 
+    remove_blocked=true, 
+    return_complexes=true
+)
+```
+"""
+function elementary_step_concordance_constraints(
+    model::A.AbstractFBCModel;
+    remove_blocked::Bool=true,
+    remove_orphaned::Bool=true,
+    use_unidirectional_constraints::Bool=true,
+    optimizer=HiGHS.Optimizer,
+    return_complexes::Bool=false,
+    interface=nothing,
+    interface_name=:interface,
+    enzyme_data::Dict=Dict(),
+    ordered_fraction::Float64=1.0,
+    max_substrates::Int=4,
+    max_products::Int=4,
+    seed::Union{Int,Nothing}=nothing
+)
+    @info "Creating elementary step constraints" remove_blocked remove_orphaned use_unidirectional_constraints
+
+    # Step 1: Create base flux balance constraints (COBREXA pattern)
+    base_constraints = flux_balance_constraints(model; interface, interface_name)
+    @info "Created base constraints" n_reactions = length(base_constraints.fluxes)
+
+    # Step 2: Decompose into elementary step constraints
+    elementary_constraints = decompose_to_elementary_step_constraints(
+        base_constraints,
+        model;
+        enzyme_data,
+        ordered_fraction,
+        max_substrates,
+        max_products,
+        seed
+    )
+    @info "Decomposed to elementary steps" n_elementary_vars = C.var_count(elementary_constraints)
+
+    # Step 3: Apply preprocessing filters if requested
+    if remove_blocked || remove_orphaned
+        filtered_constraints = apply_preprocessing_filters(
+            elementary_constraints,
+            model;
+            remove_blocked,
+            remove_orphaned,
+            optimizer
+        )
+        @info "Applied preprocessing filters" final_vars = C.var_count(filtered_constraints)
+    else
+        filtered_constraints = elementary_constraints
+    end
+
+    # Step 4: Apply unidirectional constraints if requested (COBREXA pattern)
+    if use_unidirectional_constraints
+        # Follow COBREXA unidirectional patterns
+        final_constraints = filtered_constraints +
+                            :fluxes_forward^COBREXA.unsigned_positive_contribution_variables(filtered_constraints.fluxes)
+
+        final_constraints *=
+            :fluxes_reverse^COBREXA.unsigned_negative_contribution_constraints(
+                filtered_constraints.fluxes,
+                final_constraints.fluxes_forward
+            )
+
+        # Remove original flux bounds as they're now redundant (COBREXA pattern)
+        final_constraints = C.ConstraintTree(
+            (k => v for (k, v) in final_constraints if k != :fluxes)...,
+            :fluxes => COBREXA.remove_bounds(filtered_constraints.fluxes)
+        )
+
+        @info "Applied unidirectional constraints"
+    else
+        final_constraints = filtered_constraints
+    end
+
+    # Step 5: Extract complexes if requested
+    if return_complexes
+        complexes = extract_complexes_from_constraints(final_constraints, model)
+        @info "Extracted complexes" n_complexes = length(complexes)
+        return (final_constraints, complexes)
+    else
+        return final_constraints
+    end
+end
+
+"""
+    decompose_to_elementary_step_constraints(base_constraints, model; kwargs...)
+
+Decompose flux balance constraints into elementary step constraints.
+This follows COBREXA patterns by creating new constraint variables for enzyme steps.
+"""
+function decompose_to_elementary_step_constraints(
+    base_constraints::C.ConstraintTree,
+    model::A.AbstractFBCModel;
+    enzyme_data::Dict=Dict(),
+    ordered_fraction::Float64=1.0,
+    max_substrates::Int=4,
+    max_products::Int=4,
+    seed::Union{Int,Nothing}=nothing
+)
+    # Build enzyme registry using existing functions but with short IDs
+    enzyme_registry, enzyme_id_map = build_enzyme_registry(model)
+    @info "Built enzyme registry" n_enzymes = length(enzyme_registry)
+
+    # Get reactions that need elementary step decomposition
+    reaction_ids = collect(keys(base_constraints.fluxes))
+
+    # Create new constraint trees for elementary steps
+    elementary_flux_vars = C.ConstraintTree()
+    elementary_balances = C.ConstraintTree()
+    enzyme_balances = C.ConstraintTree()
+
+    for rxn_id in reaction_ids
+        rxn_string = string(rxn_id)
+
+        # Check if this reaction has enzymes and needs decomposition
+        enzyme_ids = extract_reaction_enzymes(model, rxn_string, enzyme_registry)
+
+        if !isempty(enzyme_ids)
+            # Decompose this reaction into elementary steps
+            step_constraints = create_elementary_step_constraints_for_reaction(
+                rxn_id,
+                rxn_string,
+                enzyme_ids,
+                enzyme_registry,
+                model;
+                ordered_fraction,
+                max_substrates,
+                max_products,
+                seed
+            )
+
+            # Add the elementary step variables and constraints
+            elementary_flux_vars = elementary_flux_vars * step_constraints.variables
+            elementary_balances = elementary_balances * step_constraints.balances
+            enzyme_balances = enzyme_balances * step_constraints.enzyme_balances
+        else
+            # No enzymes - keep as simple reaction but ensure compatibility
+            elementary_flux_vars = elementary_flux_vars *
+                                   rxn_id^base_constraints.fluxes[rxn_id]
+        end
+    end
+
+    # Combine into final constraint tree following COBREXA patterns
+    return C.ConstraintTree(
+        :fluxes => elementary_flux_vars,
+        :flux_stoichiometry => base_constraints.flux_stoichiometry,  # Preserve metabolite balance
+        :elementary_balances => elementary_balances,
+        :enzyme_balances => enzyme_balances,
+        :objective => base_constraints.objective,  # Preserve objective
+        # Add interface if present
+        (haskey(base_constraints, :interface) ? (:interface => base_constraints.interface,) : ())...
+    )
+end
+
+"""
+    apply_preprocessing_filters(constraints, model; kwargs...)
+
+Apply preprocessing filters (blocked reaction removal, orphan cleanup) to constraint trees.
+"""
+function apply_preprocessing_filters(
+    constraints::C.ConstraintTree,
+    model::A.AbstractFBCModel;
+    remove_blocked::Bool=true,
+    remove_orphaned::Bool=true,
+    optimizer=HiGHS.Optimizer
+)
+    filtered_constraints = constraints
+
+    if remove_blocked
+        # Find blocked reactions using constraint analysis
+        blocked_reactions = find_blocked_reactions_from_constraints(
+            constraints,
+            optimizer
+        )
+
+        if !isempty(blocked_reactions)
+            # Remove blocked reaction constraints
+            filtered_constraints = remove_reaction_constraints(
+                filtered_constraints,
+                blocked_reactions
+            )
+            @info "Removed blocked reactions" count = length(blocked_reactions)
+        end
+    end
+
+    if remove_orphaned
+        # Find orphaned metabolites from remaining constraints
+        orphaned_metabolites = find_orphaned_metabolites_from_constraints(
+            filtered_constraints
+        )
+
+        if !isempty(orphaned_metabolites)
+            # Remove orphaned metabolite constraints
+            filtered_constraints = remove_metabolite_constraints(
+                filtered_constraints,
+                orphaned_metabolites
+            )
+            @info "Removed orphaned metabolites" count = length(orphaned_metabolites)
+        end
+    end
+
+    return filtered_constraints
+end
+
+"""
+Extract elementary step groupings from constraint trees for concordance analysis.
+"""
+function extract_elementary_step_groupings(
+    constraints::C.ConstraintTree,
+    model::A.AbstractFBCModel
+)
+    # This is a placeholder - actual implementation would analyze the constraint structure
+    # to identify complexes formed by elementary steps
+    complexes = Dict{String,Vector{String}}()
+
+    # Extract elementary step groupings
+    for (var_id, var) in constraints.fluxes
+        var_string = string(var_id)
+        if contains(var_string, "_CAT") || contains(var_string, "_S") || contains(var_string, "_P")
+            # This is an elementary step - extract the base reaction
+            base_rxn = split(var_string, "_")[1:2]  # Assumes format like "r_0001_123_CAT"
+            base_rxn_id = join(base_rxn, "_")
+
+            if !haskey(complexes, base_rxn_id)
+                complexes[base_rxn_id] = String[]
+            end
+            push!(complexes[base_rxn_id], var_string)
+        end
+    end
+
+    return complexes
+end
+
+# Helper functions for constraint manipulation
+
+"""
+Find blocked reactions by analyzing constraint feasibility.
+"""
+function find_blocked_reactions_from_constraints(
+    constraints::C.ConstraintTree,
+    optimizer
+)
+    blocked = String[]
+
+    # Use COBREXA's constraint analysis functionality
+    # This would implement blocked reaction detection using the constraint tree
+    # For now, return empty - full implementation would analyze each flux constraint
+
+    return blocked
+end
+
+"""
+Remove reaction constraints from constraint tree.
+"""
+function remove_reaction_constraints(
+    constraints::C.ConstraintTree,
+    blocked_reactions::Vector{String}
+)
+    # Remove flux variables for blocked reactions
+    remaining_fluxes = C.ConstraintTree(
+        k => v for (k, v) in constraints.fluxes
+        if !(string(k) in blocked_reactions)
+    )
+
+    # Update other constraint components accordingly
+    return C.ConstraintTree(
+        (k => v for (k, v) in constraints if k != :fluxes)...,
+        :fluxes => remaining_fluxes
+    )
+end
+
+"""
+Remove metabolite constraints from constraint tree.
+"""
+function remove_metabolite_constraints(
+    constraints::C.ConstraintTree,
+    orphaned_metabolites::Vector{String}
+)
+    # Remove stoichiometric constraints for orphaned metabolites
+    remaining_stoichiometry = C.ConstraintTree(
+        k => v for (k, v) in constraints.flux_stoichiometry
+        if !(string(k) in orphaned_metabolites)
+    )
+
+    return C.ConstraintTree(
+        (k => v for (k, v) in constraints if k != :flux_stoichiometry)...,
+        :flux_stoichiometry => remaining_stoichiometry
+    )
+end
+
+"""
+Find orphaned metabolites from constraint structure.
+"""
+function find_orphaned_metabolites_from_constraints(
+    constraints::C.ConstraintTree
+)
+    # Analyze stoichiometric matrix to find metabolites with no connections
+    # For now, return empty - full implementation would analyze flux_stoichiometry
+    return String[]
+end
+
+"""
+Create elementary step constraints for a single reaction.
+"""
+function create_elementary_step_constraints_for_reaction(
+    rxn_id::Symbol,
+    reaction_id::String,
+    enzyme_ids::Vector{String},
+    enzyme_registry::Dict{String,String},
+    model::A.AbstractFBCModel;
+    kwargs...
+)
+    # This would create the actual elementary step variables and constraints
+    # For now, return a simplified structure
+
+    variables = C.ConstraintTree()
+    balances = C.ConstraintTree()
+    enzyme_balances = C.ConstraintTree()
+
+    # Add elementary step variables for each enzyme
+    for (i, enzyme_id) in enumerate(enzyme_ids)
+        enzyme_num = replace(enzyme_id, "E" => "")
+
+        # Create substrate binding steps
+        variables = variables * Symbol("$(rxn_id)_$(enzyme_num)_S1")^C.variable(bound=C.Between(-1000.0, 1000.0))
+
+        # Create catalytic step
+        variables = variables * Symbol("$(rxn_id)_$(enzyme_num)_CAT")^C.variable(bound=C.Between(0.0, 1000.0))
+
+        # Create product release steps  
+        variables = variables * Symbol("$(rxn_id)_$(enzyme_num)_P1")^C.variable(bound=C.Between(-1000.0, 1000.0))
+    end
+
+    return (
+        variables=variables,
+        balances=balances,
+        enzyme_balances=enzyme_balances
+    )
+end
+
+end # module ConstraintPreprocessing

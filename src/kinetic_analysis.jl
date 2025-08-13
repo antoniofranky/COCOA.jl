@@ -918,8 +918,15 @@ function kinetic_concordance_analysis(
     concordance_results = concordance_analysis(model; optimizer=optimizer, workers=workers, kwargs...)
 
     # Step 2: Build constraints separately for kinetic analysis
+    # Filter kwargs to only include parameters that concordance_constraints accepts
     @info "Building concordance constraints for kinetic analysis"
-    constraints = concordance_constraints(model; kwargs...)
+    constraints_kwargs = Dict()
+    for (k, v) in kwargs
+        if k in [:return_complexes, :modifications, :interface, :use_unidirectional_constraints]
+            constraints_kwargs[k] = v
+        end
+    end
+    constraints = concordance_constraints(model; constraints_kwargs...)
 
     if !include_kinetic_modules
         @info "Kinetic concordance analysis complete (concordance only)"

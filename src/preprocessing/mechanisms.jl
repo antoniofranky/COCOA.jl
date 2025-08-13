@@ -41,7 +41,9 @@ function add_ordered_reactions!(
     # 1. Substrate binding steps - ALWAYS REVERSIBLE
     for (idx, (met_id, coeff)) in enumerate(substrates_ordered)
         reaction_count += 1
-        rxn_id = "$(original_rid)_$(enzyme_id)_S$(idx)"
+        # Create shorter reaction ID: original_rid_enzyme_number_step_type_step_number
+        enzyme_num = replace(enzyme_id, "E" => "")  # Extract number from E123 -> 123
+        rxn_id = "$(original_rid)_$(enzyme_num)_S$(idx)"
 
         elem_rxn = CM.Reaction(
             name="$(original_rxn.name): substrate binding step $idx",
@@ -76,7 +78,9 @@ function add_ordered_reactions!(
 
     # 2. Catalytic step - SPECIAL HANDLING
     reaction_count += 1
-    cat_rxn_id = "$(original_rid)_$(enzyme_id)_CAT"
+    # Create shorter reaction ID for catalytic step
+    enzyme_num = replace(enzyme_id, "E" => "")  # Extract number from E123 -> 123
+    cat_rxn_id = "$(original_rid)_$(enzyme_num)_CAT"
 
     # Match MATLAB logic for catalytic step bounds
     cat_lower = if original_rxn.lower_bound >= 0
@@ -118,7 +122,9 @@ function add_ordered_reactions!(
     # 3. Product release steps - ALWAYS REVERSIBLE
     for (idx, (met_id, coeff)) in enumerate(products_ordered)
         reaction_count += 1
-        rxn_id = "$(original_rid)_$(enzyme_id)_P$(idx)"
+        # Create shorter reaction ID for product steps
+        enzyme_num = replace(enzyme_id, "E" => "")  # Extract number from E123 -> 123
+        rxn_id = "$(original_rid)_$(enzyme_num)_P$(idx)"
 
         elem_rxn = CM.Reaction(
             name="$(original_rxn.name): product release step $idx",
@@ -209,7 +215,9 @@ function add_random_reactions!(
             prev_metabolites = level > 1 ? [ordered_substrates[i][1] for i in 1:(level-1)] : String[]
 
             reaction_count += 1
-            rxn_id = "$(original_rid)_$(enzyme_id)_ORD$(order_idx)_L$(level)"
+            # Create shorter reaction ID for random binding
+            enzyme_num = replace(enzyme_id, "E" => "")  # Extract number from E123 -> 123
+            rxn_id = "$(original_rid)_$(enzyme_num)_ORD$(order_idx)_L$(level)"
 
             elem_rxn = CM.Reaction(
                 name="$(original_rxn.name): random binding order $order_idx level $level",
@@ -253,7 +261,9 @@ function add_random_reactions!(
 
     # Single catalytic step (all orders lead to same product intermediate)
     reaction_count += 1
-    cat_rxn_id = "$(original_rid)_$(enzyme_id)_CAT"
+    # Create shorter reaction ID for catalytic step
+    enzyme_num = replace(enzyme_id, "E" => "")  # Extract number from E123 -> 123
+    cat_rxn_id = "$(original_rid)_$(enzyme_num)_CAT"
 
     # Match MATLAB logic for catalytic step bounds (same as ordered mechanism)
     cat_lower = if original_rxn.lower_bound >= 0
@@ -299,7 +309,9 @@ function add_random_reactions!(
 
         for (idx, (met_id, coeff)) in enumerate(products)
             reaction_count += 1
-            rxn_id = "$(original_rid)_$(enzyme_id)_P$(idx)"
+            # Create shorter reaction ID for product steps
+            enzyme_num = replace(enzyme_id, "E" => "")  # Extract number from E123 -> 123
+            rxn_id = "$(original_rid)_$(enzyme_num)_P$(idx)"
 
             elem_rxn = CM.Reaction(
                 name="$(original_rxn.name): product release step $idx",

@@ -84,12 +84,14 @@ include("filter.jl")
 include("analysis.jl")
 include("kinetic_analysis.jl")
 
-
 # Re-export main functions
 export concordance_constraints, concordance_analysis
 export split_into_elementary_steps
 export prepare_model_for_concordance
 export extract_reaction_enzymes, build_enzyme_registry
+# Export elementary step and preprocessing functions (now in constraints.jl)
+export decompose_to_elementary_step_constraints, apply_preprocessing_filters
+export create_unidirectional_constraints, add_complex_activities_to_constraints
 # Export kinetic analysis functions
 export identify_kinetic_modules, identify_concentration_robustness, kinetic_concordance_analysis
 export KineticModuleResults, ConcentrationRobustnessResults
