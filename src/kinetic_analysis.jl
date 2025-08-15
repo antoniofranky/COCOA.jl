@@ -36,6 +36,9 @@ struct KineticModuleResults
     complex_to_idx::Dict{String,Int}
     metabolite_to_idx::Dict{String,Int}
     reaction_to_idx::Dict{String,Int}
+    
+    # Comprehensive summary for large-scale analysis
+    summary::Union{Dict{String,Int},Nothing}
 end
 
 """
@@ -56,6 +59,9 @@ struct ConcentrationRobustnessResults
     n_robust_metabolites::Int
     n_robust_pairs::Int
     largest_robust_module_size::Int
+    
+    # Comprehensive summary for large-scale analysis
+    summary::Union{Dict{String,Int},Nothing}
 end
 
 """
@@ -590,7 +596,8 @@ function load_kinetic_results(filepath::String)
         data["reaction_names"],
         data["complex_to_idx"],
         data["metabolite_to_idx"],
-        data["reaction_to_idx"]
+        data["reaction_to_idx"],
+        nothing  # summary will be populated by analysis functions
     )
 end
 
@@ -631,7 +638,8 @@ function load_robustness_results(filepath::String)
         data["robust_metabolite_pairs"],
         data["n_robust_metabolites"],
         data["n_robust_pairs"],
-        data["largest_robust_module_size"]
+        data["largest_robust_module_size"],
+        nothing  # summary will be populated by analysis functions
     )
 end
 
@@ -762,7 +770,8 @@ function identify_kinetic_modules(
         network_data.reaction_names,
         network_data.complex_to_idx,
         network_data.metabolite_to_idx,
-        network_data.reaction_to_idx
+        network_data.reaction_to_idx,
+        nothing  # summary will be populated by analysis functions
     )
 end
 
@@ -876,7 +885,8 @@ function identify_concentration_robustness(
         robust_pairs_vec,
         length(robust_metabolites_vec),
         length(robust_pairs_vec),
-        largest_robust_module_size
+        largest_robust_module_size,
+        nothing  # summary will be populated by analysis functions
     )
 end
 
@@ -885,8 +895,8 @@ $(TYPEDSIGNATURES)
 
 Complete kinetic concordance analysis pipeline with constraint-based workflow.
 
-Convenience wrapper that builds constraints once and reuses them for both
-concordance and kinetic analysis to ensure consistency.
+Enhanced version that returns results with a comprehensive summary field containing
+all key metrics for analyzing 343 models efficiently.
 
 # Arguments
 - `model`: The metabolic model
@@ -897,10 +907,19 @@ concordance and kinetic analysis to ensure consistency.
 - `kwargs...`: Additional arguments passed to `concordance_analysis`
 
 # Returns
-Depending on options:
-- Concordance results only (if `include_kinetic_modules=false`)
-- `KineticModuleResults` (if `include_robustness=false`)  
-- `ConcentrationRobustnessResults` (if both options true)
+Enhanced results with `.summary` field containing:
+- `n_reactions`: Number of reactions
+- `n_metabolites`: Number of metabolites  
+- `n_complexes`: Number of complexes
+- `n_concordant_pairs`: Number of concordant pairs
+- `n_balanced_complexes`: Number of balanced complexes
+- `n_trivially_balanced`: Number of trivially balanced complexes
+- `n_trivially_concordant`: Number of trivially concordant pairs
+- `n_concordance_modules`: Number of concordance modules
+- `n_kinetic_modules`: Number of kinetic modules
+- `giant_kinetic_module_size`: Size of largest kinetic module
+- `n_metabolites_absolute_robust`: Metabolites with absolute concentration robustness
+- `n_metabolite_pairs_ratio_robust`: Metabolite pairs with concentration ratio robustness
 """
 function kinetic_concordance_analysis(
     model;
@@ -917,28 +936,112 @@ function kinetic_concordance_analysis(
     @info "Running concordance analysis"
     concordance_results = concordance_analysis(model; optimizer=optimizer, workers=workers, kwargs...)
 
-    # Step 2: Build constraints separately for kinetic analysis
-    @info "Building concordance constraints for kinetic analysis"
-    constraints = concordance_constraints(model; kwargs...)
+    # Extract basic model statistics
+    n_reactions = length(AbstractFBCModels.reactions(model))
+    n_metabolites = length(AbstractFBCModels.metabolites(model))
+    n_complexes = concordance_results.stats["n_complexes"]
+    
+    # Extract concordance statistics
+    n_concordant_pairs = concordance_results.stats["n_concordant_pairs"]
+    n_balanced_complexes = concordance_results.stats["n_balanced"]
+    n_trivially_balanced = concordance_results.stats["n_trivially_balanced"]
+    n_trivially_concordant = concordance_results.stats["n_trivial_pairs"]
+    n_concordance_modules = concordance_results.stats["n_modules"]
+
+    # Initialize kinetic and robustness metrics
+    n_kinetic_modules = 0
+    giant_kinetic_module_size = 0
+    n_metabolites_absolute_robust = 0
+    n_metabolite_pairs_ratio_robust = 0
+
+    # Initialize results to return
+    final_results = concordance_results
 
     if !include_kinetic_modules
         @info "Kinetic concordance analysis complete (concordance only)"
-        return concordance_results
+    else
+        # Step 2: Build constraints separately for kinetic analysis
+        @info "Building concordance constraints for kinetic analysis"
+        constraints = concordance_constraints(model; kwargs...)
+
+        # Step 3: Run kinetic module analysis using constraints
+        @info "Running kinetic module analysis"
+        kinetic_results = identify_kinetic_modules(constraints, model, concordance_results; min_module_size, workers)
+        
+        # Extract kinetic module statistics
+        n_kinetic_modules = length(kinetic_results.kinetic_modules)
+        giant_kinetic_module_size = if kinetic_results.giant_module_id != :none
+            length(kinetic_results.kinetic_modules[kinetic_results.giant_module_id])
+        else
+            0
+        end
+
+        if !include_robustness
+            @info "Kinetic concordance analysis complete (no robustness analysis)"
+        else
+            # Step 4: Run concentration robustness analysis
+            @info "Running concentration robustness analysis"
+            robustness_results = identify_concentration_robustness(kinetic_results)
+            
+            # Extract robustness statistics
+            n_metabolites_absolute_robust = robustness_results.n_robust_metabolites
+            n_metabolite_pairs_ratio_robust = robustness_results.n_robust_pairs
+        end
     end
 
-    # Step 3: Run kinetic module analysis using constraints
-    @info "Running kinetic module analysis"
-    kinetic_results = identify_kinetic_modules(constraints, model, concordance_results; min_module_size, workers)
-
-    if !include_robustness
-        @info "Kinetic concordance analysis complete (no robustness analysis)"
-        return kinetic_results
-    end
-
-    # Step 4: Run concentration robustness analysis
-    @info "Running concentration robustness analysis"
-    robustness_results = identify_concentration_robustness(kinetic_results)
+    # Create comprehensive summary with all requested metrics
+    summary = Dict{String,Int}(
+        "n_reactions" => n_reactions,
+        "n_metabolites" => n_metabolites,
+        "n_complexes" => n_complexes,
+        "n_concordant_pairs" => n_concordant_pairs,
+        "n_balanced_complexes" => n_balanced_complexes,
+        "n_trivially_balanced" => n_trivially_balanced,
+        "n_trivially_concordant" => n_trivially_concordant,
+        "n_concordance_modules" => n_concordance_modules,
+        "n_kinetic_modules" => n_kinetic_modules,
+        "giant_kinetic_module_size" => giant_kinetic_module_size,
+        "n_metabolites_absolute_robust" => n_metabolites_absolute_robust,
+        "n_metabolite_pairs_ratio_robust" => n_metabolite_pairs_ratio_robust
+    )
 
     @info "Kinetic concordance analysis pipeline complete"
-    return robustness_results
+    @info "Analysis summary" summary
+
+    # Return results with summary - handle different result types
+    if include_robustness && include_kinetic_modules
+        return ConcentrationRobustnessResults(
+            robustness_results.kinetic_results,
+            robustness_results.robust_metabolites,
+            robustness_results.robust_metabolite_pairs,
+            robustness_results.n_robust_metabolites,
+            robustness_results.n_robust_pairs,
+            robustness_results.largest_robust_module_size,
+            summary
+        )
+    elseif include_kinetic_modules
+        return KineticModuleResults(
+            kinetic_results.concordance_results,
+            kinetic_results.kinetic_modules,
+            kinetic_results.giant_module_id,
+            kinetic_results.interface_reactions,
+            kinetic_results.Y_matrix,
+            kinetic_results.A_matrix,
+            kinetic_results.metabolite_names,
+            kinetic_results.reaction_names,
+            kinetic_results.complex_to_idx,
+            kinetic_results.metabolite_to_idx,
+            kinetic_results.reaction_to_idx,
+            summary
+        )
+    else
+        # Concordance results only - convert to named tuple with summary
+        return (
+            complexes=final_results.complexes,
+            modules=final_results.modules,
+            lambdas=final_results.lambdas,
+            stats=final_results.stats,
+            summary=summary
+        )
+    end
 end
