@@ -93,7 +93,8 @@ function concordance_constraints(
 )
     if use_unidirectional_constraints
         constraints, split_indices = create_unidirectional_constraints(model)
-        @info "Using unidirectional constraints" n_reversible_split = length(split_indices)
+        @info "Using unidirectional constraints" n_reversible_split = C.var_count(constraints.fluxes_forward) +
+                                                                      C.var_count(constraints.fluxes_reverse)
     else
         constraints = COBREXA.flux_balance_constraints(model; interface)
         split_indices = Set{Int}()
