@@ -2,10 +2,10 @@
 #SBATCH --job-name=optimize_cv_threshold
 #SBATCH --chdir=/work/schaffran1/COCOA.jl
 #SBATCH --output=optimize_cv_threshold_%A_%a.out
-#SBATCH --time=04:00:00
+#SBATCH --time=24:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=64
 #SBATCH --mem=128G
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=schaffran1@uni-potsdam.de

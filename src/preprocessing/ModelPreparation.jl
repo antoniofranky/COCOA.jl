@@ -126,7 +126,7 @@ function prepare_model_for_concordance(model::AbstractFBCModel;
         @info "Splitting reversible reactions..."
         n_rev = count_reversible_reactions(work_model)
         if n_rev > 0
-            split_reversible_reactions_optimized!(work_model)
+            split_reversible_reactions!(work_model)
             @info "Split $n_rev reversible reactions"
         end
     end

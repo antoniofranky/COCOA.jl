@@ -319,16 +319,7 @@ function validate_split_model(original_model::A.AbstractFBCModel,
     # Check metabolite balance
     original_mets = Set(A.metabolites(original_model))
     split_mets = Set(A.metabolites(split_model))
-    co = COBREXA.flux_balance_constraints(original_model)
-    oo = COBREXA.optimized_values(co, optimizer=HiGHS.Optimizer, objective=co.objective.value, output=co.objective)
-    csplt = COBREXA.flux_balance_constraints(split_model)
-    so = COBREXA.optimized_values(csplt, optimizer=HiGHS.Optimizer, objective=csplt.objective.value, output=csplt.objective)
 
-    if abs(oo - so) > 1e-6
-        @warn "Flux balance objective value changed: $oo → $so"
-    else
-        @info "Flux balance objective value preserved: $oo → $so"
-    end
     # Original metabolites should all be present
     missing_mets = setdiff(original_mets, split_mets)
     if !isempty(missing_mets)
