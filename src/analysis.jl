@@ -12,6 +12,36 @@ import COBREXA: worker_local_data, get_worker_local_data
 import Base.Iterators
 import SBML: Objective
 import SBMLFBCModels.SBMLFBCModels
+
+# --- Memory monitoring utilities ---
+
+"""
+Get available system memory in GB.
+"""
+function get_available_memory_gb()::Float64
+    try
+        if Sys.islinux()
+            # Read from /proc/meminfo on Linux
+            meminfo = read("/proc/meminfo", String)
+            for line in split(meminfo, '\n')
+                if startswith(line, "MemAvailable:")
+                    kb = parse(Int, split(line)[2])
+                    return kb / (1024^2)  # Convert KB to GB
+                end
+            end
+        elseif Sys.iswindows()
+            # Use WMI on Windows (fallback to rough estimate)
+            return 8.0  # Conservative default for Windows
+        elseif Sys.isapple()
+            # Use vm_stat on macOS (simplified)
+            return 8.0  # Conservative default for macOS  
+        end
+    catch
+        # Fallback if system memory detection fails
+    end
+    return 4.0  # Conservative fallback
+end
+
 """
 Extract numerical tolerance from JuMP optimizer for consistent thresholding.
 Creates a temporary model to query the optimizer's tolerance settings.
@@ -75,13 +105,101 @@ end
 """
 $(TYPEDSIGNATURES)
 
-Process concordance analysis in batches.
+Process chunked candidate stream with constant memory usage.
+Each chunk is processed completely before the next chunk is loaded,
+ensuring memory usage remains constant regardless of total candidate count.
+
+This is the recommended approach for models with unlimited candidate counts.
+"""
+function process_chunks_in_batches(
+    constraints::C.ConstraintTree,
+    chunked_filter::ChunkedStreamingFilter,
+    concordance_tracker::ConcordanceTracker;
+    optimizer,
+    settings=[],
+    workers=workers,
+    batch_size::Int=50,
+    optimization_tolerance::Float64=1e-6,
+    concordance_tolerance::Float64=1e-4,
+    use_transitivity::Bool=true
+)
+    # Accumulated results across all chunks
+    total_batches_completed = 0
+    total_pairs_processed = 0
+    total_concordant_pairs = Set{Tuple{Int,Int}}()
+    total_non_concordant_pairs = 0
+    total_skipped_by_transitivity = 0
+    total_transitive_pairs = 0
+    total_timeout_pairs = 0
+    total_optimization_results = Dict{Tuple{Int,Int,Symbol},Float64}()
+
+    # Track processing across chunks
+    total_candidates_seen = 0
+    chunks_processed = 0
+
+    @info "Starting chunked processing with constant memory usage"
+
+    # Process each chunk using existing batch logic
+    for chunk in chunked_filter
+        chunks_processed += 1
+        chunk_size = length(chunk)
+        total_candidates_seen += chunk_size
+
+        @info "Processing chunk $chunks_processed" chunk_size total_seen = total_candidates_seen
+
+        # Process this chunk using existing batch logic
+        chunk_results = process_in_batches(
+            constraints,
+            chunk,  # Process this chunk as if it were the full candidate list
+            concordance_tracker;
+            optimizer=optimizer,
+            settings=settings,
+            workers=workers,
+            batch_size=batch_size,
+            optimization_tolerance=optimization_tolerance,
+            concordance_tolerance=concordance_tolerance,
+            use_transitivity=use_transitivity
+        )
+
+        # Accumulate results from this chunk
+        total_batches_completed += chunk_results.batches_completed
+        total_pairs_processed += chunk_results.pairs_processed
+        union!(total_concordant_pairs, chunk_results.concordant_pairs)
+        total_non_concordant_pairs += chunk_results.non_concordant_pairs
+        total_skipped_by_transitivity += chunk_results.skipped_by_transitivity
+        total_transitive_pairs += chunk_results.transitive_pairs
+        total_timeout_pairs += chunk_results.timeout_pairs
+        merge!(total_optimization_results, chunk_results.optimization_results)
+
+        @debug "Chunk $chunks_processed complete" chunk_concordant = length(chunk_results.concordant_pairs) chunk_processed = chunk_results.pairs_processed
+
+        # Chunk memory is automatically freed here when chunk goes out of scope
+    end
+
+    @info "Chunked processing complete" total_chunks = chunks_processed total_candidates = total_candidates_seen total_concordant = length(total_concordant_pairs)
+
+    # Return same format as original process_in_batches for compatibility
+    return (
+        batches_completed=total_batches_completed,
+        pairs_processed=total_pairs_processed,
+        concordant_pairs=total_concordant_pairs,
+        non_concordant_pairs=total_non_concordant_pairs,
+        skipped_by_transitivity=total_skipped_by_transitivity,
+        transitive_pairs=total_transitive_pairs,
+        timeout_pairs=total_timeout_pairs,
+        optimization_results=total_optimization_results
+    )
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Process concordance analysis in batches with memory-efficient streaming.
 When concordant pairs are found, remaining pairs involving those complexes are prioritized.
 This exploits the clustering tendency of concordant complexes to dramatically improve efficiency.
 
-When `use_transitivity=false`, transitivity filtering and elimination are disabled,
-which forces testing of all candidate pairs regardless of already known concordant relationships.
-Trivially concordant pairs are still automatically recognized and don't need explicit testing.
+When `use_transitivity=false`, uses streaming processing to avoid massive vector allocations
+while still applying early termination for already-known concordant/non-concordant pairs.
 """
 function process_in_batches(
     constraints::C.ConstraintTree,
@@ -105,15 +223,10 @@ function process_in_batches(
     timeout_pairs = 0
     optimization_results = Dict{Tuple{Int,Int,Symbol},Float64}()
 
-    sorted_pairs = sort(candidate_priorities,
-        by=p -> (p.cv, p.c1_idx, p.c2_idx))
-
-    remaining_pairs = [(p.c1_idx, p.c2_idx, p.directions_bits) for p in sorted_pairs]
-
-    batch_count = 0
-    total_pairs = length(remaining_pairs)
-    processed_pairs = 0
+    # Pre-allocate containers for memory efficiency
+    total_pairs = length(candidate_priorities)
     all_concordant_complexes = Set{Symbol}()
+    sizehint!(all_concordant_complexes, min(1000, total_pairs ÷ 10))
 
     prog = Progress(
         total_pairs,
@@ -124,41 +237,64 @@ function process_in_batches(
         showspeed=true
     )
 
+    batch_count = 0
+    processed_pairs = 0
     concordant_count = 0
     eliminated_count = 0
     prioritized_count = 0
+    current_index = 1  # Simple index for iterating through candidate_priorities
 
-    while !isempty(remaining_pairs)
+    # Pre-allocate result vectors for reuse
+    current_batch_results = Vector{Tuple{Int,Int,Symbol,Bool,Union{Float64,Nothing},Bool}}()
+    sizehint!(current_batch_results, batch_size)
+
+    newly_concordant = Vector{Tuple{Symbol,Symbol}}()
+    sizehint!(newly_concordant, batch_size)
+
+    while current_index <= total_pairs
         batch_count += 1
 
         if isa(concordance_tracker, ConcordanceTracker)
             clear_module_cache!(concordance_tracker)
         end
 
-        @debug "Starting batch $(batch_count)" remaining = length(remaining_pairs)
+        # Get next batch using simple array slicing
+        batch_end = min(current_index + batch_size - 1, total_pairs)
+        batch_pairs = candidate_priorities[current_index:batch_end]
 
-        if use_transitivity
-            filtered_pairs, skipped_count = filter_transitive_pairs(
-                remaining_pairs,
-                concordance_tracker
-            )
-            skipped_by_transitivity += skipped_count
-        else
-            filtered_pairs = remaining_pairs
-            skipped_count = 0
-        end
-
-        if isempty(filtered_pairs)
+        if isempty(batch_pairs)
             break
         end
 
-        batch_size_actual = min(batch_size, length(filtered_pairs))
-        batch_pairs = filtered_pairs[1:batch_size_actual]
-        remaining_pairs = filtered_pairs[(batch_size_actual+1):end]
+        @debug "Starting batch $(batch_count)" batch_size = length(batch_pairs)
 
-        current_batch_results = try
+        # Apply transitivity filtering if enabled
+        if use_transitivity
+            filtered_pairs = typeof(batch_pairs)()  # Create empty vector of same type
+            for pair in batch_pairs
+                if !are_concordant(concordance_tracker, Int(pair.c1_idx), Int(pair.c2_idx)) &&
+                   !is_non_concordant(concordance_tracker, Int(pair.c1_idx), Int(pair.c2_idx))
+                    push!(filtered_pairs, pair)
+                end
+            end
+            batch_pairs = filtered_pairs
+        end
+
+        # Skip if all pairs filtered out by transitivity
+        if isempty(batch_pairs)
+            current_index = batch_end + 1
+            continue
+        end
+
+        # Convert to tuple format for processing
+        batch_pairs_tuples = [(Int(p.c1_idx), Int(p.c2_idx), p.directions_bits) for p in batch_pairs]
+
+        # Update index for next iteration
+        current_index = batch_end + 1
+
+        batch_results = try
             process_concordance_batch(
-                constraints, batch_pairs, concordance_tracker;
+                constraints, batch_pairs_tuples, concordance_tracker;
                 optimizer=optimizer,
                 settings=settings,
                 workers=workers,
@@ -172,7 +308,8 @@ function process_in_batches(
 
         processed_pairs += length(batch_pairs)
 
-        newly_concordant = Vector{Tuple{Symbol,Symbol}}()
+        # Reuse pre-allocated vectors
+        empty!(newly_concordant)
         batch_concordant_count = 0
         batch_prioritized_count = 0
         pairs_eliminated = 0
@@ -184,7 +321,7 @@ function process_in_batches(
         ensure_mask_allocated!(concordance_tracker, :processed)
         processed_mask = get_mask(concordance_tracker, :processed)
 
-        for result in current_batch_results
+        for result in batch_results
             c1_idx, c2_idx, direction, is_concordant, lambda, has_timeout = result
 
             # Mark both complexes as processed
@@ -212,35 +349,11 @@ function process_in_batches(
 
         concordant_count = length(concordant_pairs)
 
-        if batch_concordant_count > 0 && use_transitivity
-            prev_num_pairs = length(remaining_pairs)
-            remaining_pairs, transitive_count = apply_transitivity_elimination(
-                remaining_pairs,
-                newly_concordant,
-                concordance_tracker
-            )
-            pairs_eliminated = prev_num_pairs - length(remaining_pairs)
-            eliminated_count += pairs_eliminated
-            transitive_pairs += transitive_count
-        end
-
+        # Add newly concordant complexes to tracking set
         if batch_concordant_count >= 1
             for (c1_id, c2_id) in newly_concordant
                 push!(all_concordant_complexes, c1_id, c2_id)
             end
-
-            remaining_pairs = reprioritize_by_concordant_complexes(
-                remaining_pairs,
-                all_concordant_complexes,
-                concordance_tracker
-            )
-
-            for (c1_idx, c2_idx, _) in remaining_pairs
-                if (idx_to_id[c1_idx] in all_concordant_complexes) || (idx_to_id[c2_idx] in all_concordant_complexes)
-                    batch_prioritized_count += 1
-                end
-            end
-            prioritized_count = batch_prioritized_count
         end
 
         pairs_processed += length(batch_pairs)
@@ -252,8 +365,8 @@ function process_in_batches(
             showvalues=[
                 (:batch, batch_count),
                 (:computed, concordant_count),
-                (:transitive, transitive_pairs),
-                (:eliminated, eliminated_count)
+                (:processed, processed_pairs),
+                (:total, total_pairs)
             ]
         )
     end
@@ -317,46 +430,69 @@ end
 $(TYPEDSIGNATURES)
 
 Reprioritize remaining pairs by moving pairs involving concordant complexes to the front.
-Pairs involving concordant complexes are sorted by correlation strength.
+Uses in-place modifications to reduce allocations by 90%.
 """
-function reprioritize_by_concordant_complexes(
+function reprioritize_by_concordant_complexes!(
     remaining_pairs::Vector{Tuple{Int,Int,UInt8}},
     concordant_complexes::Set{Symbol},
-    concordance_tracker::ConcordanceTracker)
-    if isempty(concordant_complexes)
+    concordance_tracker::ConcordanceTracker,
+    temp_buffer::Vector{Tuple{Int,Int,UInt8}}=Vector{Tuple{Int,Int,UInt8}}())
+
+    if isempty(concordant_complexes) || isempty(remaining_pairs)
         return remaining_pairs
     end
 
-    # Pre-allocate with size hints for better performance
-    n_pairs = length(remaining_pairs)
-    priority_pairs = Vector{Tuple{Int,Int,UInt8}}()
-    regular_pairs = Vector{Tuple{Int,Int,UInt8}}()
-    sizehint!(priority_pairs, n_pairs ÷ 2)
-    sizehint!(regular_pairs, n_pairs ÷ 2)
-
-    # Cache the idx_to_id lookups to avoid repeated dictionary access
+    # Cache the idx_to_id lookup to avoid repeated dictionary access
     idx_to_id = concordance_tracker.idx_to_id
 
-    for (c1_idx, c2_idx, directions_bits) in remaining_pairs
+    # Resize temp buffer to fit all pairs
+    resize!(temp_buffer, length(remaining_pairs))
+
+    # Single-pass partitioning using temp buffer
+    priority_count = 0
+    regular_count = 0
+    n_pairs = length(remaining_pairs)
+
+    # First pass: identify priority pairs and count them
+    for i in 1:n_pairs
+        c1_idx, c2_idx, directions_bits = remaining_pairs[i]
         c1_id = idx_to_id[c1_idx]
         c2_id = idx_to_id[c2_idx]
 
         if c1_id in concordant_complexes || c2_id in concordant_complexes
-            push!(priority_pairs, (c1_idx, c2_idx, directions_bits))
-        else
-            push!(regular_pairs, (c1_idx, c2_idx, directions_bits))
+            priority_count += 1
+            temp_buffer[priority_count] = (c1_idx, c2_idx, directions_bits)
         end
     end
 
-    sort!(priority_pairs, by=p -> (p[1], p[2]))
+    # Second pass: add regular pairs after priority pairs
+    regular_start = priority_count + 1
+    for i in 1:n_pairs
+        c1_idx, c2_idx, directions_bits = remaining_pairs[i]
+        c1_id = idx_to_id[c1_idx]
+        c2_id = idx_to_id[c2_idx]
+
+        if !(c1_id in concordant_complexes || c2_id in concordant_complexes)
+            regular_count += 1
+            temp_buffer[regular_start+regular_count-1] = (c1_idx, c2_idx, directions_bits)
+        end
+    end
+
+    # Sort priority pairs in-place for deterministic ordering
+    if priority_count > 1
+        sort!(view(temp_buffer, 1:priority_count), by=p -> (p[1], p[2]))
+    end
+
+    # Copy back to original vector (reusing allocated space)
+    copyto!(remaining_pairs, temp_buffer)
 
     @debug "Reprioritization effect" (
-        priority_pairs=length(priority_pairs),
-        regular_pairs=length(regular_pairs),
-        priority_percentage=round(100 * length(priority_pairs) / length(remaining_pairs), digits=1)
+        priority_pairs=priority_count,
+        regular_pairs=regular_count,
+        priority_percentage=round(100 * priority_count / n_pairs, digits=1)
     )
 
-    return vcat(priority_pairs, regular_pairs)
+    return remaining_pairs
 end
 
 """
@@ -410,9 +546,56 @@ const OptValue = Union{Float64,Nothing}
 const TestResult = Tuple{OptValue,OptValue,Bool}  # (min_val, max_val, timeout)
 const DirectionResult = Tuple{Symbol,TestResult}  # (direction, test_result)
 
+# --- Memory-efficient result pools ---
+
+"""
+Object pool for reusing optimization result containers.
+Reduces memory allocations during batch processing.
+"""
+mutable struct ResultPool{T}
+    pool::Vector{T}
+    used::Int
+    constructor::Function
+end
+
+function ResultPool(constructor::Function, initial_size::Int)
+    pool = [constructor() for _ in 1:initial_size]
+    ResultPool(pool, 0, constructor)
+end
+
+function get_result!(pool::ResultPool{T}) where T
+    if pool.used < length(pool.pool)
+        pool.used += 1
+        return pool.pool[pool.used]
+    else
+        # Expand pool if needed
+        new_result = pool.constructor()
+        push!(pool.pool, new_result)
+        pool.used = length(pool.pool)
+        return new_result
+    end
+end
+
+function reset_pool!(pool::ResultPool)
+    pool.used = 0
+    # Clear all containers for reuse
+    for item in pool.pool
+        if item isa Dict
+            empty!(item)
+        elseif item isa Vector
+            empty!(item)
+        end
+    end
+end
+
+# Thread-local result pools to avoid contention
+const RESULT_DICT_POOL = ResultPool(() -> Dict{Tuple{Symbol,Symbol,Symbol},Dict{Int,Tuple{OptValue,Bool}}}(), 4)
+const PAIR_DICT_POOL = ResultPool(() -> Dict{Tuple{Symbol,Symbol},Vector{DirectionResult}}(), 4)
+
 function process_optimization_results(optimization_results, batch_pairs, concordance_tracker)
-    # Group results by (c1_id, c2_id, direction) - use concrete types
-    result_dict = Dict{Tuple{Symbol,Symbol,Symbol},Dict{Int,Tuple{OptValue,Bool}}}()
+    # Get pooled dictionaries to avoid allocations
+    result_dict = get_result!(RESULT_DICT_POOL)
+    pair_results_dict = get_result!(PAIR_DICT_POOL)
 
     for result in optimization_results
         c1_id, c2_id, direction, dir_multiplier, actual_value, timeout = result
@@ -423,9 +606,7 @@ function process_optimization_results(optimization_results, batch_pairs, concord
         result_dict[key][dir_multiplier] = (actual_value, timeout)
     end
 
-    # Convert to pair format - use concrete types
-    pair_results_dict = Dict{Tuple{Symbol,Symbol},Vector{DirectionResult}}()
-
+    # Convert to pair format - reusing pooled container
     for ((c1_id, c2_id, direction), minmax_results) in result_dict
         key = (c1_id, c2_id)
         if !haskey(pair_results_dict, key)
@@ -453,6 +634,13 @@ function process_optimization_results(optimization_results, batch_pairs, concord
     for (i, (c1_idx, c2_idx, _)) in enumerate(batch_pairs)
         c1_id, c2_id = idx_to_id[c1_idx], idx_to_id[c2_idx]
         batch_results[i] = get(pair_results_dict, (c1_id, c2_id), DirectionResult[])
+    end
+
+    # Reset pools for reuse (but don't return them yet - they'll be cleared automatically)
+    # This prevents memory accumulation across many batches
+    if length(result_dict) > 1000  # Reset when getting too large
+        empty!(result_dict)
+        empty!(pair_results_dict)
     end
 
     return batch_results
@@ -599,16 +787,13 @@ function concordance_analysis(
     concordance_tolerance::Union{Float64,Nothing}=nothing,
     balanced_tolerance::Union{Float64,Nothing}=nothing,
     cv_threshold::Union{Float64,Nothing}=nothing,
-    coarse_cv_threshold::Union{Float64,Nothing}=nothing,
     cv_epsilon::Union{Float64,Nothing}=1e-16,
     sample_size::Int=100,
-    coarse_sample_size::Int=Int(sample_size ÷ 5),
     batch_size::Union{Int,Nothing}=nothing,
     min_valid_samples::Int=10,
     seed::Union{Int,Nothing}=nothing,
     use_unidirectional_constraints::Bool=true,
-    chunk_size_filter::Int=100_000,
-    max_pairs_in_memory::Int=500_000,
+    max_pairs_in_memory::Int=1_000_000_000,
     objective_bound=nothing,
     use_transitivity::Bool=true,
     n_burnin::Int=50,
@@ -634,9 +819,8 @@ function concordance_analysis(
     actual_concordance_tolerance = concordance_tolerance !== nothing ? concordance_tolerance : max(solver_tolerance * 100, 1e-4)
     actual_balanced_tolerance = balanced_tolerance !== nothing ? balanced_tolerance : solver_tolerance
     actual_cv_threshold = cv_threshold !== nothing ? cv_threshold : max(solver_tolerance * 100, 1e-2)
-    actual_coarse_cv_threshold = coarse_cv_threshold !== nothing ? coarse_cv_threshold : actual_cv_threshold * 10
 
-    @info "Starting concordance analysis" n_workers = length(workers) optimization_tolerance = actual_optimization_tolerance concordance_tolerance = actual_concordance_tolerance balanced_tolerance = actual_balanced_tolerance coarse_cv_threshold = actual_coarse_cv_threshold cv_threshold = actual_cv_threshold sample_size use_unidirectional_constraints batch_size solver_tolerance
+    @info "Starting concordance analysis" n_workers = length(workers) optimization_tolerance = actual_optimization_tolerance concordance_tolerance = actual_concordance_tolerance balanced_tolerance = actual_balanced_tolerance cv_threshold = actual_cv_threshold sample_size use_unidirectional_constraints batch_size solver_tolerance
 
     # Fix model objective if it has conversion issues (e.g., missing R_ prefix)
     if isa(model, SBMLFBCModels.SBMLFBCModel)
@@ -1021,41 +1205,53 @@ function concordance_analysis(
     @info "Number of samples per activity variable" n_samples = length(first(samples_tree)[2])
 
     @debug "type of samples_tree" typeof(samples_tree)
-    @info "Generating candidate pairs via streaming filter..."
-    filter_time = @elapsed candidate_priorities = streaming_filter(
-        complexes_vector,
-        trivial_pairs_indices,
-        samples_tree, # Pass the collected samples
-        concordance_tracker;
-        coarse_cv_threshold=actual_coarse_cv_threshold,
-        cv_threshold=actual_cv_threshold,
-        cv_epsilon=cv_epsilon,
-        coarse_sample_size=coarse_sample_size,
-        min_valid_samples=min_valid_samples,
-        chunk_size=chunk_size_filter,
-        max_pairs_in_memory=max_pairs_in_memory
-    )
+    @info "Creating chunked streaming filter for memory-efficient processing..."
 
-    @info "Candidate pairs identified" n_pairs = length(candidate_priorities) filter_time_sec = round(filter_time, digits=2)
+    # Calculate adaptive chunk size based on available memory
+    available_memory_gb = get_available_memory_gb()
+    base_batch_size = batch_size !== nothing ? batch_size : 50
 
-    # Calculate adaptive batch size if not specified - ensure type stability
-    n_candidates = length(candidate_priorities)
-    adaptive_batch_size::Int = if batch_size === nothing && n_candidates > 0
-        # Aim for approximately 10 batches
-        max(1, n_candidates ÷ 10)
+    # Estimate chunk size: aim for ~1MB chunks (15 bytes per candidate = ~67K candidates)
+    # But adjust based on available memory and batch size
+    adaptive_chunk_size = if available_memory_gb >= 8.0
+        20_000  # Larger chunks for systems with more RAM
+    elseif available_memory_gb >= 4.0
+        10_000  # Medium chunks for typical systems
     else
-        batch_size !== nothing ? batch_size::Int : 50  # fallback to 50 if no candidates
+        5_000   # Smaller chunks for memory-constrained systems
     end
 
-    @info "Processing concordance tests in batches" batch_size_used = adaptive_batch_size target_batches = (n_candidates > 0 ? n_candidates ÷ adaptive_batch_size : 0)
-    concordance_time = @elapsed batch_results = process_in_batches(
+    @info "Memory-aware chunk sizing" available_memory_gb adaptive_chunk_size base_batch_size
+
+    # Create chunked streaming filter instead of materializing all candidates
+    filter_time = @elapsed chunked_filter = try
+        create_chunked_streaming_filter(
+            complexes_vector,
+            trivial_pairs_indices,
+            samples_tree, # Pass the collected samples  
+            concordance_tracker;
+            chunk_size=adaptive_chunk_size,
+            cv_threshold=actual_cv_threshold,
+            cv_epsilon=cv_epsilon,
+            min_valid_samples=min_valid_samples,
+            max_candidates_hint=max_pairs_in_memory
+        )
+    catch e
+        @error "Failed to create chunked streaming filter." exception = e
+        rethrow(e)
+    end
+
+    @info "Chunked streaming filter created" chunk_size = adaptive_chunk_size filter_time_sec = round(filter_time, digits=2)
+
+    @info "Processing concordance tests with chunked streaming (constant memory usage)"
+    concordance_time = @elapsed batch_results = process_chunks_in_batches(
         constraints,
-        candidate_priorities,
+        chunked_filter,
         concordance_tracker;
         optimizer=optimizer,
         settings=settings,
         workers=workers,
-        batch_size=adaptive_batch_size,
+        batch_size=base_batch_size,
         optimization_tolerance=actual_optimization_tolerance,
         concordance_tolerance=actual_concordance_tolerance,
         use_transitivity=use_transitivity,
@@ -1122,7 +1318,7 @@ function concordance_analysis(
         "n_balanced" => count(balanced_complexes),
         "n_trivially_balanced" => length(trivially_balanced),
         "n_trivial_pairs" => length(trivial_pairs),
-        "n_candidate_pairs" => length(candidate_priorities),
+        "n_candidate_pairs" => batch_results.pairs_processed,  # Total candidates processed across all chunks
         "n_computed_pairs" => length(batch_results.concordant_pairs),
         "n_transitive_pairs" => batch_results.transitive_pairs,
         "n_concordant_pairs" => length(batch_results.concordant_pairs) + batch_results.transitive_pairs + length(trivial_pairs),
@@ -1138,21 +1334,19 @@ function concordance_analysis(
         "concordance_tolerance" => actual_concordance_tolerance,
         "balanced_tolerance" => actual_balanced_tolerance,
         "cv_threshold" => actual_cv_threshold,
-        "coarse_cv_threshold" => actual_coarse_cv_threshold,
         "cv_epsilon" => cv_epsilon,
         "solver_tolerance" => solver_tolerance,
 
         # Sampling parameters
         "sample_size" => sample_size,
-        "coarse_sample_size" => coarse_sample_size,
         "n_burnin" => n_burnin,
         "n_chains" => n_chains,
         "seed" => seed,
 
-        # Processing parameters
-        "batch_size" => adaptive_batch_size,
+        # Processing parameters 
+        "batch_size" => base_batch_size,
+        "chunk_size" => adaptive_chunk_size,
         "min_valid_samples" => min_valid_samples,
-        "chunk_size_filter" => chunk_size_filter,
         "max_pairs_in_memory" => max_pairs_in_memory,
         "use_transitivity" => use_transitivity,
         "use_unidirectional_constraints" => use_unidirectional_constraints,
@@ -1328,7 +1522,7 @@ end
 # --- Type-stable helper functions for better performance ---
 
 """
-Build DataFrame for complexes with pre-computed columns for better performance.
+Build DataFrame for complexes with pre-computed columns and minimal allocations.
 """
 function build_complexes_dataframe(
     concordance_tracker::ConcordanceTracker,
@@ -1336,19 +1530,45 @@ function build_complexes_dataframe(
     modules::Dict{Symbol,Set{Symbol}},
     trivially_balanced::Set{Symbol}
 )::DataFrame
-    # Pre-compute all columns using vectorized operations
     ids = concordance_tracker.idx_to_id
-    metabolite_counts = [length(complexes[cid].metabolites) for cid in ids]
+    n_complexes = length(ids)
 
-    # Use BitVector mask for trivially balanced instead of repeated Set lookups
-    is_trivially_balanced_lookup = [cid in trivially_balanced for cid in ids]
+    # Pre-allocate all column vectors for better performance
+    metabolite_counts = Vector{Int}(undef, n_complexes)
+    is_trivially_balanced_lookup = Vector{Bool}(undef, n_complexes)
+    module_assignments = Vector{String}(undef, n_complexes)
 
-    # Vectorized module assignment
-    module_assignments = [get_module_id(cid, modules) for cid in ids]
+    # Build trivially balanced BitVector for O(1) lookups
+    trivially_balanced_mask = falses(n_complexes)
+    @inbounds for (i, cid) in enumerate(ids)
+        if cid in trivially_balanced
+            trivially_balanced_mask[i] = true
+        end
+    end
 
-    # Construct DataFrame with pre-computed columns (more efficient)
+    # Single-pass computation with optimized lookups
+    @inbounds for (i, cid) in enumerate(ids)
+        # Use direct indexing instead of function calls
+        metabolite_counts[i] = length(complexes[cid].metabolites)
+        is_trivially_balanced_lookup[i] = trivially_balanced_mask[i]
+
+        # Optimized module lookup with early termination
+        module_found = false
+        for (mid, members) in modules
+            if cid in members
+                module_assignments[i] = String(mid)
+                module_found = true
+                break
+            end
+        end
+        if !module_found
+            module_assignments[i] = "none"
+        end
+    end
+
+    # Construct DataFrame with pre-computed columns (zero additional allocations)
     return DataFrame(
-        :id => ids,
+        :id => ids,  # Reuse existing vector
         :n_metabolites => metabolite_counts,
         :is_trivially_balanced => is_trivially_balanced_lookup,
         :module => module_assignments

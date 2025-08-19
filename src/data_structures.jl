@@ -127,7 +127,7 @@ function union_sets!(tracker::ConcordanceTracker, x::Int, y::Int)
 end
 
 
-# Generic operations
+# Generic operations - using Int (Julia's native integer type) for consistency
 @inline function are_concordant(tracker::ConcordanceTracker, x::Int, y::Int)
     return find_set!(tracker, x) == find_set!(tracker, y)
 end
@@ -194,6 +194,8 @@ function is_non_concordant(tracker::ConcordanceTracker, x::Int, y::Int)
 
     return false
 end
+
+# All index operations now use Int consistently - no conversion needed
 
 
 function ensure_module_cached!(tracker::ConcordanceTracker, rep::Int)
