@@ -225,7 +225,7 @@ function split_into_elementary_steps(
 
     @info "Split $(length(work_model.reactions)) reactions into $(length(elementary_model.reactions)) elementary steps"
     @info "Created $(length(enzyme_registry)) enzymes and $(length(intermediate_registry)) intermediate complexes"
-    validate_split_model(model, exported_model)
+    validate_split_model(model, elementary_model)
 
     # Convert to requested output type
     exported_model = convert(output_type, elementary_model)
