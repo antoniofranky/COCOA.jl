@@ -105,11 +105,180 @@ end
 """
 $(TYPEDSIGNATURES)
 
+Process streaming candidates directly with optimized batch processing.
+This eliminates the chunking layer for better performance and transitivity updates.
+Streams candidates directly from filter and processes in smaller batches (500) 
+for more frequent transitivity filter updates.
+
+This is now the recommended approach as it removes redundant chunking overhead.
+"""
+function process_streaming_batches(
+    constraints::C.ConstraintTree,
+    streaming_filter::StreamingCandidateFilter,
+    concordance_tracker::ConcordanceTracker;
+    optimizer,
+    settings=[],
+    workers=workers,
+    batch_size::Int=500,  # Smaller batches for better transitivity updates
+    optimization_tolerance::Float64=1e-6,
+    concordance_tolerance::Float64=1e-4,
+    use_transitivity::Bool=true
+)
+    # Track results
+    total_batches_completed = 0
+    total_pairs_processed = 0
+    total_concordant_pairs = Set{Tuple{Int,Int}}()
+    total_non_concordant_pairs = 0
+    total_skipped_by_transitivity = 0
+    total_transitive_pairs = 0
+    total_timeout_pairs = 0
+    total_optimization_results = Dict{Tuple{Int,Int,Symbol},Float64}()
+
+    # Stream processing state
+    current_batch = Vector{PairCandidate}()
+    sizehint!(current_batch, batch_size)
+    
+    newly_concordant_buffer = Vector{Tuple{Symbol,Symbol}}()
+    sizehint!(newly_concordant_buffer, batch_size)
+    
+    total_candidates_seen = 0
+    batches_processed = 0
+    
+    # Setup progress bar
+    prog = Progress(
+        streaming_filter.max_candidates_hint,  # Use hint as approximate total
+        desc="Direct streaming concordance: ",
+        dt=1.0,
+        barlen=50,
+        output=stdout,
+        showspeed=true
+    )
+    
+    @info "Starting direct streaming processing with frequent transitivity updates" batch_size
+
+    # Process candidates as they arrive from the streaming filter
+    for candidate in streaming_filter
+        push!(current_batch, candidate)
+        total_candidates_seen += 1
+        
+        # Update progress every 100 candidates
+        if total_candidates_seen % 100 == 0
+            ProgressMeter.update!(prog, total_candidates_seen;
+                showvalues=[
+                    (:batches, batches_processed),
+                    (:concordant, length(total_concordant_pairs)),
+                    (:transitive, total_transitive_pairs),
+                    (:filter_tested, streaming_filter.pairs_tested),
+                    (:filter_skipped_trans, streaming_filter.pairs_skipped_by_transitivity),
+                    (:updates_received, streaming_filter.transitivity_updates_received)
+                ]
+            )
+        end
+        
+        # Process batch when full
+        if length(current_batch) >= batch_size
+            batches_processed += 1
+            
+            @debug "Processing streaming batch $batches_processed" batch_size = length(current_batch) total_seen = total_candidates_seen
+            
+            # Process this batch
+            batch_results = process_in_batches(
+                constraints,
+                current_batch,
+                concordance_tracker;
+                optimizer=optimizer,
+                settings=settings,
+                workers=workers,
+                batch_size=batch_size,
+                optimization_tolerance=optimization_tolerance,
+                concordance_tolerance=concordance_tolerance,
+                use_transitivity=use_transitivity
+            )
+            
+            # Accumulate results
+            total_batches_completed += batch_results.batches_completed
+            total_pairs_processed += batch_results.pairs_processed
+            union!(total_concordant_pairs, batch_results.concordant_pairs)
+            total_non_concordant_pairs += batch_results.non_concordant_pairs
+            total_skipped_by_transitivity += batch_results.skipped_by_transitivity
+            total_transitive_pairs += batch_results.transitive_pairs
+            total_timeout_pairs += batch_results.timeout_pairs
+            merge!(total_optimization_results, batch_results.optimization_results)
+            
+            # Update filter with newly discovered concordant pairs for better transitivity filtering
+            empty!(newly_concordant_buffer)
+            for (c1_idx, c2_idx) in batch_results.concordant_pairs
+                c1_id = concordance_tracker.idx_to_id[c1_idx]
+                c2_id = concordance_tracker.idx_to_id[c2_idx]
+                push!(newly_concordant_buffer, (c1_id, c2_id))
+            end
+            
+            if !isempty(newly_concordant_buffer)
+                update_filter_with_discoveries!(streaming_filter, newly_concordant_buffer)
+                @debug "Updated filter with new discoveries" count = length(newly_concordant_buffer)
+            end
+            
+            # Clear batch for next round
+            empty!(current_batch)
+        end
+    end
+    
+    # Process any remaining candidates in final batch
+    if !isempty(current_batch)
+        batches_processed += 1
+        
+        @debug "Processing final streaming batch $batches_processed" batch_size = length(current_batch)
+        
+        batch_results = process_in_batches(
+            constraints,
+            current_batch,
+            concordance_tracker;
+            optimizer=optimizer,
+            settings=settings,
+            workers=workers,
+            batch_size=batch_size,
+            optimization_tolerance=optimization_tolerance,
+            concordance_tolerance=concordance_tolerance,
+            use_transitivity=use_transitivity
+        )
+        
+        # Final accumulation
+        total_batches_completed += batch_results.batches_completed
+        total_pairs_processed += batch_results.pairs_processed
+        union!(total_concordant_pairs, batch_results.concordant_pairs)
+        total_non_concordant_pairs += batch_results.non_concordant_pairs
+        total_skipped_by_transitivity += batch_results.skipped_by_transitivity
+        total_transitive_pairs += batch_results.transitive_pairs
+        total_timeout_pairs += batch_results.timeout_pairs
+        merge!(total_optimization_results, batch_results.optimization_results)
+    end
+    
+    # Final progress update
+    ProgressMeter.finish!(prog)
+    
+    @info "Direct streaming processing complete" total_batches = batches_processed total_candidates = total_candidates_seen total_concordant = length(total_concordant_pairs) transitivity_effectiveness = round(total_skipped_by_transitivity / max(1, total_candidates_seen) * 100, digits=1)
+    
+    # Return same format as other processing functions
+    return (
+        batches_completed=total_batches_completed,
+        pairs_processed=total_pairs_processed,
+        concordant_pairs=total_concordant_pairs,
+        non_concordant_pairs=total_non_concordant_pairs,
+        skipped_by_transitivity=total_skipped_by_transitivity,
+        transitive_pairs=total_transitive_pairs,
+        timeout_pairs=total_timeout_pairs,
+        optimization_results=total_optimization_results
+    )
+end
+
+"""
+$(TYPEDSIGNATURES)
+
 Process chunked candidate stream with constant memory usage.
 Each chunk is processed completely before the next chunk is loaded,
 ensuring memory usage remains constant regardless of total candidate count.
 
-This is the recommended approach for models with unlimited candidate counts.
+This is the legacy approach - use process_streaming_batches for better performance.
 """
 function process_chunks_in_batches(
     constraints::C.ConstraintTree,
@@ -1221,32 +1390,31 @@ function concordance_analysis(
         5_000   # Smaller chunks for memory-constrained systems
     end
 
-    @info "Memory-aware chunk sizing" available_memory_gb adaptive_chunk_size base_batch_size
+    @info "Memory-aware batch sizing" available_memory_gb base_batch_size
 
-    # Create chunked streaming filter instead of materializing all candidates
-    filter_time = @elapsed chunked_filter = try
-        create_chunked_streaming_filter(
+    # Create direct streaming filter (eliminates redundant chunking layer)
+    filter_time = @elapsed streaming_filter = try
+        StreamingCandidateFilter(
             complexes_vector,
             trivial_pairs_indices,
             samples_tree, # Pass the collected samples  
             concordance_tracker;
-            chunk_size=adaptive_chunk_size,
             cv_threshold=actual_cv_threshold,
             cv_epsilon=cv_epsilon,
             min_valid_samples=min_valid_samples,
             max_candidates_hint=max_pairs_in_memory
         )
     catch e
-        @error "Failed to create chunked streaming filter." exception = e
+        @error "Failed to create streaming filter." exception = e
         rethrow(e)
     end
 
-    @info "Chunked streaming filter created" chunk_size = adaptive_chunk_size filter_time_sec = round(filter_time, digits=2)
+    @info "Direct streaming filter created" filter_time_sec = round(filter_time, digits=2)
 
-    @info "Processing concordance tests with chunked streaming (constant memory usage)"
-    concordance_time = @elapsed batch_results = process_chunks_in_batches(
+    @info "Processing concordance tests with direct streaming (optimized transitivity updates)"
+    concordance_time = @elapsed batch_results = process_streaming_batches(
         constraints,
-        chunked_filter,
+        streaming_filter,
         concordance_tracker;
         optimizer=optimizer,
         settings=settings,

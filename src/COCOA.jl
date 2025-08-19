@@ -87,8 +87,9 @@ include("kinetic_analysis.jl")
 
 # Re-export main functions
 export concordance_constraints, concordance_analysis
-# Re-export chunked streaming filter functions
-export ChunkedStreamingFilter, create_chunked_streaming_filter, DiskBackedChunkedFilter, create_disk_backed_filter
+# Re-export streaming filter functions
+export StreamingCandidateFilter, ChunkedStreamingFilter, create_chunked_streaming_filter, 
+       DiskBackedChunkedFilter, create_disk_backed_filter, process_streaming_batches
 export split_into_elementary_steps
 export prepare_model_for_concordance
 export extract_reaction_enzymes, build_enzyme_registry
