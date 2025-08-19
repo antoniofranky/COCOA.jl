@@ -140,7 +140,7 @@ mutable struct StreamingCandidateFilter
     pairs_missing_samples::Int
     pairs_cv_filtered::Int
     insufficient_samples::Int
-    
+
     # Enhanced transitivity tracking
     pairs_skipped_by_transitivity::Int  # Pairs skipped due to existing concordance/non-concordance
     transitivity_updates_received::Int  # How many discovery updates received
@@ -205,14 +205,14 @@ function Base.iterate(filter::StreamingCandidateFilter, state=nothing)
         if i <= filter.n_complexes && j <= filter.n_complexes && i < j
             # Process current pair BEFORE advancing
             candidate = process_pair(filter, i, j)
-            
+
             # Advance to next pair
             filter.current_j += 1
             if filter.current_j > filter.n_complexes
                 filter.current_i += 1
                 filter.current_j = filter.current_i + 1  # Reset j for new i
             end
-            
+
             # Return candidate if found
             if candidate !== nothing
                 filter.candidates_found += 1
@@ -225,7 +225,7 @@ function Base.iterate(filter::StreamingCandidateFilter, state=nothing)
                 filter.current_i += 1
                 filter.current_j = filter.current_i + 1
             end
-            
+
             # Check if we've exhausted all pairs
             if filter.current_i > filter.n_complexes
                 break
@@ -236,24 +236,23 @@ function Base.iterate(filter::StreamingCandidateFilter, state=nothing)
     # Iterator exhausted - show detailed debugging statistics
     total_pairs_possible = filter.n_complexes * (filter.n_complexes - 1) ÷ 2
     transitivity_effectiveness = round(filter.pairs_skipped_by_transitivity / max(1, filter.pairs_tested) * 100, digits=1)
-    
-    @info "Streaming filter complete" (
-        pairs_tested=filter.pairs_tested,
-        total_pairs_possible=total_pairs_possible,
-        candidates_found=filter.candidates_found,
-        pairs_balanced_filtered=filter.pairs_balanced_filtered,
-        pairs_trivial_filtered=filter.pairs_trivial_filtered,
-        pairs_concordant_filtered=filter.pairs_concordant_filtered,
-        pairs_skipped_by_transitivity=filter.pairs_skipped_by_transitivity,
-        transitivity_effectiveness_pct=transitivity_effectiveness,
-        transitivity_updates_received=filter.transitivity_updates_received,
-        pairs_missing_samples=filter.pairs_missing_samples,
-        pairs_cv_filtered=filter.pairs_cv_filtered,
-        insufficient_samples=filter.insufficient_samples,
-        cv_threshold=filter.cv_threshold,
-        total_iterations=filter.iteration_count,
-        final_position=(filter.current_i, filter.current_j)
-    )
+
+    @info "Streaming filter complete"
+    pairs_tested = filter.pairs_tested,
+    total_pairs_possible = total_pairs_possible,
+    candidates_found = filter.candidates_found,
+    pairs_balanced_filtered = filter.pairs_balanced_filtered,
+    pairs_trivial_filtered = filter.pairs_trivial_filtered,
+    pairs_concordant_filtered = filter.pairs_concordant_filtered,
+    pairs_skipped_by_transitivity = filter.pairs_skipped_by_transitivity,
+    transitivity_effectiveness_pct = transitivity_effectiveness,
+    transitivity_updates_received = filter.transitivity_updates_received,
+    pairs_missing_samples = filter.pairs_missing_samples,
+    pairs_cv_filtered = filter.pairs_cv_filtered,
+    insufficient_samples = filter.insufficient_samples,
+    cv_threshold = filter.cv_threshold,
+    total_iterations = filter.iteration_count,
+    final_position = (filter.current_i, filter.current_j)
     return nothing
 end
 
@@ -315,7 +314,7 @@ function process_pair(filter::StreamingCandidateFilter, i::Int, j::Int)::Union{P
     # Reset and compute CV using OnlineStats with Welford's algorithm
     cv_stat = filter.cv_stat  # Cache cv_stat reference
     empty!(cv_stat)
-    
+
     # Cache epsilon for faster access in tight loop
     epsilon = filter.cv_epsilon
 
