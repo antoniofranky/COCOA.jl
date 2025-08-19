@@ -111,6 +111,7 @@ mutable struct StreamingCandidateFilter
     current_i::Int
     current_j::Int
     n_complexes::Int
+    iteration_count::Int  # Track total iterations for debugging
 
     # Core data
     complexes::Vector{Symbol}
@@ -146,7 +147,7 @@ mutable struct StreamingCandidateFilter
 
     # Control flags
     should_stop::Bool
-    max_candidates_hint::Int
+    # Note: transitivity filtering moved to batch processing stage for better effectiveness
 end
 
 function StreamingCandidateFilter(
@@ -156,8 +157,7 @@ function StreamingCandidateFilter(
     concordance_tracker::ConcordanceTracker;
     cv_threshold::Float64=0.01,
     cv_epsilon::Float64=1e-15,
-    min_valid_samples::Int=10,
-    max_candidates_hint::Int=1_000_000
+    min_valid_samples::Int=10
 )
     # Ensure BitVectors are allocated
     ensure_mask_allocated!(concordance_tracker, :balanced)
@@ -167,7 +167,7 @@ function StreamingCandidateFilter(
     n = length(complexes)
 
     StreamingCandidateFilter(
-        1, 2, n,  # Start at (1,2)
+        1, 2, n, 0,  # Start at (1,2), iteration_count=0
         complexes,
         concordance_tracker.balanced_mask,
         concordance_tracker.positive_mask,
@@ -180,7 +180,7 @@ function StreamingCandidateFilter(
         concordance_tracker.idx_to_id,
         0, 0, 0, 0, 0, 0, 0, 0,  # Original statistics counters
         0, 0,  # Enhanced transitivity tracking counters
-        false, max_candidates_hint
+        false
     )
 end
 
@@ -197,33 +197,39 @@ Base.IteratorSize(::StreamingCandidateFilter) = Base.SizeUnknown()
 
 function Base.iterate(filter::StreamingCandidateFilter, state=nothing)
     # Find next valid candidate
-    while filter.current_i < filter.n_complexes && !filter.should_stop  # Changed <= to <
+    while filter.current_i <= filter.n_complexes && !filter.should_stop
+        filter.iteration_count += 1
         i, j = filter.current_i, filter.current_j
 
-        # Process current pair BEFORE advancing
-        candidate = nothing
-        if i < filter.n_complexes && j <= filter.n_complexes  # Valid pair bounds
+        # Check bounds before processing
+        if i <= filter.n_complexes && j <= filter.n_complexes && i < j
+            # Process current pair BEFORE advancing
             candidate = process_pair(filter, i, j)
-        end
-
-        # Advance to next pair
-        filter.current_j += 1
-        if filter.current_j > filter.n_complexes
-            filter.current_i += 1
-            filter.current_j = filter.current_i + 1  # Reset j for new i
-        end
-
-        # Return candidate if found
-        if candidate !== nothing
-            filter.candidates_found += 1
-
-            # Optional early stopping based on candidate count
-            if filter.candidates_found >= filter.max_candidates_hint
-                @info "Reached candidate hint limit" count = filter.candidates_found
-                filter.should_stop = true
+            
+            # Advance to next pair
+            filter.current_j += 1
+            if filter.current_j > filter.n_complexes
+                filter.current_i += 1
+                filter.current_j = filter.current_i + 1  # Reset j for new i
             end
-
-            return (candidate, nothing)
+            
+            # Return candidate if found
+            if candidate !== nothing
+                filter.candidates_found += 1
+                return (candidate, nothing)
+            end
+        else
+            # Invalid bounds, advance to next valid position
+            filter.current_j += 1
+            if filter.current_j > filter.n_complexes
+                filter.current_i += 1
+                filter.current_j = filter.current_i + 1
+            end
+            
+            # Check if we've exhausted all pairs
+            if filter.current_i > filter.n_complexes
+                break
+            end
         end
     end
 
@@ -244,7 +250,9 @@ function Base.iterate(filter::StreamingCandidateFilter, state=nothing)
         pairs_missing_samples=filter.pairs_missing_samples,
         pairs_cv_filtered=filter.pairs_cv_filtered,
         insufficient_samples=filter.insufficient_samples,
-        cv_threshold=filter.cv_threshold
+        cv_threshold=filter.cv_threshold,
+        total_iterations=filter.iteration_count,
+        final_position=(filter.current_i, filter.current_j)
     )
     return nothing
 end
@@ -252,38 +260,44 @@ end
 """
 Process a single pair (i,j) and return PairCandidate if it passes all filters.
 Returns nothing if pair should be skipped.
+Optimized version with cached data access and reduced allocations.
 """
 function process_pair(filter::StreamingCandidateFilter, i::Int, j::Int)::Union{PairCandidate,Nothing}
     filter.pairs_tested += 1
 
-    # Early filtering checks (fast rejection)
+    # Early filtering checks (fast rejection) with @inbounds for performance
     @inbounds begin
-        # Skip if either complex is balanced
-        if filter.balanced[i] || filter.balanced[j]
+        # Cache balanced mask access
+        balanced_mask = filter.balanced
+        if balanced_mask[i] || balanced_mask[j]
             filter.pairs_balanced_filtered += 1
             return nothing
         end
 
-        # Skip trivial pairs
+        # Skip trivial pairs (optimized Set lookup)
         if (i, j) in filter.trivial_pairs
             filter.pairs_trivial_filtered += 1
             return nothing
         end
 
-        # Skip if already concordant/non-concordant (transitivity filtering)
-        if are_concordant(filter.concordance_tracker, i, j) || is_non_concordant(filter.concordance_tracker, i, j)
-            filter.pairs_concordant_filtered += 1
-            filter.pairs_skipped_by_transitivity += 1  # Enhanced transitivity tracking
-            return nothing
-        end
+        # Skip transitivity filtering at candidate generation stage.
+        # Transitivity filtering is more effective during batch processing
+        # when the concordance tracker has built up more relationships.
+        # Early filtering here can miss valid concordant pairs.
+        # 
+        # Note: pairs_concordant_filtered and pairs_skipped_by_transitivity
+        # remain at 0 to indicate no early transitivity filtering occurred.
 
-        # Get complex IDs and samples
-        c1_id = filter.idx_to_id[i]
-        c2_id = filter.idx_to_id[j]
+        # Cache complex IDs lookup
+        idx_to_id = filter.idx_to_id
+        c1_id = idx_to_id[i]
+        c2_id = idx_to_id[j]
     end
 
-    c1_samples = filter.samples_tree[c1_id]
-    c2_samples = filter.samples_tree[c2_id]
+    # Cache samples tree access
+    samples_tree = filter.samples_tree
+    c1_samples = samples_tree[c1_id]
+    c2_samples = samples_tree[c2_id]
 
     # Skip if samples missing
     if c1_samples === nothing || c2_samples === nothing
@@ -291,7 +305,7 @@ function process_pair(filter::StreamingCandidateFilter, i::Int, j::Int)::Union{P
         return nothing
     end
 
-    # Determine sample size
+    # Determine sample size and check minimum requirement
     n_samples = min(length(c1_samples), length(c2_samples))
     if n_samples < 2
         filter.pairs_missing_samples += 1
@@ -299,12 +313,16 @@ function process_pair(filter::StreamingCandidateFilter, i::Int, j::Int)::Union{P
     end
 
     # Reset and compute CV using OnlineStats with Welford's algorithm
-    empty!(filter.cv_stat)
+    cv_stat = filter.cv_stat  # Cache cv_stat reference
+    empty!(cv_stat)
+    
+    # Cache epsilon for faster access in tight loop
+    epsilon = filter.cv_epsilon
 
     @inbounds for k in 1:n_samples
-        ratio = (c1_samples[k] + filter.cv_epsilon) / (c2_samples[k] + filter.cv_epsilon)
+        ratio = (c1_samples[k] + epsilon) / (c2_samples[k] + epsilon)
         if isfinite(ratio)
-            fit!(filter.cv_stat, ratio)
+            fit!(cv_stat, ratio)
         end
     end
 
@@ -514,13 +532,11 @@ function create_chunked_streaming_filter(
     chunk_size::Int=10_000,
     cv_threshold::Float64=0.01,
     cv_epsilon::Float64=1e-15,
-    min_valid_samples::Int=10,
-    max_candidates_hint::Int=1_000_000
+    min_valid_samples::Int=10
 )::ChunkedStreamingFilter
     base_filter = StreamingCandidateFilter(
         complexes, trivial_pairs, samples_tree, concordance_tracker;
-        cv_threshold, cv_epsilon, min_valid_samples,
-        max_candidates_hint
+        cv_threshold, cv_epsilon, min_valid_samples
     )
 
     return ChunkedStreamingFilter(base_filter; chunk_size)
@@ -582,15 +598,13 @@ function create_disk_backed_filter(
     spillover_dir::String=tempdir(),
     cv_threshold::Float64=0.01,
     cv_epsilon::Float64=1e-15,
-    min_valid_samples::Int=10,
-    max_candidates_hint::Int=1_000_000_000  # 1B candidates
+    min_valid_samples::Int=10
 )::DiskBackedChunkedFilter
-    @info "Creating disk-backed filter for massive model" estimated_max_candidates = max_candidates_hint spillover_dir
+    @info "Creating disk-backed filter for massive model" spillover_dir
 
     base_filter = StreamingCandidateFilter(
         complexes, trivial_pairs, samples_tree, concordance_tracker;
-        cv_threshold, cv_epsilon, min_valid_samples,
-        max_candidates_hint
+        cv_threshold, cv_epsilon, min_valid_samples
     )
 
     return DiskBackedChunkedFilter(

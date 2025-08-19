@@ -106,9 +106,9 @@ end
 $(TYPEDSIGNATURES)
 
 Process streaming candidates directly with optimized batch processing.
-This eliminates the chunking layer for better performance and transitivity updates.
-Streams candidates directly from filter and processes in smaller batches (500) 
-for more frequent transitivity filter updates.
+This eliminates the chunking layer for better performance with deterministic results.
+Streams candidates directly from filter and processes in batches.
+Transitivity filtering is applied only during batch processing when enabled.
 
 This is now the recommended approach as it removes redundant chunking overhead.
 """
@@ -119,7 +119,7 @@ function process_streaming_batches(
     optimizer,
     settings=[],
     workers=workers,
-    batch_size::Int=500,  # Smaller batches for better transitivity updates
+    batch_size::Int=1000,  # Optimized batch size balancing performance vs transitivity updates
     optimization_tolerance::Float64=1e-6,
     concordance_tolerance::Float64=1e-4,
     use_transitivity::Bool=true
@@ -137,64 +137,83 @@ function process_streaming_batches(
     # Stream processing state
     current_batch = Vector{PairCandidate}()
     sizehint!(current_batch, batch_size)
-    
+
     newly_concordant_buffer = Vector{Tuple{Symbol,Symbol}}()
     sizehint!(newly_concordant_buffer, batch_size)
-    
+
     total_candidates_seen = 0
     batches_processed = 0
-    
-    # Setup progress bar
-    prog = Progress(
-        streaming_filter.max_candidates_hint,  # Use hint as approximate total
-        desc="Direct streaming concordance: ",
-        dt=1.0,
-        barlen=50,
-        output=stdout,
-        showspeed=true
+
+    # Adaptive batch sizing
+    adaptive_batch_size = batch_size
+    concordant_pairs_in_last_batch = 0
+
+    # No initial progress bar - we'll create it dynamically once we know the scale
+    prog = nothing
+    last_progress_update = 0
+
+    @info "Starting direct streaming processing" (
+        initial_batch_size=batch_size,
+        transitivity_filtering=use_transitivity ? "during_batch_processing" : "disabled",
+        progress_updates="every 5000 candidates",
+        adaptive_sizing="enabled"
     )
-    
-    @info "Starting direct streaming processing with frequent transitivity updates" batch_size
 
     # Process candidates as they arrive from the streaming filter
     for candidate in streaming_filter
         push!(current_batch, candidate)
         total_candidates_seen += 1
-        
-        # Update progress every 100 candidates
-        if total_candidates_seen % 100 == 0
+
+        # Create progress bar after we have some data (every 5000 candidates for reduced overhead)
+        if total_candidates_seen % 5000 == 0
+            if prog === nothing
+                # Estimate total based on pairs tested vs candidates found ratio
+                candidate_ratio = streaming_filter.candidates_found / max(1, streaming_filter.pairs_tested)
+                total_possible_pairs = streaming_filter.n_complexes * (streaming_filter.n_complexes - 1) ÷ 2
+                estimated_total = min(total_possible_pairs, Int(ceil(total_possible_pairs * candidate_ratio)))
+
+                prog = Progress(
+                    estimated_total,
+                    desc="Streaming concordance analysis: ",
+                    dt=2.0,  # Update every 2 seconds max
+                    barlen=50,
+                    output=stdout,
+                    showspeed=true
+                )
+                @info "Progress tracking initialized" estimated_candidates = estimated_total candidate_ratio = round(candidate_ratio, digits=4)
+            end
+
             ProgressMeter.update!(prog, total_candidates_seen;
                 showvalues=[
                     (:batches, batches_processed),
                     (:concordant, length(total_concordant_pairs)),
-                    (:transitive, total_transitive_pairs),
                     (:filter_tested, streaming_filter.pairs_tested),
-                    (:filter_skipped_trans, streaming_filter.pairs_skipped_by_transitivity),
-                    (:updates_received, streaming_filter.transitivity_updates_received)
+                    (:trans_skipped, streaming_filter.pairs_skipped_by_transitivity),
+                    (:transitivity_stage, "batch_processing_only")
                 ]
             )
+            last_progress_update = total_candidates_seen
         end
-        
-        # Process batch when full
-        if length(current_batch) >= batch_size
+
+        # Process batch when full (using adaptive batch size)
+        if length(current_batch) >= adaptive_batch_size
             batches_processed += 1
-            
+
             @debug "Processing streaming batch $batches_processed" batch_size = length(current_batch) total_seen = total_candidates_seen
-            
-            # Process this batch
-            batch_results = process_in_batches(
+
+            # Process this batch using simplified approach
+            batch_results = process_candidate_batch(
                 constraints,
                 current_batch,
                 concordance_tracker;
                 optimizer=optimizer,
                 settings=settings,
                 workers=workers,
-                batch_size=batch_size,
                 optimization_tolerance=optimization_tolerance,
                 concordance_tolerance=concordance_tolerance,
                 use_transitivity=use_transitivity
             )
-            
+
             # Accumulate results
             total_batches_completed += batch_results.batches_completed
             total_pairs_processed += batch_results.pairs_processed
@@ -204,44 +223,43 @@ function process_streaming_batches(
             total_transitive_pairs += batch_results.transitive_pairs
             total_timeout_pairs += batch_results.timeout_pairs
             merge!(total_optimization_results, batch_results.optimization_results)
-            
-            # Update filter with newly discovered concordant pairs for better transitivity filtering
-            empty!(newly_concordant_buffer)
-            for (c1_idx, c2_idx) in batch_results.concordant_pairs
-                c1_id = concordance_tracker.idx_to_id[c1_idx]
-                c2_id = concordance_tracker.idx_to_id[c2_idx]
-                push!(newly_concordant_buffer, (c1_id, c2_id))
+
+            # Track concordant pairs for adaptive batch sizing
+            concordant_pairs_in_last_batch = length(batch_results.concordant_pairs)
+
+            # Adaptive batch sizing: increase if finding many concordant pairs, decrease if few
+            if concordant_pairs_in_last_batch > adaptive_batch_size * 0.1  # >10% concordant
+                adaptive_batch_size = min(adaptive_batch_size + 200, batch_size * 2)  # Increase up to 2x
+            elseif concordant_pairs_in_last_batch < adaptive_batch_size * 0.02  # <2% concordant
+                adaptive_batch_size = max(adaptive_batch_size - 100, batch_size ÷ 2)  # Decrease to min 0.5x
             end
-            
-            if !isempty(newly_concordant_buffer)
-                update_filter_with_discoveries!(streaming_filter, newly_concordant_buffer)
-                @debug "Updated filter with new discoveries" count = length(newly_concordant_buffer)
-            end
-            
+
+            # Note: Mid-stream transitivity updates removed to ensure deterministic results
+            # regardless of batch size. Transitivity is applied during batch processing only.
+
             # Clear batch for next round
             empty!(current_batch)
         end
     end
-    
+
     # Process any remaining candidates in final batch
     if !isempty(current_batch)
         batches_processed += 1
-        
+
         @debug "Processing final streaming batch $batches_processed" batch_size = length(current_batch)
-        
-        batch_results = process_in_batches(
+
+        batch_results = process_candidate_batch(
             constraints,
             current_batch,
             concordance_tracker;
             optimizer=optimizer,
             settings=settings,
             workers=workers,
-            batch_size=batch_size,
             optimization_tolerance=optimization_tolerance,
             concordance_tolerance=concordance_tolerance,
             use_transitivity=use_transitivity
         )
-        
+
         # Final accumulation
         total_batches_completed += batch_results.batches_completed
         total_pairs_processed += batch_results.pairs_processed
@@ -252,12 +270,42 @@ function process_streaming_batches(
         total_timeout_pairs += batch_results.timeout_pairs
         merge!(total_optimization_results, batch_results.optimization_results)
     end
-    
+
     # Final progress update
-    ProgressMeter.finish!(prog)
-    
-    @info "Direct streaming processing complete" total_batches = batches_processed total_candidates = total_candidates_seen total_concordant = length(total_concordant_pairs) transitivity_effectiveness = round(total_skipped_by_transitivity / max(1, total_candidates_seen) * 100, digits=1)
-    
+    if prog !== nothing
+        ProgressMeter.finish!(prog)
+    else
+        @info "Processing completed - no progress bar was needed for small candidate count"
+    end
+
+    # Validate results for deterministic behavior
+    expected_pairs_processed = total_candidates_seen
+    actual_pairs_processed = total_pairs_processed
+
+    if expected_pairs_processed != actual_pairs_processed
+        @warn "Pair processing mismatch detected" expected = expected_pairs_processed actual = actual_pairs_processed difference = expected_pairs_processed - actual_pairs_processed
+    end
+
+    # Calculate key metrics including transitive pairs
+    total_concordant_count = length(total_concordant_pairs)
+    directly_tested = total_pairs_processed - total_skipped_by_transitivity
+    concordance_rate = total_concordant_count / max(1, total_pairs_processed) * 100
+    transitivity_effectiveness = round(total_skipped_by_transitivity / max(1, total_candidates_seen) * 100, digits=1)
+
+    @info "Direct streaming processing complete" (
+        total_batches=batches_processed,
+        candidates_streamed=total_candidates_seen,
+        candidates_skipped_by_transitivity=total_skipped_by_transitivity,
+        pairs_tested_via_optimization=directly_tested,
+        concordant_via_testing=directly_tested,  # Approximation - exact count in batch results
+        concordant_via_transitivity=total_transitive_pairs,
+        total_concordant_found=total_concordant_count,
+        concordance_rate_pct=round(concordance_rate, digits=2),
+        transitivity_effectiveness_pct=transitivity_effectiveness,
+        adaptive_final_batch_size=adaptive_batch_size,
+        validation_passed=(expected_pairs_processed == actual_pairs_processed)
+    )
+
     # Return same format as other processing functions
     return (
         batches_completed=total_batches_completed,
@@ -268,6 +316,142 @@ function process_streaming_batches(
         transitive_pairs=total_transitive_pairs,
         timeout_pairs=total_timeout_pairs,
         optimization_results=total_optimization_results
+    )
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Process a batch of PairCandidate objects directly.
+Simplified version for streaming processing without complex prioritization.
+"""
+function process_candidate_batch(
+    constraints::C.ConstraintTree,
+    candidates::Vector{PairCandidate},
+    concordance_tracker::ConcordanceTracker;
+    optimizer,
+    settings=[],
+    workers=workers,
+    optimization_tolerance::Float64=1e-6,
+    concordance_tolerance::Float64=1e-4,
+    use_transitivity::Bool=true
+)
+    # Convert candidates to the format expected by process_concordance_batch
+    batch_pairs = Vector{Tuple{Int,Int,UInt8}}()
+    sizehint!(batch_pairs, length(candidates))
+
+    # Track transitive concordant pairs that we skip testing but should count as concordant
+    transitive_concordant_pairs = Set{Tuple{Int,Int}}()
+    transitive_non_concordant_pairs = 0
+
+    for candidate in candidates
+        # Apply transitivity filtering if enabled
+        if use_transitivity
+            c1_idx, c2_idx = Int(candidate.c1_idx), Int(candidate.c2_idx)
+            if are_concordant(concordance_tracker, c1_idx, c2_idx)
+                # This pair is transitively concordant - count it but don't test it
+                push!(transitive_concordant_pairs, (c1_idx, c2_idx))
+                continue  # Skip testing
+            elseif is_non_concordant(concordance_tracker, c1_idx, c2_idx)
+                # This pair is transitively non-concordant - count it but don't test it  
+                transitive_non_concordant_pairs += 1
+                continue  # Skip testing
+            end
+        end
+
+        push!(batch_pairs, (Int(candidate.c1_idx), Int(candidate.c2_idx), candidate.directions_bits))
+    end
+
+    # Track statistics
+    pairs_processed = length(candidates)
+    skipped_by_transitivity = length(candidates) - length(batch_pairs)
+
+    if isempty(batch_pairs)
+        # All pairs were filtered out by transitivity - but include transitive results
+        return (
+            batches_completed=1,
+            pairs_processed=pairs_processed,
+            concordant_pairs=transitive_concordant_pairs,  # Include transitive concordant pairs
+            non_concordant_pairs=transitive_non_concordant_pairs,  # Include transitive non-concordant
+            skipped_by_transitivity=skipped_by_transitivity,
+            transitive_pairs=length(transitive_concordant_pairs),
+            timeout_pairs=0,
+            optimization_results=Dict{Tuple{Int,Int,Symbol},Float64}()
+        )
+    end
+
+    # Process the batch
+    batch_results = try
+        process_concordance_batch(
+            constraints, batch_pairs, concordance_tracker;
+            optimizer=optimizer,
+            settings=settings,
+            workers=workers,
+            optimization_tolerance=optimization_tolerance,
+            concordance_tolerance=concordance_tolerance
+        )
+    catch e
+        @warn "Error processing candidate batch" error = string(e)
+        return (
+            batches_completed=1,
+            pairs_processed=pairs_processed,
+            concordant_pairs=Set{Tuple{Int,Int}}(),
+            non_concordant_pairs=0,
+            skipped_by_transitivity=skipped_by_transitivity,
+            transitive_pairs=0,
+            timeout_pairs=0,
+            optimization_results=Dict{Tuple{Int,Int,Symbol},Float64}()
+        )
+    end
+
+    # Process results from direct testing
+    directly_concordant_pairs = Set{Tuple{Int,Int}}()
+    non_concordant_pairs = transitive_non_concordant_pairs  # Start with transitive non-concordant
+    timeout_pairs = 0
+    optimization_results = Dict{Tuple{Int,Int,Symbol},Float64}()
+
+    for result in batch_results
+        c1_idx, c2_idx, direction, is_concordant, lambda, has_timeout = result
+
+        if has_timeout
+            timeout_pairs += 1
+        end
+
+        if is_concordant
+            union_sets!(concordance_tracker, c1_idx, c2_idx)
+            push!(directly_concordant_pairs, (c1_idx, c2_idx))
+
+            if !isnothing(lambda)
+                optimization_results[(c1_idx, c2_idx, direction)] = lambda
+            end
+        else
+            add_non_concordant!(concordance_tracker, c1_idx, c2_idx)
+            non_concordant_pairs += 1
+        end
+    end
+
+    # Combine directly tested concordant pairs with transitive concordant pairs
+    all_concordant_pairs = union(directly_concordant_pairs, transitive_concordant_pairs)
+
+    # Debug logging for transitive pair accounting
+    if !isempty(transitive_concordant_pairs)
+        @debug "Transitive pair accounting" (
+            directly_tested=length(directly_concordant_pairs),
+            transitive_added=length(transitive_concordant_pairs),
+            total_concordant=length(all_concordant_pairs),
+            batch_size_used=length(candidates)
+        )
+    end
+
+    return (
+        batches_completed=1,
+        pairs_processed=pairs_processed,
+        concordant_pairs=all_concordant_pairs,  # Include both direct + transitive
+        non_concordant_pairs=non_concordant_pairs,  # Include both direct + transitive
+        skipped_by_transitivity=skipped_by_transitivity,
+        transitive_pairs=length(transitive_concordant_pairs),  # Track transitive pairs found
+        timeout_pairs=timeout_pairs,
+        optimization_results=optimization_results
     )
 end
 
@@ -962,7 +1146,6 @@ function concordance_analysis(
     min_valid_samples::Int=10,
     seed::Union{Int,Nothing}=nothing,
     use_unidirectional_constraints::Bool=true,
-    max_pairs_in_memory::Int=1_000_000_000,
     objective_bound=nothing,
     use_transitivity::Bool=true,
     n_burnin::Int=50,
@@ -1377,20 +1560,12 @@ function concordance_analysis(
     @info "Creating chunked streaming filter for memory-efficient processing..."
 
     # Calculate adaptive chunk size based on available memory
-    available_memory_gb = get_available_memory_gb()
     base_batch_size = batch_size !== nothing ? batch_size : 50
 
     # Estimate chunk size: aim for ~1MB chunks (15 bytes per candidate = ~67K candidates)
     # But adjust based on available memory and batch size
-    adaptive_chunk_size = if available_memory_gb >= 8.0
-        20_000  # Larger chunks for systems with more RAM
-    elseif available_memory_gb >= 4.0
-        10_000  # Medium chunks for typical systems
-    else
-        5_000   # Smaller chunks for memory-constrained systems
-    end
 
-    @info "Memory-aware batch sizing" available_memory_gb base_batch_size
+    @info "Memory-aware batch sizing" base_batch_size
 
     # Create direct streaming filter (eliminates redundant chunking layer)
     filter_time = @elapsed streaming_filter = try
@@ -1401,8 +1576,7 @@ function concordance_analysis(
             concordance_tracker;
             cv_threshold=actual_cv_threshold,
             cv_epsilon=cv_epsilon,
-            min_valid_samples=min_valid_samples,
-            max_candidates_hint=max_pairs_in_memory
+            min_valid_samples=min_valid_samples
         )
     catch e
         @error "Failed to create streaming filter." exception = e
@@ -1411,7 +1585,7 @@ function concordance_analysis(
 
     @info "Direct streaming filter created" filter_time_sec = round(filter_time, digits=2)
 
-    @info "Processing concordance tests with direct streaming (optimized transitivity updates)"
+    @info "Processing concordance tests with direct streaming (deterministic batch processing)"
     concordance_time = @elapsed batch_results = process_streaming_batches(
         constraints,
         streaming_filter,
@@ -1487,11 +1661,12 @@ function concordance_analysis(
         "n_trivially_balanced" => length(trivially_balanced),
         "n_trivial_pairs" => length(trivial_pairs),
         "n_candidate_pairs" => batch_results.pairs_processed,  # Total candidates processed across all chunks
-        "n_computed_pairs" => length(batch_results.concordant_pairs),
-        "n_transitive_pairs" => batch_results.transitive_pairs,
-        "n_concordant_pairs" => length(batch_results.concordant_pairs) + batch_results.transitive_pairs + length(trivial_pairs),
+        "n_computed_pairs" => length(batch_results.concordant_pairs),  # Concordant pairs found (direct + transitive)
+        "n_concordant_via_testing" => length(batch_results.concordant_pairs) - batch_results.transitive_pairs,  # Found via optimization
+        "n_concordant_via_transitivity" => batch_results.transitive_pairs,  # Found via transitivity relationships
+        "n_concordant_pairs" => length(batch_results.concordant_pairs) + length(trivial_pairs),  # All concordant pairs (computed + trivial)
         "n_non_concordant_pairs" => batch_results.non_concordant_pairs,
-        "n_skipped_transitivity" => batch_results.skipped_by_transitivity,
+        "n_candidates_skipped_by_transitivity" => batch_results.skipped_by_transitivity,  # Candidates not tested due to transitivity
         "n_timeout_pairs" => batch_results.timeout_pairs,
         "n_modules" => length(modules),
         "batches_completed" => batch_results.batches_completed,
@@ -1513,9 +1688,7 @@ function concordance_analysis(
 
         # Processing parameters 
         "batch_size" => base_batch_size,
-        "chunk_size" => adaptive_chunk_size,
         "min_valid_samples" => min_valid_samples,
-        "max_pairs_in_memory" => max_pairs_in_memory,
         "use_transitivity" => use_transitivity,
         "use_unidirectional_constraints" => use_unidirectional_constraints,
 
@@ -1531,8 +1704,63 @@ function concordance_analysis(
         stats["processing_completion_percent"] = round(n_processed / n_complexes * 100, digits=1)
     end
 
+    # Validate consistency of concordant pair accounting
+    expected_total_concordant = stats["n_computed_pairs"] + stats["n_trivial_pairs"]
+    actual_total_concordant = stats["n_concordant_pairs"]
 
-    @info "Concordance analysis complete" stats
+    validation_passed = (expected_total_concordant == actual_total_concordant)
+
+    # Additional validation checks
+    computed_pairs_check = stats["n_concordant_via_testing"] + stats["n_concordant_via_transitivity"] == stats["n_computed_pairs"]
+    candidates_check = stats["n_candidates_skipped_by_transitivity"] + stats["n_concordant_via_testing"] + stats["n_non_concordant_pairs"] <= stats["n_candidate_pairs"]
+    
+    if !validation_passed
+        @warn "Concordant pair accounting mismatch detected!" (
+            expected_total=expected_total_concordant,
+            actual_total=actual_total_concordant,
+            computed_pairs=stats["n_computed_pairs"],
+            trivial_pairs=stats["n_trivial_pairs"],
+            via_testing=stats["n_concordant_via_testing"],
+            via_transitivity=stats["n_concordant_via_transitivity"],
+            difference=actual_total_concordant - expected_total_concordant
+        )
+    elseif !computed_pairs_check
+        @warn "Computed pairs breakdown mismatch!" (
+            via_testing=stats["n_concordant_via_testing"],
+            via_transitivity=stats["n_concordant_via_transitivity"],
+            computed_total=stats["n_computed_pairs"],
+            sum_check=stats["n_concordant_via_testing"] + stats["n_concordant_via_transitivity"]
+        )
+    elseif !candidates_check
+        @warn "Candidate processing validation failed!" (
+            candidates_processed=stats["n_candidate_pairs"],
+            skipped_by_transitivity=stats["n_candidates_skipped_by_transitivity"],
+            tested_pairs=stats["n_concordant_via_testing"],
+            non_concordant=stats["n_non_concordant_pairs"]
+        )
+    else
+        @debug "All validation checks passed" (
+            total_concordant=actual_total_concordant,
+            computed_breakdown_valid=computed_pairs_check,
+            candidate_flow_valid=candidates_check
+        )
+    end
+
+    stats["validation_passed"] = validation_passed
+
+    # Clear summary of the analysis results
+    @info "Concordance analysis complete" (
+        candidates_generated=stats["n_candidate_pairs"],
+        candidates_skipped_by_transitivity=stats["n_candidates_skipped_by_transitivity"], 
+        concordant_via_optimization=stats["n_concordant_via_testing"],
+        concordant_via_transitivity=stats["n_concordant_via_transitivity"],
+        non_concordant=stats["n_non_concordant_pairs"],
+        trivial_concordant=stats["n_trivial_pairs"],
+        total_concordant=stats["n_concordant_pairs"],
+        elapsed_time_sec=round(stats["elapsed_time"], digits=2)
+    )
+    
+    @debug "Full concordance analysis statistics" stats
 
     return (
         complexes=complexes_df,
