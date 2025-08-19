@@ -1,4 +1,4 @@
-using COCOA, COBREXA, HiGHS, SBMLFBCModels, Distributed, JSON
+using COCOA, COBREXA, HiGHS, SBMLFBCModels, Distributed, JSON, AbstractFBCModels
 @everywhere using COCOA, HiGHS
 
 # Get array task ID from command line argument

@@ -26,7 +26,7 @@ end
 """
 Optimized version that avoids deepcopy and excessive allocations.
 """
-function split_reversible_reactions_optimized!(model::CM.Model)
+function split_reversible_reactions!(model::CM.Model)
     # Collect reversible reactions first (can't modify while iterating)
     reversible_rxns = Tuple{String,CM.Reaction}[]
     sizehint!(reversible_rxns, length(model.reactions) ÷ 2)  # Pre-allocate
@@ -72,7 +72,7 @@ function split_reversible_reactions_optimized!(model::CM.Model)
         # Replace original with forward/backward pair
         delete!(model.reactions, rid)
         model.reactions["$(rid)_f"] = fwd_rxn
-        model.reactions["$(rid)_b"] = bwd_rxn
+        model.reactions["$(rid)_r"] = bwd_rxn
     end
 end
 

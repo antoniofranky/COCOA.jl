@@ -19,10 +19,10 @@ println("Processing model $task_id/$(length(model_files)): $(basename(f))")
 
 try
     model = load_model(f)
-    model_splt = split_into_elementary_steps(model)
+    model_splt = split_into_elementary_steps(model, seed=42, normalize_bounds=true)
     model_splt_prpd = prepare_model_for_concordance(model_splt, optimizer=HiGHS.Optimizer)
     model_conv = convert(SBMLFBCModels.SBMLFBCModel, model_splt_prpd)
-    save_model(model_conv, "/work/schaffran1/toolbox/prpd_models/$(splitext(basename(f))[1]).xml")
+    save_model(model_conv, "/work/schaffran1/toolbox/prepared_models/$(splitext(basename(f))[1]).xml")
     println("Successfully processed: $(basename(f))")
 catch e
     println("Error processing $(basename(f)): $e")
