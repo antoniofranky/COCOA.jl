@@ -225,17 +225,17 @@ function split_into_elementary_steps(
 
     @info "Split $(length(work_model.reactions)) reactions into $(length(elementary_model.reactions)) elementary steps"
     @info "Created $(length(enzyme_registry)) enzymes and $(length(intermediate_registry)) intermediate complexes"
+    validate_split_model(model, exported_model)
 
     # Convert to requested output type
     exported_model = convert(output_type, elementary_model)
-
     # Fix objective after conversion if we converted to SBML
     if output_type == SBMLFBCModels.SBMLFBCModel
         exported_model = fix_objective_after_conversion(exported_model)
     end
 
     # Validate model integrity
-    validate_split_model(model, exported_model)
+
 
     return exported_model
 end
