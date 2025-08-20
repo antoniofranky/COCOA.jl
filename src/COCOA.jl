@@ -78,6 +78,7 @@ using .ElementarySteps
 using .ModelPreparation
 
 # Include main modules
+include("memory_optimization.jl")
 include("data_structures.jl")
 include("constraints.jl")
 include("filter.jl")

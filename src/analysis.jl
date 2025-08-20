@@ -124,15 +124,16 @@ function process_streaming_batches(
     concordance_tolerance::Float64=1e-4,
     use_transitivity::Bool=true
 )
-    # Track results
+    # Track results using memory-efficient accumulator
+    n_complexes = concordance_tracker !== nothing ? length(concordance_tracker.idx_to_id) : 1000
+    accumulator = BatchResultAccumulator(n_complexes)
+    
+    # Initialize memory monitoring
+    memory_monitor = MemoryMonitor()
+    
+    # Track additional stats
     total_batches_completed = 0
     total_pairs_processed = 0
-    total_concordant_pairs = Set{Tuple{Int,Int}}()
-    total_non_concordant_pairs = 0
-    total_skipped_by_transitivity = 0
-    total_transitive_pairs = 0
-    total_timeout_pairs = 0
-    total_optimization_results = Dict{Tuple{Int,Int,Symbol},Float64}()
 
     # Stream processing state
     current_batch = Vector{PairCandidate}()
@@ -198,6 +199,11 @@ function process_streaming_batches(
 
             @debug "Processing streaming batch $batches_processed" batch_size = length(current_batch) total_seen = total_candidates_seen
 
+            # Clear module cache before processing to prevent memory buildup
+            if isa(concordance_tracker, ConcordanceTracker)
+                clear_module_cache!(concordance_tracker)
+            end
+
             # Process this batch using simplified approach
             batch_results = process_candidate_batch(
                 constraints,
@@ -211,24 +217,38 @@ function process_streaming_batches(
                 use_transitivity=use_transitivity
             )
 
-            # Accumulate results
+            # Accumulate results efficiently
             total_batches_completed += batch_results.batches_completed
             total_pairs_processed += batch_results.pairs_processed
-            union!(total_concordant_pairs, batch_results.concordant_pairs)
-            total_non_concordant_pairs += batch_results.non_concordant_pairs
-            total_skipped_by_transitivity += batch_results.skipped_by_transitivity
-            total_transitive_pairs += batch_results.transitive_pairs
-            total_timeout_pairs += batch_results.timeout_pairs
-            merge!(total_optimization_results, batch_results.optimization_results)
+            accumulate_results!(
+                accumulator,
+                batch_results.concordant_pairs,
+                batch_results.non_concordant_pairs,
+                batch_results.timeout_pairs,
+                batch_results.transitive_pairs,
+                batch_results.skipped_by_transitivity,
+                batch_results.optimization_results
+            )
 
             # Track concordant pairs for adaptive batch sizing
             concordant_pairs_in_last_batch = length(batch_results.concordant_pairs)
 
-            # Adaptive batch sizing: increase if finding many concordant pairs, decrease if few
+            # Adaptive batch sizing based on both concordance rate and memory pressure
             if concordant_pairs_in_last_batch > adaptive_batch_size * 0.1  # >10% concordant
-                adaptive_batch_size = min(adaptive_batch_size + 200, batch_size * 2)  # Increase up to 2x
+                suggested_size = suggest_batch_size(memory_monitor, adaptive_batch_size)
+                adaptive_batch_size = min(suggested_size + 200, batch_size * 2)  # Increase up to 2x
             elseif concordant_pairs_in_last_batch < adaptive_batch_size * 0.02  # <2% concordant
-                adaptive_batch_size = max(adaptive_batch_size - 100, batch_size ÷ 2)  # Decrease to min 0.5x
+                suggested_size = suggest_batch_size(memory_monitor, adaptive_batch_size)
+                adaptive_batch_size = max(suggested_size - 100, batch_size ÷ 2)  # Decrease to min 0.5x
+            else
+                # Check memory pressure even when concordance rate is normal
+                adaptive_batch_size = suggest_batch_size(memory_monitor, adaptive_batch_size)
+            end
+            
+            # Log memory stats periodically
+            if batches_processed % 10 == 0
+                current_mem = check_memory!(memory_monitor)
+                @debug "Memory status" batch=batches_processed memory_gb=current_mem peak_gb=memory_monitor.peak_memory gc_time=memory_monitor.gc_time
             end
 
             # Note: Mid-stream transitivity updates removed to ensure deterministic results
@@ -260,12 +280,15 @@ function process_streaming_batches(
         # Final accumulation
         total_batches_completed += batch_results.batches_completed
         total_pairs_processed += batch_results.pairs_processed
-        union!(total_concordant_pairs, batch_results.concordant_pairs)
-        total_non_concordant_pairs += batch_results.non_concordant_pairs
-        total_skipped_by_transitivity += batch_results.skipped_by_transitivity
-        total_transitive_pairs += batch_results.transitive_pairs
-        total_timeout_pairs += batch_results.timeout_pairs
-        merge!(total_optimization_results, batch_results.optimization_results)
+        accumulate_results!(
+            accumulator,
+            batch_results.concordant_pairs,
+            batch_results.non_concordant_pairs,
+            batch_results.timeout_pairs,
+            batch_results.transitive_pairs,
+            batch_results.skipped_by_transitivity,
+            batch_results.optimization_results
+        )
     end
 
     # Final progress update
@@ -284,35 +307,51 @@ function process_streaming_batches(
     end
 
     # Calculate key metrics including transitive pairs
-    total_concordant_count = length(total_concordant_pairs)
-    directly_tested = total_pairs_processed - total_skipped_by_transitivity
+    total_concordant_count = accumulator.concordant_pairs.n_pairs
+    directly_tested = total_pairs_processed - accumulator.skipped_count
     concordance_rate = total_concordant_count / max(1, total_pairs_processed) * 100
-    transitivity_effectiveness = round(total_skipped_by_transitivity / max(1, total_candidates_seen) * 100, digits=1)
+    transitivity_effectiveness = round(accumulator.skipped_count / max(1, total_candidates_seen) * 100, digits=1)
 
+    # Final memory report
+    final_memory = check_memory!(memory_monitor)
+    memory_used = memory_monitor.peak_memory - memory_monitor.initial_memory
+    
     @info "Direct streaming processing complete" (
         total_batches=batches_processed,
         candidates_streamed=total_candidates_seen,
-        candidates_skipped_by_transitivity=total_skipped_by_transitivity,
+        candidates_skipped_by_transitivity=accumulator.skipped_count,
         pairs_tested_via_optimization=directly_tested,
         concordant_via_testing=directly_tested,  # Approximation - exact count in batch results
-        concordant_via_transitivity=total_transitive_pairs,
+        concordant_via_transitivity=accumulator.transitive_count,
         total_concordant_found=total_concordant_count,
         concordance_rate_pct=round(concordance_rate, digits=2),
         transitivity_effectiveness_pct=transitivity_effectiveness,
         adaptive_final_batch_size=adaptive_batch_size,
-        validation_passed=(expected_pairs_processed == actual_pairs_processed)
+        validation_passed=(expected_pairs_processed == actual_pairs_processed),
+        peak_memory_gb=round(memory_monitor.peak_memory, digits=2),
+        memory_used_gb=round(memory_used, digits=2),
+        gc_time_sec=round(memory_monitor.gc_time, digits=2)
     )
 
-    # Return same format as other processing functions
+    # Return same format as other processing functions (convert to compatible types)
+    # Convert SparseConcordantPairs to Set for backward compatibility
+    concordant_set = to_set(accumulator.concordant_pairs)
+    
+    # Convert optimization results vector to Dict
+    opt_results_dict = Dict{Tuple{Int,Int,Symbol},Float64}()
+    for (i, j, dir, val) in accumulator.optimization_results
+        opt_results_dict[(i, j, dir)] = val
+    end
+    
     return (
         batches_completed=total_batches_completed,
         pairs_processed=total_pairs_processed,
-        concordant_pairs=total_concordant_pairs,
-        non_concordant_pairs=total_non_concordant_pairs,
-        skipped_by_transitivity=total_skipped_by_transitivity,
-        transitive_pairs=total_transitive_pairs,
-        timeout_pairs=total_timeout_pairs,
-        optimization_results=total_optimization_results
+        concordant_pairs=concordant_set,
+        non_concordant_pairs=accumulator.non_concordant_count,
+        skipped_by_transitivity=accumulator.skipped_count,
+        transitive_pairs=accumulator.transitive_count,
+        timeout_pairs=accumulator.timeout_count,
+        optimization_results=opt_results_dict
     )
 end
 
@@ -892,7 +931,8 @@ $(TYPEDSIGNATURES)
 Helper function to process optimization results into the expected format.
 """
 # Define concrete types for better type stability
-const OptValue = Union{Float64,Nothing}
+# Use NaN as sentinel value instead of Nothing for better performance
+const OptValue = Float64  # NaN represents missing/invalid values
 const TestResult = Tuple{OptValue,OptValue,Bool}  # (min_val, max_val, timeout)
 const DirectionResult = Tuple{Symbol,TestResult}  # (direction, test_result)
 
@@ -963,8 +1003,8 @@ function process_optimization_results(optimization_results, batch_pairs, concord
             pair_results_dict[key] = DirectionResult[]
         end
 
-        min_result = get(minmax_results, -1, (nothing, false))
-        max_result = get(minmax_results, +1, (nothing, false))
+        min_result = get(minmax_results, -1, (NaN, false))
+        max_result = get(minmax_results, +1, (NaN, false))
         min_val, min_timeout = min_result
         max_val, max_timeout = max_result
 
@@ -1038,15 +1078,15 @@ function process_concordance_batch(
 
                 optimize!(om)
 
-                # Get result
+                # Get result (use NaN for invalid/missing values)
                 raw_value = if termination_status(om) in (OPTIMAL, LOCALLY_SOLVED) && is_solved_and_feasible(om)
                     objective_value(om)
                 else
-                    nothing
+                    NaN
                 end
 
                 # Convert back: if we maximized -f(x), negate result to get min f(x)
-                actual_value = dir_multiplier == -1 ? (raw_value !== nothing ? -raw_value : nothing) : raw_value
+                actual_value = dir_multiplier == -1 ? (!isnan(raw_value) ? -raw_value : NaN) : raw_value
 
                 # Cleanup
                 delete(om, c2_constraint)
@@ -1055,7 +1095,7 @@ function process_concordance_batch(
                 return (c1_id, c2_id, direction, dir_multiplier, actual_value, termination_status(om) == TIME_LIMIT)
             catch e
                 @warn "Optimization error" c1_id c2_id direction error = string(e)
-                return (c1_id, c2_id, direction, dir_multiplier, nothing, false)
+                return (c1_id, c2_id, direction, dir_multiplier, NaN, false)
             end
         end,
         constraints,
@@ -1073,7 +1113,7 @@ function process_concordance_batch(
         c1_idx, c2_idx, original_directions_bits = batch_pairs[i]
 
         all_concordant = true
-        final_lambda = nothing
+        final_lambda = NaN
         concordant_directions = Set{Symbol}()
         has_timeout = false
 
@@ -1089,12 +1129,12 @@ function process_concordance_batch(
                     has_timeout = true
                 end
 
-                if min_val === nothing || max_val === nothing || abs(min_val - max_val) > concordance_tolerance
+                if isnan(min_val) || isnan(max_val) || abs(min_val - max_val) > concordance_tolerance
                     all_concordant = false
                     break
                 else
                     push!(concordant_directions, direction)
-                    if isnothing(final_lambda)
+                    if isnan(final_lambda)
                         final_lambda = min_val
                     end
                 end
@@ -1115,7 +1155,7 @@ function process_concordance_batch(
             :both
         end
 
-        push!(final_results, (c1_idx, c2_idx, final_direction, all_concordant, all_concordant ? final_lambda : nothing, has_timeout))
+        push!(final_results, (c1_idx, c2_idx, final_direction, all_concordant, all_concordant ? final_lambda : NaN, has_timeout))
     end
 
     return final_results
