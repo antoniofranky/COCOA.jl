@@ -9,8 +9,8 @@ using OnlineStats
 using OnlineStatsBase
 using Statistics
 using DocStringExtensions
-using Mmap
 import ConstraintTrees as C
+import Base: push!, length, isempty, popfirst!
 
 # ========================================================================================
 # Section 1: Core Data Structures (Minimal & Efficient)
@@ -47,6 +47,66 @@ end
     # Negative direction feasible if c2 not constrained to positive only  
     !positive[c2_idx] && (bits |= DIRECTION_NEGATIVE)
     return bits
+end
+
+# ========================================================================================
+# Circular Buffer for Streaming
+# ========================================================================================
+
+"""
+Circular buffer for efficient streaming without reallocations.
+"""
+mutable struct CircularBuffer{T}
+    data::Vector{T}
+    capacity::Int
+    size::Int
+    head::Int
+    tail::Int
+
+    function CircularBuffer{T}(capacity::Int) where T
+        new(Vector{T}(undef, capacity), capacity, 0, 1, 1)
+    end
+end
+
+@inline function push!(buf::CircularBuffer{T}, item::T) where T
+    if buf.size < buf.capacity
+        buf.data[buf.tail] = item
+        buf.tail = mod1(buf.tail + 1, buf.capacity)
+        buf.size += 1
+    else
+        # Overwrite oldest
+        buf.data[buf.tail] = item
+        buf.tail = mod1(buf.tail + 1, buf.capacity)
+        buf.head = mod1(buf.head + 1, buf.capacity)
+    end
+end
+
+@inline function popfirst!(buf::CircularBuffer{T})::T where T
+    if buf.size == 0
+        throw(BoundsError("Buffer is empty"))
+    end
+    item = buf.data[buf.head]
+    buf.head = mod1(buf.head + 1, buf.capacity)
+    buf.size -= 1
+    return item
+end
+
+@inline isempty(buf::CircularBuffer) = buf.size == 0
+@inline length(buf::CircularBuffer) = buf.size
+
+"""
+Get all items as a view without copying.
+"""
+function view_all(buf::CircularBuffer{T})::SubArray{T} where T
+    if buf.size == 0
+        return view(buf.data, 1:0)
+    elseif buf.head <= buf.tail - 1
+        return view(buf.data, buf.head:buf.tail-1)
+    else
+        # Wrapped around - need to handle separately
+        # For now, return first contiguous segment
+        return view(buf.data, buf.head:buf.capacity)
+    end
 end
 
 """
@@ -327,11 +387,6 @@ function process_pair(filter::StreamingCandidateFilter, i::Int, j::Int)::Union{P
 
     cv, n_valid = compute_cv(filter.cv_stat, filter.cv_epsilon)
 
-    # Debug: Log first few CV calculations 
-    if filter.pairs_tested <= 10  # Log first 10 pairs regardless of CV
-        mean_ratio = mean(filter.cv_stat)
-        @info "CV debug" i j c1_id c2_id cv n_samples n_valid mean_ratio
-    end
 
     # Track insufficient samples but include in candidates
     if n_valid < filter.min_valid_samples
@@ -391,201 +446,6 @@ function signal_early_stop!(filter::StreamingCandidateFilter, reason::String="ex
 end
 
 
-# ========================================================================================
-# Section 6: Chunked Streaming Architecture 
-# ========================================================================================
-
-"""
-Chunked streaming wrapper that provides true constant-memory processing.
-Yields chunks of candidates instead of collecting all into memory.
-
-This enables processing of unlimited candidates with memory usage limited only by chunk size,
-making it suitable for both personal computers and HPC clusters.
-"""
-struct ChunkedStreamingFilter{T<:AbstractVector{PairCandidate}}
-    base_filter::StreamingCandidateFilter
-    chunk_size::Int
-    chunk_buffer::T
-
-    function ChunkedStreamingFilter(
-        base_filter::StreamingCandidateFilter;
-        chunk_size::Int=10_000,
-        chunk_type::Type{T}=Vector{PairCandidate}
-    ) where {T<:AbstractVector{PairCandidate}}
-        buffer = chunk_type(undef, 0)
-        sizehint!(buffer, chunk_size)
-        new{typeof(buffer)}(base_filter, chunk_size, buffer)
-    end
-end
-
-"""
-Iterator state for ChunkedStreamingFilter.
-Tracks current position in the underlying filter.
-"""
-mutable struct ChunkedStreamingState
-    filter_state::Union{Nothing,Any}
-    chunk_buffer::Vector{PairCandidate}
-    buffer_pos::Int
-    is_exhausted::Bool
-end
-
-Base.eltype(::ChunkedStreamingFilter) = Vector{PairCandidate}
-Base.IteratorSize(::ChunkedStreamingFilter) = Base.SizeUnknown()
-
-"""
-Iterator implementation for ChunkedStreamingFilter.
-Returns chunks of candidates with constant memory usage.
-"""
-function Base.iterate(chunked_filter::ChunkedStreamingFilter, state::Union{Nothing,ChunkedStreamingState}=nothing)
-    # Initialize state on first call
-    if state === nothing
-        buffer = similar(chunked_filter.chunk_buffer, 0)
-        sizehint!(buffer, chunked_filter.chunk_size)
-        state = ChunkedStreamingState(nothing, buffer, 1, false)
-    end
-
-    # Return nothing if already exhausted
-    state.is_exhausted && return nothing
-
-    # Clear buffer for next chunk
-    empty!(state.chunk_buffer)
-
-    # Fill chunk buffer
-    candidates_collected = 0
-    while candidates_collected < chunked_filter.chunk_size
-        result = Base.iterate(chunked_filter.base_filter, state.filter_state)
-
-        if result === nothing
-            # Base filter is exhausted
-            state.is_exhausted = true
-            break
-        end
-
-        candidate, new_filter_state = result
-        state.filter_state = new_filter_state
-
-        push!(state.chunk_buffer, candidate)
-        candidates_collected += 1
-    end
-
-    # Return chunk if we collected any candidates
-    if !isempty(state.chunk_buffer)
-        # Return a copy to allow state buffer reuse
-        chunk_copy = copy(state.chunk_buffer)
-        return (chunk_copy, state)
-    else
-        # No more candidates
-        return nothing
-    end
-end
-
-"""
-Create a chunked streaming filter from the same parameters as the original filter.
-This provides true constant-memory processing of unlimited candidates.
-
-Example usage:
-```julia
-chunked_filter = create_chunked_streaming_filter(
-    complexes, trivial_pairs, samples_tree, concordance_tracker;
-    chunk_size=10_000,  # Process 10K candidates at a time
-    cv_threshold=0.01
-)
-
-for chunk in chunked_filter
-    # Process chunk with existing batch logic
-    results = process_concordance_batch(constraints, chunk, tracker; ...)
-    # Memory for chunk is freed automatically here
-end
-```
-"""
-function create_chunked_streaming_filter(
-    complexes::Vector{Symbol},
-    trivial_pairs::Set{Tuple{Int,Int}},
-    samples_tree::C.Tree{Vector{Float64}},
-    concordance_tracker::ConcordanceTracker;
-    chunk_size::Int=10_000,
-    cv_threshold::Float64=0.01,
-    cv_epsilon::Float64=1e-15,
-    min_valid_samples::Int=10
-)::ChunkedStreamingFilter
-    base_filter = StreamingCandidateFilter(
-        complexes, trivial_pairs, samples_tree, concordance_tracker;
-        cv_threshold, cv_epsilon, min_valid_samples
-    )
-
-    return ChunkedStreamingFilter(base_filter; chunk_size)
-end
-
-# ========================================================================================
-# Section 6.5: Disk Spillover for Massive Models (1B+ candidates)
-# ========================================================================================
-
-"""
-Disk-backed chunked streaming filter for massive models.
-Uses memory-mapped files to handle unlimited candidates with minimal RAM usage.
-
-Only use this for extremely large models where even chunked streaming 
-might generate too many candidates to fit in available disk cache.
-"""
-mutable struct DiskBackedChunkedFilter
-    base_filter::StreamingCandidateFilter
-    chunk_size::Int
-    spillover_file::String
-    mmap_buffer::Union{Nothing,Vector{UInt8}}
-    candidates_spilled::Int
-    max_memory_chunks::Int
-
-    function DiskBackedChunkedFilter(
-        base_filter::StreamingCandidateFilter;
-        chunk_size::Int=10_000,
-        max_memory_chunks::Int=100,  # Keep only 100 chunks (1M candidates) in memory
-        spillover_dir::String=tempdir()
-    )
-        # Create temporary file for spillover
-        spillover_file = joinpath(spillover_dir, "cocoa_candidates_$(rand(UInt32)).bin")
-
-        new(base_filter, chunk_size, spillover_file, nothing, 0, max_memory_chunks)
-    end
-end
-
-"""
-For extreme cases (1B+ candidates), create a disk-backed filter that spills to disk
-when memory usage becomes too high.
-
-Example: 
-```julia
-# For a model with 100K complexes (5B potential pairs)
-disk_filter = create_disk_backed_filter(
-    complexes, trivial_pairs, samples_tree, concordance_tracker;
-    max_memory_chunks = 50,  # Only keep 500K candidates in memory
-    spillover_dir = "/tmp"   # Use fast SSD for spillover
-)
-```
-"""
-function create_disk_backed_filter(
-    complexes::Vector{Symbol},
-    trivial_pairs::Set{Tuple{Int,Int}},
-    samples_tree::C.Tree{Vector{Float64}},
-    concordance_tracker::ConcordanceTracker;
-    chunk_size::Int=10_000,
-    max_memory_chunks::Int=100,
-    spillover_dir::String=tempdir(),
-    cv_threshold::Float64=0.01,
-    cv_epsilon::Float64=1e-15,
-    min_valid_samples::Int=10
-)::DiskBackedChunkedFilter
-    @info "Creating disk-backed filter for massive model" spillover_dir
-
-    base_filter = StreamingCandidateFilter(
-        complexes, trivial_pairs, samples_tree, concordance_tracker;
-        cv_threshold, cv_epsilon, min_valid_samples
-    )
-
-    return DiskBackedChunkedFilter(
-        base_filter;
-        chunk_size, max_memory_chunks, spillover_dir
-    )
-end
 
 # ========================================================================================
 # Section 7: Type Compatibility
@@ -599,6 +459,4 @@ const PairPriority = PairCandidate
 
 # Export main interface
 export StreamingCandidateFilter, PairCandidate, PairPriority,
-    ChunkedStreamingFilter, create_chunked_streaming_filter,
-    DiskBackedChunkedFilter, create_disk_backed_filter,
     update_filter_with_discoveries!, signal_early_stop!

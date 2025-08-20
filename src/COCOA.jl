@@ -51,9 +51,7 @@ module COCOA
 using COBREXA
 using AbstractFBCModels
 using DataFrames
-using DataStructures
 using SparseArrays
-using LinearAlgebra
 using Statistics
 using Random
 using StableRNGs
@@ -63,7 +61,6 @@ using ProgressMeter
 # Import with qualification for less commonly used or potentially conflicting names
 import ConstraintTrees as C
 import Distributed as D
-import SharedArrays
 import JLD2
 import HiGHS
 import Graphs
@@ -78,7 +75,6 @@ using .ElementarySteps
 using .ModelPreparation
 
 # Include main modules
-include("memory_optimization.jl")
 include("data_structures.jl")
 include("constraints.jl")
 include("filter.jl")
@@ -89,8 +85,7 @@ include("kinetic_analysis.jl")
 # Re-export main functions
 export concordance_constraints, concordance_analysis
 # Re-export streaming filter functions
-export StreamingCandidateFilter, ChunkedStreamingFilter, create_chunked_streaming_filter, 
-       DiskBackedChunkedFilter, create_disk_backed_filter, process_streaming_batches
+export StreamingCandidateFilter, process_streaming_batches
 export split_into_elementary_steps
 export prepare_model_for_concordance
 export extract_reaction_enzymes, build_enzyme_registry

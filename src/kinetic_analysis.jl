@@ -36,7 +36,7 @@ struct KineticModuleResults
     complex_to_idx::Dict{String,Int}
     metabolite_to_idx::Dict{String,Int}
     reaction_to_idx::Dict{String,Int}
-    
+
     # Comprehensive summary for large-scale analysis
     summary::Union{Dict{String,Int},Nothing}
 end
@@ -59,7 +59,7 @@ struct ConcentrationRobustnessResults
     n_robust_metabolites::Int
     n_robust_pairs::Int
     largest_robust_module_size::Int
-    
+
     # Comprehensive summary for large-scale analysis
     summary::Union{Dict{String,Int},Nothing}
 end
@@ -515,15 +515,28 @@ function find_interface_reactions(kinetic_modules::Dict{Symbol,Vector{Symbol}},
         product_modules = Set{Symbol}()
 
         for complex_idx in substrate_complexes
-            # Find complex name from index
-            complex_name = findfirst(x -> x == complex_idx, complex_to_idx)
+            # Find complex name from index - correct lookup
+            complex_name = nothing
+            for (name, idx) in complex_to_idx
+                if idx == complex_idx
+                    complex_name = name
+                    break
+                end
+            end
             if complex_name !== nothing && haskey(complex_to_module, complex_name)
                 push!(substrate_modules, complex_to_module[complex_name])
             end
         end
 
         for complex_idx in product_complexes
-            complex_name = findfirst(x -> x == complex_idx, complex_to_idx)
+            # Find complex name from index - correct lookup
+            complex_name = nothing
+            for (name, idx) in complex_to_idx
+                if idx == complex_idx
+                    complex_name = name
+                    break
+                end
+            end
             if complex_name !== nothing && haskey(complex_to_module, complex_name)
                 push!(product_modules, complex_to_module[complex_name])
             end
@@ -682,7 +695,12 @@ function identify_kinetic_modules(
     # Process each concordance module
     for row in eachrow(concordance_modules_df)
         module_id = Symbol(row.module_id)
-        complex_names = split(row.complexes, ", ")
+        # Handle both string and vector format for complexes
+        complex_names = if isa(row.complexes, String)
+            split(row.complexes, ", ")
+        else
+            row.complexes  # Assume it's already a vector
+        end
 
         if length(complex_names) < min_module_size
             continue
@@ -707,8 +725,14 @@ function identify_kinetic_modules(
             # Convert back to complex names
             autonomous_names = Symbol[]
             for idx in autonomous_indices
-                # Find complex name from index
-                complex_name = findfirst(x -> x == idx, network_data.complex_to_idx)
+                # Find complex name from index - correct lookup
+                complex_name = nothing
+                for (name, idx_val) in network_data.complex_to_idx
+                    if idx_val == idx
+                        complex_name = name
+                        break
+                    end
+                end
                 if complex_name !== nothing
                     push!(autonomous_names, Symbol(complex_name))
                 end
@@ -723,6 +747,7 @@ function identify_kinetic_modules(
     end
 
     # Add balanced complexes as separate module if they exist
+    # Look for balanced complexes in the complexes DataFrame
     balanced_complexes = filter(row -> row.module == "balanced", complexes_df)
     if nrow(balanced_complexes) >= min_module_size
         balanced_names = Symbol[]
@@ -732,6 +757,87 @@ function identify_kinetic_modules(
         # Sort for deterministic output
         sort!(balanced_names)
         kinetic_modules[:balanced] = balanced_names
+    end
+
+    # Apply module merging logic
+    @info "Applying module merging logic"
+    if !isempty(kinetic_modules)
+        module_list = collect(values(kinetic_modules))
+        module_ids = collect(keys(kinetic_modules))
+        n_modules = length(module_list)
+
+        # Build overlap matrix
+        overlap_matrix = zeros(Int, n_modules, n_modules)
+        for i in 1:(n_modules-1)
+            for j in (i+1):n_modules
+                overlap = length(intersect(Set(module_list[i]), Set(module_list[j])))
+                overlap_matrix[i, j] = overlap_matrix[j, i] = overlap
+            end
+        end
+
+        # Find connected components of overlapping modules
+        # Any overlap > 0 means modules should be merged
+        adj_matrix = overlap_matrix .> 0
+
+        # Simple connected components algorithm
+        visited = falses(n_modules)
+        merged_modules = Dict{Symbol,Vector{Symbol}}()
+        singleton_complexes = Set{Symbol}()
+
+        # Collect all complexes that are in modules
+        all_module_complexes = Set{Symbol}()
+        for complex_list in module_list
+            union!(all_module_complexes, Set(complex_list))
+        end
+
+        for i in 1:n_modules
+            if !visited[i]
+                # Find connected component starting from i
+                component = [i]
+                queue = [i]
+                visited[i] = true
+
+                while !isempty(queue)
+                    current = popfirst!(queue)
+                    for j in 1:n_modules
+                        if !visited[j] && adj_matrix[current, j]
+                            push!(component, j)
+                            push!(queue, j)
+                            visited[j] = true
+                        end
+                    end
+                end
+
+                # Merge all modules in this component
+                merged_complexes = Vector{Symbol}()
+                for module_idx in component
+                    append!(merged_complexes, module_list[module_idx])
+                end
+
+                # Remove duplicates and sort
+                merged_complexes = sort(collect(Set(merged_complexes)))
+
+                if length(merged_complexes) >= min_module_size
+                    # Use first module ID as the merged module ID
+                    merged_module_id = module_ids[component[1]]
+                    merged_modules[merged_module_id] = merged_complexes
+                else
+                    # Add to singletons if too small
+                    union!(singleton_complexes, Set(merged_complexes))
+                end
+            end
+        end
+
+        # Handle singleton complexes (those not in any kinetic module)
+        # Add complexes that passed autonomy filtering but ended up as singletons
+        for complex_symbol in singleton_complexes
+            if length([complex_symbol]) >= 1  # Each singleton is its own "module"
+                singleton_id = Symbol("singleton_", complex_symbol)
+                merged_modules[singleton_id] = [complex_symbol]
+            end
+        end
+
+        kinetic_modules = merged_modules
     end
 
     # Find giant module (largest kinetic module)
@@ -744,7 +850,7 @@ function identify_kinetic_modules(
         end
     end
 
-    @info "Identified kinetic modules" n_modules = length(kinetic_modules) giant_size = max_size
+    @info "Identified kinetic modules after merging" n_modules = length(kinetic_modules) giant_size = max_size
 
     # Find interface reactions
     @info "Finding interface reactions"
@@ -940,7 +1046,7 @@ function kinetic_concordance_analysis(
     n_reactions = length(AbstractFBCModels.reactions(model))
     n_metabolites = length(AbstractFBCModels.metabolites(model))
     n_complexes = concordance_results.stats["n_complexes"]
-    
+
     # Extract concordance statistics
     n_concordant_pairs = concordance_results.stats["n_concordant_pairs"]
     n_balanced_complexes = concordance_results.stats["n_balanced"]
@@ -967,7 +1073,7 @@ function kinetic_concordance_analysis(
         # Step 3: Run kinetic module analysis using constraints
         @info "Running kinetic module analysis"
         kinetic_results = identify_kinetic_modules(constraints, model, concordance_results; min_module_size, workers)
-        
+
         # Extract kinetic module statistics
         n_kinetic_modules = length(kinetic_results.kinetic_modules)
         giant_kinetic_module_size = if kinetic_results.giant_module_id != :none
@@ -982,7 +1088,7 @@ function kinetic_concordance_analysis(
             # Step 4: Run concentration robustness analysis
             @info "Running concentration robustness analysis"
             robustness_results = identify_concentration_robustness(kinetic_results)
-            
+
             # Extract robustness statistics
             n_metabolites_absolute_robust = robustness_results.n_robust_metabolites
             n_metabolite_pairs_ratio_robust = robustness_results.n_robust_pairs

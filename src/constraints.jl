@@ -27,51 +27,38 @@ Uses COBREXA's symmetric approach with variable substitution and pruning.
 function create_unidirectional_constraints(
     model::AbstractFBCModels.AbstractFBCModel
 )
-    # Use symmetric approach for consistent constraint structure
+    # Use symmetric approach following COBREXA documentation exactly
     constraints = COBREXA.flux_balance_constraints(model)
+    
+    # Add forward and reverse flux variables
     constraints += COBREXA.sign_split_variables(
         constraints.fluxes,
         positive=:fluxes_forward,
         negative=:fluxes_reverse
     )
+    
+    # Add constraints linking original fluxes to split fluxes: flux = forward - reverse
     constraints *= :directional_flux_balance^COBREXA.sign_split_constraints(
         positive=constraints.fluxes_forward,
         negative=constraints.fluxes_reverse,
         signed=constraints.fluxes,
     )
 
-    # Apply the variable substitution and pruning from COBREXA documentation
+    # Simplify the system by removing original variables (following COBREXA documentation)
     subst_vals = [C.variable(; idx).value for idx = 1:C.var_count(constraints)]
 
-    # Build new fluxes constraints manually
-    new_fluxes_dict = Dict{Symbol,C.Constraint}()
-    for (flux_key, f) in constraints.fluxes
-        p = constraints.fluxes_forward[flux_key]
-        n = constraints.fluxes_reverse[flux_key]
+    constraints.fluxes = C.zip(constraints.fluxes, constraints.fluxes_forward, constraints.fluxes_reverse) do f, p, n
         (var_idx,) = f.value.idxs
         subst_value = p.value - n.value
         subst_vals[var_idx] = subst_value
-        # Drop the bidirectional bound as per documentation
-        new_fluxes_dict[flux_key] = C.Constraint(subst_value)
+        C.Constraint(subst_value) # the bidirectional bound is dropped here
     end
 
-    # Rebuild constraint tree
-    constraints = C.ConstraintTree(
-        :coupling => constraints.coupling,
-        :directional_flux_balance => constraints.directional_flux_balance,
-        :flux_stoichiometry => constraints.flux_stoichiometry,
-        :fluxes => C.ConstraintTree(new_fluxes_dict),
-        :fluxes_forward => constraints.fluxes_forward,
-        :fluxes_reverse => constraints.fluxes_reverse,
-        :objective => constraints.objective
-    )
-
-    # Apply substitution and pruning
     constraints = C.prune_variables(C.substitute(constraints, subst_vals))
 
     @info "Using symmetric unidirectional approach with variable pruning"
 
-    # All reactions were split since we applied splitting to all fluxes
+    # Count reactions that were split (all of them in this symmetric approach)
     reactions = AbstractFBCModels.reactions(model)
     n_reactions = length(reactions)
     all_indices = Set(1:n_reactions)

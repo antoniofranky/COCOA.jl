@@ -6,7 +6,10 @@ This module contains:
 - Core data structures (Complex, SharedSparseMatrix, SparseIncidenceMatrix)
 - Sample storage abstractions (SampleStorage, MemoryStreamStorage, DiskStreamStorage)
 - Concordance tracking (ConcordanceTracker)
+- Memory-efficient data structures (SparseConcordantPairs, ObjectPool)
 """
+
+using SparseArrays
 
 
 
@@ -347,3 +350,67 @@ Get a boolean flag for a specific complex. Returns false if mask is not allocate
         return false  # Default to false if mask not allocated
     end
 end
+
+# ========================================================================================
+# Memory-Efficient Sparse Data Structures
+# ========================================================================================
+
+"""
+Memory-efficient representation of concordant pairs using sparse bit matrix.
+Uses ~1 bit per pair instead of 16 bytes for Set{Tuple{Int,Int}}.
+"""
+mutable struct SparseConcordantPairs
+    n::Int  # Number of complexes
+    # Use sparse matrix for memory efficiency - only stores non-zero entries
+    matrix::SparseMatrixCSC{Bool,Int}
+    # Track number of pairs for fast counting
+    n_pairs::Int
+
+    function SparseConcordantPairs(n_complexes::Int)
+        # Initialize empty sparse matrix
+        matrix = spzeros(Bool, n_complexes, n_complexes)
+        new(n_complexes, matrix, 0)
+    end
+end
+
+"""
+Add a concordant pair to the sparse matrix.
+"""
+@inline function add_pair!(pairs::SparseConcordantPairs, i::Int, j::Int)
+    if i > j
+        i, j = j, i  # Canonical order
+    end
+    if i <= pairs.n && j <= pairs.n && !pairs.matrix[i, j]
+        pairs.matrix[i, j] = true
+        pairs.n_pairs += 1
+    end
+end
+
+"""
+Check if a pair is concordant.
+"""
+@inline function has_pair(pairs::SparseConcordantPairs, i::Int, j::Int)::Bool
+    if i > j
+        i, j = j, i  # Canonical order
+    end
+    return i <= pairs.n && j <= pairs.n && pairs.matrix[i, j]
+end
+
+"""
+Merge another SparseConcordantPairs into this one.
+"""
+function merge_pairs!(dest::SparseConcordantPairs, src::SparseConcordantPairs)
+    # Use sparse matrix operations for efficiency
+    dest.matrix = dest.matrix .| src.matrix
+    dest.n_pairs = nnz(dest.matrix)
+end
+
+
+"""
+Clear all pairs (for reuse).
+"""
+function clear!(pairs::SparseConcordantPairs)
+    pairs.matrix = spzeros(Bool, pairs.n, pairs.n)
+    pairs.n_pairs = 0
+end
+
