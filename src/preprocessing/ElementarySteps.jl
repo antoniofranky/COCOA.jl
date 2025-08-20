@@ -127,7 +127,7 @@ Split reactions into elementary steps based on enzyme mechanisms.
 """
 function split_into_elementary_steps(
     model::A.AbstractFBCModel;
-    ordered_fraction::Float64=1.0,
+    random_fraction::Float64=0.0,
     mechanism_assignment::Union{Nothing,Dict{String,Symbol}}=nothing,
     output_type::Type{<:A.AbstractFBCModel}=CM.Model,
     max_substrates::Int=4,
@@ -153,7 +153,7 @@ function split_into_elementary_steps(
     # Assign mechanisms to reactions
     if isnothing(mechanism_assignment)
         mechanism_assignment = assign_reaction_mechanisms(
-            work_model, ordered_fraction, max_substrates, max_products, rng
+            work_model, 1.0 - random_fraction, max_substrates, max_products, rng
         )
     end
 

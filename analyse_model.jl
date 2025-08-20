@@ -21,8 +21,7 @@ model = COBREXA.load_model(model_path)
 res = concordance_analysis(
     test_model;
     optimizer=HiGHS.Optimizer,
-    sample_size=100,                # Adjust as needed
-    batch_size=1000,
+    sample_size=100,
     seed=42,
     settings=highs_settings
 )
