@@ -266,7 +266,7 @@ function process_streaming_batches(
     total_pairs_processed = 0
 
     # Dynamic batch sizing: start small and adjust based on actual candidate flow
-    current_batch_size = max(1000, streaming_filter.n_complexes^2/10)  # Start with small batches
+    current_batch_size = max(100, streaming_filter.n_complexes)  # Start with small batches
     target_candidates_per_batch = 0  # Will be calculated once we know total candidates
     
     # Stream processing state
@@ -954,28 +954,35 @@ function process_concordance_batch(
         concordant_directions = Set{Symbol}()
         has_timeout = false
 
-        if isempty(pair_results_by_dir)
-            all_concordant = false
-        else
+        if !isempty(pair_results_by_dir)
+            reference_lambda = NaN
+            
             for (direction, test_results) in pair_results_by_dir
-                min_val = test_results[1]
-                max_val = test_results[2]
-                timeout_occurred = test_results[3]
+                min_val, max_val, timeout_occurred = test_results
 
-                if timeout_occurred === true
-                    has_timeout = true
-                end
+                timeout_occurred && (has_timeout = true)
 
-                if isnan(min_val) || isnan(max_val) || abs(min_val - max_val) > concordance_tolerance
-                    all_concordant = false
+                # Early exit on failure
+                if timeout_occurred || isnan(min_val) || isnan(max_val) || 
+                   abs(min_val - max_val) > concordance_tolerance
+                    @debug "Pair failed concordance test" c1_idx c2_idx direction timeout_occurred min_val max_val diff=abs(min_val - max_val) tolerance=concordance_tolerance
                     break
-                else
-                    push!(concordant_directions, direction)
-                    if isnan(final_lambda)
-                        final_lambda = min_val
-                    end
+                end
+                
+                current_lambda = (min_val + max_val) / 2
+                push!(concordant_directions, direction)
+                
+                if isnan(reference_lambda)
+                    reference_lambda = current_lambda
+                    final_lambda = current_lambda
+                elseif abs(current_lambda - reference_lambda) > concordance_tolerance
+                    @info "Cross-direction lambda mismatch" c1_idx c2_idx reference_lambda current_lambda lambda_diff=abs(current_lambda - reference_lambda) tolerance=concordance_tolerance
+                    break
                 end
             end
+            
+            # Only concordant if we made it here
+            all_concordant = !isnan(reference_lambda)
         end
 
         final_direction = if all_concordant
