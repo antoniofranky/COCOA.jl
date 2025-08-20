@@ -152,12 +152,9 @@ function process_streaming_batches(
     prog = nothing
     last_progress_update = 0
 
-    @info "Starting direct streaming processing" (
-        initial_batch_size=batch_size,
-        transitivity_filtering=use_transitivity ? "during_batch_processing" : "disabled",
-        progress_updates="every 5000 candidates",
-        adaptive_sizing="enabled"
-    )
+    @info "Starting direct streaming processing"
+    initial_batch_size = batch_size,
+    transitivity_filtering = use_transitivity ? "during_batch_processing" : "disabled",
 
     # Process candidates as they arrive from the streaming filter
     for candidate in streaming_filter
@@ -1750,17 +1747,17 @@ function concordance_analysis(
     # Additional validation checks
     computed_pairs_check = stats["n_concordant_via_testing"] + stats["n_concordant_via_transitivity"] == stats["n_computed_pairs"]
     candidates_check = stats["n_candidates_skipped_by_transitivity"] + stats["n_concordant_via_testing"] + stats["n_non_concordant_pairs"] <= stats["n_candidate_pairs"]
-    
+
     if !validation_passed
-        @warn "Concordant pair accounting mismatch detected!" (
-            expected_total=expected_total_concordant,
-            actual_total=actual_total_concordant,
-            computed_pairs=stats["n_computed_pairs"],
-            trivial_pairs=stats["n_trivial_pairs"],
-            via_testing=stats["n_concordant_via_testing"],
-            via_transitivity=stats["n_concordant_via_transitivity"],
-            difference=actual_total_concordant - expected_total_concordant
-        )
+        @warn "Concordant pair accounting mismatch detected!"
+        expected_total = expected_total_concordant,
+        actual_total = actual_total_concordant,
+        computed_pairs = stats["n_computed_pairs"],
+        trivial_pairs = stats["n_trivial_pairs"],
+        via_testing = stats["n_concordant_via_testing"],
+        via_transitivity = stats["n_concordant_via_transitivity"],
+        difference = actual_total_concordant - expected_total_concordant
+
     elseif !computed_pairs_check
         @warn "Computed pairs breakdown mismatch!" (
             via_testing=stats["n_concordant_via_testing"],
@@ -1788,7 +1785,7 @@ function concordance_analysis(
     # Clear summary of the analysis results
     @info "Concordance analysis complete" (
         candidates_generated=stats["n_candidate_pairs"],
-        candidates_skipped_by_transitivity=stats["n_candidates_skipped_by_transitivity"], 
+        candidates_skipped_by_transitivity=stats["n_candidates_skipped_by_transitivity"],
         concordant_via_optimization=stats["n_concordant_via_testing"],
         concordant_via_transitivity=stats["n_concordant_via_transitivity"],
         non_concordant=stats["n_non_concordant_pairs"],
@@ -1796,7 +1793,7 @@ function concordance_analysis(
         total_concordant=stats["n_concordant_pairs"],
         elapsed_time_sec=round(stats["elapsed_time"], digits=2)
     )
-    
+
     @debug "Full concordance analysis statistics" stats
 
     return (
