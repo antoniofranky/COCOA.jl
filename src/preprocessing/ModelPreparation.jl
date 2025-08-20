@@ -13,6 +13,7 @@ using AbstractFBCModels
 using HiGHS
 using JuMP
 import AbstractFBCModels.AbstractFBCModel
+import SBMLFBCModels.SBMLFBCModels
 import AbstractFBCModels.CanonicalModel as CM
 using Logging
 using Distributed
@@ -100,6 +101,7 @@ function prepare_model_for_concordance(model::AbstractFBCModel;
     remove_zero_rows::Bool=true,
     remove_zero_cols::Bool=true,
     workers=Distributed.workers(),
+    output_type=CM.Model,
     fast=false)
 
     work_model = convert(CM.Model, model)
@@ -137,7 +139,71 @@ function prepare_model_for_concordance(model::AbstractFBCModel;
     end
 
     @info "Model preparation complete: $(n_original_rxns) → $(length(work_model.reactions)) reactions"
-    return work_model
-end
 
+    exported_model = convert(output_type, work_model)
+    # Fix objective after conversion if we converted to SBML
+    if output_type == SBMLFBCModels.SBMLFBCModel
+        exported_model = fix_objective_conversion(exported_model)
+    end
+
+    return exported_model
+
+end
+"""
+    fix_objective_after_conversion(model::SBMLFBCModels.SBMLFBCModel)
+
+Fix objective function after model conversion by updating reaction IDs to match the actual 
+reactions in the model. This handles cases where the objective references reaction IDs that 
+don't exist due to format conversion (e.g., missing R_ prefix).
+"""
+function fix_objective_conversion(model::SBMLFBCModels.SBMLFBCModel)
+    # Get all reaction IDs in the model
+    reaction_ids = Set(AbstractFBCModels.reactions(model))
+
+    # Check if we need to fix the objective
+    try
+        # Try to get the objective - if this fails, we need to fix it
+        obj_dict = AbstractFBCModels.objective(model)
+        return model  # If this succeeds, no fix needed
+    catch e
+        if e isa KeyError
+            @info "Fixing objective after model conversion: $(e.key) not found"
+
+            # Find the missing reaction ID and try to map it
+            missing_id = string(e.key)
+
+            # Try adding R_ prefix if missing
+            if !startswith(missing_id, "R_")
+                candidate_id = "R_" * missing_id
+                if candidate_id in reaction_ids
+                    @info "Mapping objective reaction $missing_id → $candidate_id"
+
+                    # Update the SBML objective directly
+                    for (obj_id, obj) in model.sbml.objectives
+                        # flux_objectives is a Dict{String, Float64}
+                        if haskey(obj.flux_objectives, missing_id)
+                            coeff = obj.flux_objectives[missing_id]
+                            delete!(obj.flux_objectives, missing_id)
+                            obj.flux_objectives[candidate_id] = coeff
+                            @info "Updated objective flux reference: $missing_id → $candidate_id (coeff=$coeff)"
+                        end
+                    end
+
+                    return model
+                end
+            end
+
+            # If we can't fix it, warn and clear the objective
+            @warn "Could not fix objective reference to $missing_id, clearing objective"
+            # Clear the objective by removing all flux objectives
+            for (obj_id, obj) in model.sbml.objectives
+                empty!(obj.flux_objectives)
+            end
+
+            return model
+        else
+            rethrow(e)
+        end
+    end
+end
 end # module
