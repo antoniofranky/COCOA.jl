@@ -390,31 +390,6 @@ function signal_early_stop!(filter::StreamingCandidateFilter, reason::String="ex
     filter.should_stop = true
 end
 
-# ========================================================================================
-# Section 5: Memory Management & Adaptation  
-# ========================================================================================
-
-"""
-Monitor memory pressure and adapt processing accordingly.
-"""
-function get_memory_pressure()::Symbol
-    try
-        if Sys.islinux()
-            meminfo = read("/proc/meminfo", String)
-            for line in split(meminfo, '\n')
-                if startswith(line, "MemAvailable:")
-                    kb = parse(Int, split(line)[2])
-                    gb = kb / (1024^2)
-                    return gb < 2.0 ? :high : (gb < 8.0 ? :medium : :low)
-                end
-            end
-        end
-    catch
-        # Fallback for non-Linux or permission issues
-    end
-    return :medium  # Conservative default
-end
-
 
 # ========================================================================================
 # Section 6: Chunked Streaming Architecture 
