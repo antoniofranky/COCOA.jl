@@ -280,14 +280,17 @@ function process_streaming_batches(
     batches_processed = 0
     batch_size_adjusted = false
 
-    # No initial progress bar - we'll create it dynamically once we know the scale
+    # Initialize progress bar with SLURM-friendly configuration
     prog = nothing
     last_progress_update = 0
+    # Detect if running in non-interactive environment (SLURM, CI, etc.)
+    is_interactive = isinteractive() && !(haskey(ENV, "SLURM_JOB_ID") || haskey(ENV, "CI") || haskey(ENV, "BATCH_SYSTEM"))
 
     @info "Starting direct streaming processing"
     initial_batch_size = current_batch_size,
     target_batches = n_batches,
     transitivity_filtering = use_transitivity ? "during_batch_processing" : "disabled",
+    interactive_mode = is_interactive
 
     # Process candidates as they arrive from the streaming filter
     for candidate in streaming_filter
@@ -310,29 +313,46 @@ function process_streaming_batches(
                     @info "Adjusted batch size based on estimated candidates" estimated_total=estimated_total target_batch_size=current_batch_size target_batches=n_batches
                 end
 
-                prog = Progress(
-                    estimated_total,
-                    desc="Streaming concordance analysis: ",
-                    dt=2.0,  # Update every 2 seconds max
-                    barlen=50,
-                    output=stdout,
-                    showspeed=true
-                )
-                @info "Progress tracking initialized" estimated_candidates = estimated_total candidate_ratio = round(candidate_ratio, digits=4)
+                # Create progress bar only in interactive environments
+                if is_interactive && estimated_total > 1000  # Only show for substantial work
+                    prog = Progress(
+                        estimated_total,
+                        desc="Concordance analysis: ",
+                        dt=5.0,  # Update every 5 seconds to reduce output noise
+                        barlen=40,
+                        output=stderr,  # Use stderr to avoid conflicts with output capture
+                        showspeed=true,
+                        enabled=true
+                    )
+                    @info "Progress tracking initialized" estimated_candidates = estimated_total candidate_ratio = round(candidate_ratio, digits=4)
+                else
+                    @info "Progress tracking disabled for batch environment" estimated_candidates = estimated_total
+                end
             end
 
-            # Calculate pairs actually tested via optimization
-            pairs_optimized = total_pairs_processed - accumulator.skipped_count
-            
-            ProgressMeter.update!(prog, total_candidates_seen;
-                showvalues=[
-                    (:batches, batches_processed),
-                    (:concordant, accumulator.concordant_pairs.n_pairs),
-                    (:cv_evaluated, streaming_filter.pairs_tested),
-                    (:optimized, pairs_optimized),
-                    (:skipped_transitivity, streaming_filter.pairs_skipped_by_transitivity)
-                ]
-            )
+            # Update progress bar if active, or log periodic updates
+            if prog !== nothing && is_interactive
+                # Calculate pairs actually tested via optimization
+                pairs_optimized = total_pairs_processed - accumulator.skipped_count
+                
+                ProgressMeter.update!(prog, total_candidates_seen;
+                    showvalues=[
+                        (:batches, batches_processed),
+                        (:concordant, accumulator.concordant_pairs.n_pairs),
+                        (:optimized, pairs_optimized)
+                    ]
+                )
+            elseif total_candidates_seen % 25000 == 0  # Less frequent logging for batch jobs
+                # Provide periodic status updates for batch environments
+                pairs_optimized = total_pairs_processed - accumulator.skipped_count
+                @info "Processing progress" (
+                    candidates_processed=total_candidates_seen,
+                    batches_completed=batches_processed,
+                    concordant_found=accumulator.concordant_pairs.n_pairs,
+                    pairs_optimized=pairs_optimized,
+                    cv_evaluated=streaming_filter.pairs_tested
+                )
+            end
             last_progress_update = total_candidates_seen
         end
 
@@ -421,10 +441,17 @@ function process_streaming_batches(
     end
 
     # Final progress update
-    if prog !== nothing
+    if prog !== nothing && is_interactive
         ProgressMeter.finish!(prog)
-    else
-        @info "Processing completed - no progress bar was needed for small candidate count"
+    end
+    
+    # Always provide final status for batch environments
+    if !is_interactive || prog === nothing
+        @info "Processing completed" (
+            total_candidates_processed=total_candidates_seen,
+            total_batches=batches_processed,
+            final_concordant_count=accumulator.concordant_pairs.n_pairs
+        )
     end
 
     # Validate results for deterministic behavior
