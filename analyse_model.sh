@@ -5,7 +5,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=64
 #SBATCH --mem=128G
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=schaffran1@uni-potsdam.de
@@ -28,7 +28,7 @@ export JULIA_GC_PARALLEL_COLLECT=1
 
 # Julia optimization flags
 JULIA_OPTS="--project=/work/schaffran1/COCOA.jl"
-JULIA_OPTS="$JULIA_OPTS -p 31"
+JULIA_OPTS="$JULIA_OPTS -p $((SLURM_CPUS_PER_TASK - 1))"
 JULIA_OPTS="$JULIA_OPTS --heap-size-hint=$HEAP_SIZE"
 JULIA_OPTS="$JULIA_OPTS --startup-file=no"
 JULIA_OPTS="$JULIA_OPTS --history-file=no"
