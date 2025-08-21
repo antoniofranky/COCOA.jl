@@ -262,89 +262,34 @@ function process_streaming_batches(
     total_batches_completed = 0
     total_pairs_processed = 0
 
-    # Dynamic batch sizing: start small and adjust based on actual candidate flow
-    current_batch_size = max(100, streaming_filter.n_complexes)  # Start with small batches
-    target_candidates_per_batch = 0  # Will be calculated once we know total candidates
+    batch_size = if n_batches == 1
+        1_000_000
+    else  
+        max(10_000, streaming_filter.n_complexes * 2)
+    end
 
     # Stream processing state
     current_batch = Vector{PairCandidate}()
-    sizehint!(current_batch, current_batch_size)
+    sizehint!(current_batch, batch_size)
 
     newly_concordant_buffer = Vector{Tuple{Symbol,Symbol}}()
-    sizehint!(newly_concordant_buffer, current_batch_size)
+    sizehint!(newly_concordant_buffer, batch_size)
 
     total_candidates_seen = 0
     batches_processed = 0
-    batch_size_adjusted = false
 
-    # Initialize progress bar with SLURM-friendly configuration
-    prog = nothing
-    last_progress_update = 0
-    # Detect if running in non-interactive environment (SLURM, CI, etc.)
-    is_interactive = isinteractive() && !(haskey(ENV, "SLURM_JOB_ID") || haskey(ENV, "CI") || haskey(ENV, "BATCH_SYSTEM"))
 
-    @info "Starting direct streaming processing" (
-        initial_batch_size=current_batch_size,
-        target_batches=n_batches,
-        transitivity_filtering=use_transitivity ? "during_batch_processing" : "disabled",
-        interactive_mode=is_interactive
-    )
+    @info "Using fixed batch size: $batch_size candidates per batch"
+    @info "Collecting candidates from streaming filter..."
 
     # Process candidates as they arrive from the streaming filter
     for candidate in streaming_filter
         push!(current_batch, candidate)
         total_candidates_seen += 1
 
-        # Adjust batch size after seeing enough candidates (every 5000 candidates for reduced overhead)
-        if total_candidates_seen % 5000 == 0
-            if prog === nothing
-                # Estimate total based on pairs tested vs candidates found ratio
-                candidate_ratio = streaming_filter.candidates_found / max(1, streaming_filter.pairs_tested)
-                total_possible_pairs = streaming_filter.n_complexes * (streaming_filter.n_complexes - 1) ÷ 2
-                estimated_total = min(total_possible_pairs, Int(ceil(total_possible_pairs * candidate_ratio)))
-
-                # Now we can calculate proper batch size for target number of batches
-                if !batch_size_adjusted && estimated_total > n_batches
-                    target_candidates_per_batch = max(10, estimated_total ÷ n_batches)
-                    current_batch_size = target_candidates_per_batch
-                    batch_size_adjusted = true
-                    @info "Adjusted batch size based on estimated candidates" estimated_total = estimated_total target_batch_size = current_batch_size target_batches = n_batches
-                end
-
-                # Create progress bar only in interactive environments
-                if is_interactive && estimated_total > 1000  # Only show for substantial work
-                    prog = Progress(
-                        estimated_total,
-                        desc="Concordance analysis: ",
-                        dt=5.0,  # Update every 5 seconds to reduce output noise
-                        barlen=40,
-                        output=stderr,  # Use stderr to avoid conflicts with output capture
-                        showspeed=true,
-                        enabled=true
-                    )
-                    @info "Progress tracking initialized" estimated_candidates = estimated_total candidate_ratio = round(candidate_ratio, digits=4)
-                else
-                    @info "Progress tracking disabled for batch environment" estimated_candidates = estimated_total
-                end
-            end
-
-            # Update progress bar if active, or log periodic updates
-            if prog !== nothing && is_interactive
-                # Calculate pairs actually tested via optimization
-                pairs_optimized = total_pairs_processed - accumulator.skipped_count
-
-                ProgressMeter.update!(prog, total_candidates_seen;
-                    showvalues=[
-                        (:batches, batches_processed),
-                        (:concordant, accumulator.concordant_pairs.n_pairs),
-                        (:optimized, pairs_optimized)
-                    ]
-                )
-            last_progress_update = total_candidates_seen
-        end
 
         # Process batch when full
-        if length(current_batch) >= current_batch_size
+        if length(current_batch) >= batch_size
             batches_processed += 1
 
             @debug "Processing streaming batch $batches_processed" batch_size = length(current_batch) total_seen = total_candidates_seen
@@ -379,6 +324,7 @@ function process_streaming_batches(
                 batch_results.optimization_results
             )
 
+            @info "Batch $batches_processed completed: $(length(current_batch)) candidates processed, $(batch_results.concordant_pairs.n_pairs) concordant pairs, $(batch_results.pairs_processed) optimized, $(batch_results.skipped_by_transitivity) filtered by transitivity, $(batch_results.transitive_pairs.n_pairs) found via transitivity"
 
             # Log memory stats periodically
             if batches_processed % 10 == 0
@@ -425,19 +371,8 @@ function process_streaming_batches(
         )
     end
 
-    # Final progress update
-    if prog !== nothing && is_interactive
-        ProgressMeter.finish!(prog)
-    end
+    @info "Analysis complete: Total $(accumulator.concordant_pairs.n_pairs) concordant pairs ($(total_pairs_processed - accumulator.skipped_count) optimized, $(accumulator.transitive_pairs.n_pairs) via transitivity)"
 
-    # Always provide final status for batch environments
-    if !is_interactive || prog === nothing
-        @info "Processing completed" (
-            total_candidates_processed=total_candidates_seen,
-            total_batches=batches_processed,
-            final_concordant_count=accumulator.concordant_pairs.n_pairs
-        )
-    end
 
     # Validate results for deterministic behavior
     expected_pairs_processed = total_candidates_seen
