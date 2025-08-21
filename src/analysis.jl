@@ -248,7 +248,6 @@ function process_streaming_batches(
     settings=[],
     workers=workers,
     n_batches::Int=10,  # Target number of batches to balance performance vs parallelism overhead
-    optimization_tolerance::Float64=1e-6,
     concordance_tolerance::Float64=1e-4,
     use_transitivity::Bool=true
 )
@@ -341,17 +340,6 @@ function process_streaming_batches(
                         (:optimized, pairs_optimized)
                     ]
                 )
-            elseif total_candidates_seen % 25000 == 0  # Less frequent logging for batch jobs
-                # Provide periodic status updates for batch environments
-                pairs_optimized = total_pairs_processed - accumulator.skipped_count
-                @info "Processing progress" (
-                    candidates_processed=total_candidates_seen,
-                    batches_completed=batches_processed,
-                    concordant_found=accumulator.concordant_pairs.n_pairs,
-                    pairs_optimized=pairs_optimized,
-                    cv_evaluated=streaming_filter.pairs_tested
-                )
-            end
             last_progress_update = total_candidates_seen
         end
 
@@ -374,7 +362,6 @@ function process_streaming_batches(
                 optimizer=optimizer,
                 settings=settings,
                 workers=workers,
-                optimization_tolerance=optimization_tolerance,
                 concordance_tolerance=concordance_tolerance,
                 use_transitivity=use_transitivity
             )
@@ -420,7 +407,6 @@ function process_streaming_batches(
             optimizer=optimizer,
             settings=settings,
             workers=workers,
-            optimization_tolerance=optimization_tolerance,
             concordance_tolerance=concordance_tolerance,
             use_transitivity=use_transitivity
         )
@@ -518,7 +504,6 @@ function process_candidate_batch(
     optimizer,
     settings=[],
     workers=workers,
-    optimization_tolerance::Float64=1e-6,
     concordance_tolerance::Float64=1e-4,
     use_transitivity::Bool=true
 )
@@ -576,7 +561,6 @@ function process_candidate_batch(
             optimizer=optimizer,
             settings=settings,
             workers=workers,
-            optimization_tolerance=optimization_tolerance,
             concordance_tolerance=concordance_tolerance
         )
     catch e
@@ -767,7 +751,6 @@ function process_concordance_batch(
     optimizer,
     settings=[],
     workers=workers,
-    optimization_tolerance::Float64=1e-6,
     concordance_tolerance::Float64=1e-4
 )
     # Create COBREXA-style test array with direction multipliers
@@ -936,7 +919,6 @@ function concordance_analysis(
     optimizer,
     settings=[],
     workers=D.workers(),
-    optimization_tolerance::Union{Float64,Nothing}=nothing,
     concordance_tolerance::Union{Float64,Nothing}=nothing,
     balanced_tolerance::Union{Float64,Nothing}=nothing,
     cv_threshold::Union{Float64,Nothing}=nothing,
@@ -957,12 +939,11 @@ function concordance_analysis(
     solver_tolerance = extract_solver_tolerance(optimizer, settings)
 
     # Set default values based on solver tolerance if not provided
-    actual_optimization_tolerance = optimization_tolerance !== nothing ? optimization_tolerance : max(solver_tolerance * 10, 1e-6)
     actual_concordance_tolerance = concordance_tolerance !== nothing ? concordance_tolerance : max(solver_tolerance * 100, 1e-4)
     actual_balanced_tolerance = balanced_tolerance !== nothing ? balanced_tolerance : solver_tolerance
     actual_cv_threshold = cv_threshold !== nothing ? cv_threshold : max(solver_tolerance * 100, 1e-2)
 
-    @info "Starting concordance analysis" n_workers = length(workers) optimization_tolerance = actual_optimization_tolerance concordance_tolerance = actual_concordance_tolerance balanced_tolerance = actual_balanced_tolerance cv_threshold = actual_cv_threshold sample_size use_unidirectional_constraints n_batches solver_tolerance
+    @info "Starting concordance analysis" n_workers = length(workers) concordance_tolerance = actual_concordance_tolerance balanced_tolerance = actual_balanced_tolerance cv_threshold = actual_cv_threshold sample_size use_unidirectional_constraints n_batches solver_tolerance
 
     # Fix model objective if it has conversion issues (e.g., missing R_ prefix)
     if isa(model, SBMLFBCModels.SBMLFBCModel)
@@ -1391,7 +1372,6 @@ function concordance_analysis(
         settings=settings,
         workers=workers,
         n_batches=n_batches,
-        optimization_tolerance=actual_optimization_tolerance,
         concordance_tolerance=actual_concordance_tolerance,
         use_transitivity=use_transitivity,
     )
@@ -1470,7 +1450,6 @@ function concordance_analysis(
         "elapsed_time" => elapsed,
 
         # Algorithm parameters
-        "optimization_tolerance" => actual_optimization_tolerance,
         "concordance_tolerance" => actual_concordance_tolerance,
         "balanced_tolerance" => actual_balanced_tolerance,
         "cv_threshold" => actual_cv_threshold,
