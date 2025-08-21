@@ -247,7 +247,7 @@ function process_streaming_batches(
     optimizer,
     settings=[],
     workers=workers,
-    n_batches::Int=10,  # Target number of batches to balance performance vs parallelism overhead
+    batch_size::Int=50_000,  # Number of candidates to process per batch
     concordance_tolerance::Float64=1e-4,
     use_transitivity::Bool=true
 )
@@ -262,11 +262,7 @@ function process_streaming_batches(
     total_batches_completed = 0
     total_pairs_processed = 0
 
-    batch_size = if n_batches == 1
-        1_000_000
-    else  
-        max(10_000, streaming_filter.n_complexes * 2)
-    end
+    # Use the batch_size parameter directly
 
     # Stream processing state
     current_batch = Vector{PairCandidate}()
@@ -292,7 +288,7 @@ function process_streaming_batches(
         if length(current_batch) >= batch_size
             batches_processed += 1
 
-            @debug "Processing streaming batch $batches_processed" batch_size = length(current_batch) total_seen = total_candidates_seen
+            @info "Processing streaming batch $batches_processed" batch_size = length(current_batch) total_seen = total_candidates_seen
 
             # Clear module cache before processing to prevent memory buildup
             if isa(concordance_tracker, ConcordanceTracker)
@@ -324,7 +320,7 @@ function process_streaming_batches(
                 batch_results.optimization_results
             )
 
-            @info "Batch $batches_processed completed: $(length(current_batch)) candidates processed, $(batch_results.concordant_pairs.n_pairs) concordant pairs, $(batch_results.pairs_processed) optimized, $(batch_results.skipped_by_transitivity) filtered by transitivity, $(batch_results.transitive_pairs.n_pairs) found via transitivity"
+            @info "Batch $batches_processed completed: $(length(current_batch)) candidates processed, $(batch_results.concordant_pairs.n_pairs) concordant pairs, $(batch_results.pairs_processed) optimized, $(batch_results.skipped_by_transitivity) filtered by transitivity, $(batch_results.transitive_pairs) found via transitivity"
 
             # Log memory stats periodically
             if batches_processed % 10 == 0
@@ -859,7 +855,7 @@ function concordance_analysis(
     cv_threshold::Union{Float64,Nothing}=nothing,
     cv_epsilon::Union{Float64,Nothing}=1e-16,
     sample_size::Int=100,
-    n_batches::Int=10,
+    batch_size::Int=50_000,
     min_valid_samples::Int=10,
     seed::Union{Int,Nothing}=nothing,
     use_unidirectional_constraints::Bool=true,
@@ -878,7 +874,7 @@ function concordance_analysis(
     actual_balanced_tolerance = balanced_tolerance !== nothing ? balanced_tolerance : solver_tolerance
     actual_cv_threshold = cv_threshold !== nothing ? cv_threshold : max(solver_tolerance * 100, 1e-2)
 
-    @info "Starting concordance analysis" n_workers = length(workers) concordance_tolerance = actual_concordance_tolerance balanced_tolerance = actual_balanced_tolerance cv_threshold = actual_cv_threshold sample_size use_unidirectional_constraints n_batches solver_tolerance
+    @info "Starting concordance analysis" n_workers = length(workers) concordance_tolerance = actual_concordance_tolerance balanced_tolerance = actual_balanced_tolerance cv_threshold = actual_cv_threshold sample_size use_unidirectional_constraints batch_size solver_tolerance
 
     # Fix model objective if it has conversion issues (e.g., missing R_ prefix)
     if isa(model, SBMLFBCModels.SBMLFBCModel)
@@ -1278,7 +1274,7 @@ function concordance_analysis(
     # @debug "type of samples_tree" typeof(samples_tree)
     @info "Creating chunked streaming filter for memory-efficient processing..."
 
-    @info "Using dynamic batch sizing" target_batches = n_batches n_complexes = length(complexes_vector)
+    @info "Using fixed batch size" batch_size = batch_size n_complexes = length(complexes_vector)
 
     # Create direct streaming filter (eliminates redundant chunking layer)
     filter_time = @elapsed streaming_filter = try
@@ -1306,7 +1302,7 @@ function concordance_analysis(
         optimizer=optimizer,
         settings=settings,
         workers=workers,
-        n_batches=n_batches,
+        batch_size=batch_size,
         concordance_tolerance=actual_concordance_tolerance,
         use_transitivity=use_transitivity,
     )
@@ -1398,7 +1394,7 @@ function concordance_analysis(
         "seed" => seed,
 
         # Processing parameters 
-        "n_batches" => n_batches,
+        "batch_size" => batch_size,
         "min_valid_samples" => min_valid_samples,
         "use_transitivity" => use_transitivity,
         "use_unidirectional_constraints" => use_unidirectional_constraints,

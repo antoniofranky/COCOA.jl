@@ -29,14 +29,14 @@ function create_unidirectional_constraints(
 )
     # Use symmetric approach following COBREXA documentation exactly
     constraints = COBREXA.flux_balance_constraints(model)
-    
+
     # Add forward and reverse flux variables
     constraints += COBREXA.sign_split_variables(
         constraints.fluxes,
         positive=:fluxes_forward,
         negative=:fluxes_reverse
     )
-    
+
     # Add constraints linking original fluxes to split fluxes: flux = forward - reverse
     constraints *= :directional_flux_balance^COBREXA.sign_split_constraints(
         positive=constraints.fluxes_forward,
@@ -56,7 +56,7 @@ function create_unidirectional_constraints(
 
     constraints = C.prune_variables(C.substitute(constraints, subst_vals))
 
-    @info "Using symmetric unidirectional approach with variable pruning"
+    @info "Using symmetric unidirectional approach with variable pruning" var_count = C.var_count(constraints)
 
     # Count reactions that were split (all of them in this symmetric approach)
     reactions = AbstractFBCModels.reactions(model)
