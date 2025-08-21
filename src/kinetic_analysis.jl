@@ -693,7 +693,7 @@ function identify_kinetic_modules(
     kinetic_modules = Dict{Symbol,Vector{Symbol}}()
 
     # Process each concordance module
-    for row in eachrow(concordance_modules_df)
+    for row in DF.eachrow(concordance_modules_df)
         module_id = Symbol(row.module_id)
         # Handle both string and vector format for complexes
         complex_names = if isa(row.complexes, String)
@@ -748,10 +748,10 @@ function identify_kinetic_modules(
 
     # Add balanced complexes as separate module if they exist
     # Look for balanced complexes in the complexes DataFrame
-    balanced_complexes = filter(row -> row.module == "balanced", complexes_df)
-    if nrow(balanced_complexes) >= min_module_size
+    balanced_complexes = DF.filter(row -> row.module == "balanced", complexes_df)
+    if DF.nrow(balanced_complexes) >= min_module_size
         balanced_names = Symbol[]
-        for row in eachrow(balanced_complexes)
+        for row in DF.eachrow(balanced_complexes)
             push!(balanced_names, Symbol(row.id))
         end
         # Sort for deterministic output

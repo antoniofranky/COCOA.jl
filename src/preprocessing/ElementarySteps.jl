@@ -6,14 +6,14 @@ steps based on enzyme mechanisms (ordered or random binding).
 """
 module ElementarySteps
 
-using COBREXA
-using AbstractFBCModels
-using SBMLFBCModels
-using JSONFBCModels
-using Random
-using SparseArrays
-using Logging
-using HiGHS
+import COBREXA
+import AbstractFBCModels
+import SBMLFBCModels
+import JSONFBCModels
+import Random
+import SparseArrays
+import Logging
+import HiGHS
 import AbstractFBCModels as A
 import AbstractFBCModels.CanonicalModel as CM
 

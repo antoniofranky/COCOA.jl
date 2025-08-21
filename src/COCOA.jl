@@ -46,26 +46,26 @@ For complete reproducibility, ensure:
 """
 module COCOA
 
-# Core dependencies used throughout the package
-# Use `using` for commonly used functions across multiple files
-using COBREXA
-using AbstractFBCModels
-using DataFrames
-using SparseArrays
-using Statistics
-using Random
-using StableRNGs
-using JuMP
-using ProgressMeter
+# Core dependencies - following JuMP style guide recommendations
+# Use qualified imports to avoid namespace pollution and improve code clarity
+import COBREXA
+import AbstractFBCModels
+import DataFrames as DF
+import SparseArrays
+import Statistics
+import Random
+import StableRNGs
+import JuMP as J
+import ProgressMeter
 
-# Import with qualification for less commonly used or potentially conflicting names
+# Already properly qualified
 import ConstraintTrees as C
 import Distributed as D
 import JLD2
 import HiGHS
 import Graphs
 
-# Macros require `using` - acceptable exception
+# Macros require `using` - acceptable exception per Julia docs
 using DocStringExtensions
 
 # Include preprocessing modules

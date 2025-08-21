@@ -181,7 +181,7 @@ function extract_solver_tolerance(optimizer, settings=[])::Float64
 
     try
         # Create a minimal model to query optimizer attributes
-        temp_model = JuMP.Model(optimizer)
+        temp_model = J.Model(optimizer)
 
         # Apply settings to get the actual configured tolerances
         for setting in [COBREXA.configuration.default_solver_settings; settings]
@@ -203,7 +203,7 @@ function extract_solver_tolerance(optimizer, settings=[])::Float64
 
         for attr in tolerance_attrs
             try
-                tol = JuMP.get_optimizer_attribute(temp_model, attr)
+                tol = J.get_optimizer_attribute(temp_model, attr)
                 if isa(tol, Real) && tol > 0 && tol < 1e-3
                     push!(detected_tolerances, Float64(tol))
                 end
@@ -233,8 +233,6 @@ end
 end
 
 """
-$(TYPEDSIGNATURES)
-
 Process streaming candidates directly with optimized batch processing.
 This eliminates the chunking layer for better performance with deterministic results.
 Streams candidates directly from filter and processes in batches.
@@ -257,10 +255,10 @@ function process_streaming_batches(
     # Track results using memory-efficient accumulator
     n_complexes = concordance_tracker !== nothing ? length(concordance_tracker.idx_to_id) : 1000
     accumulator = BatchResultAccumulator(n_complexes)
-    
+
     # Initialize memory monitoring
     memory_monitor = MemoryMonitor()
-    
+
     # Track additional stats
     total_batches_completed = 0
     total_pairs_processed = 0
@@ -268,7 +266,7 @@ function process_streaming_batches(
     # Dynamic batch sizing: start small and adjust based on actual candidate flow
     current_batch_size = max(100, streaming_filter.n_complexes)  # Start with small batches
     target_candidates_per_batch = 0  # Will be calculated once we know total candidates
-    
+
     # Stream processing state
     current_batch = Vector{PairCandidate}()
     sizehint!(current_batch, current_batch_size)
@@ -286,11 +284,12 @@ function process_streaming_batches(
     # Detect if running in non-interactive environment (SLURM, CI, etc.)
     is_interactive = isinteractive() && !(haskey(ENV, "SLURM_JOB_ID") || haskey(ENV, "CI") || haskey(ENV, "BATCH_SYSTEM"))
 
-    @info "Starting direct streaming processing"
-    initial_batch_size = current_batch_size,
-    target_batches = n_batches,
-    transitivity_filtering = use_transitivity ? "during_batch_processing" : "disabled",
-    interactive_mode = is_interactive
+    @info "Starting direct streaming processing" (
+        initial_batch_size=current_batch_size,
+        target_batches=n_batches,
+        transitivity_filtering=use_transitivity ? "during_batch_processing" : "disabled",
+        interactive_mode=is_interactive
+    )
 
     # Process candidates as they arrive from the streaming filter
     for candidate in streaming_filter
@@ -310,7 +309,7 @@ function process_streaming_batches(
                     target_candidates_per_batch = max(10, estimated_total ÷ n_batches)
                     current_batch_size = target_candidates_per_batch
                     batch_size_adjusted = true
-                    @info "Adjusted batch size based on estimated candidates" estimated_total=estimated_total target_batch_size=current_batch_size target_batches=n_batches
+                    @info "Adjusted batch size based on estimated candidates" estimated_total = estimated_total target_batch_size = current_batch_size target_batches = n_batches
                 end
 
                 # Create progress bar only in interactive environments
@@ -334,7 +333,7 @@ function process_streaming_batches(
             if prog !== nothing && is_interactive
                 # Calculate pairs actually tested via optimization
                 pairs_optimized = total_pairs_processed - accumulator.skipped_count
-                
+
                 ProgressMeter.update!(prog, total_candidates_seen;
                     showvalues=[
                         (:batches, batches_processed),
@@ -393,11 +392,11 @@ function process_streaming_batches(
                 batch_results.optimization_results
             )
 
-            
+
             # Log memory stats periodically
             if batches_processed % 10 == 0
                 current_mem = check_memory!(memory_monitor)
-                @debug "Memory status" batch=batches_processed memory_gb=current_mem peak_gb=memory_monitor.peak_memory gc_time=memory_monitor.gc_time
+                @debug "Memory status" batch = batches_processed memory_gb = current_mem peak_gb = memory_monitor.peak_memory gc_time = memory_monitor.gc_time
             end
 
             # Note: Mid-stream transitivity updates removed to ensure deterministic results
@@ -444,7 +443,7 @@ function process_streaming_batches(
     if prog !== nothing && is_interactive
         ProgressMeter.finish!(prog)
     end
-    
+
     # Always provide final status for batch environments
     if !is_interactive || prog === nothing
         @info "Processing completed" (
@@ -471,7 +470,7 @@ function process_streaming_batches(
     # Final memory report
     final_memory = check_memory!(memory_monitor)
     memory_used = memory_monitor.peak_memory - memory_monitor.initial_memory
-    
+
     @info "Direct streaming processing complete" (
         total_batches=batches_processed,
         candidates_streamed=total_candidates_seen,
@@ -493,7 +492,7 @@ function process_streaming_batches(
     for (i, j, dir, val) in accumulator.optimization_results
         opt_results_dict[(i, j, dir)] = val
     end
-    
+
     return (
         batches_completed=total_batches_completed,
         pairs_processed=total_pairs_processed,
@@ -525,7 +524,7 @@ function process_candidate_batch(
 )
     # Extract n_complexes from concordance_tracker for SparseConcordantPairs
     n_complexes = length(concordance_tracker.idx_to_id)
-    
+
     # Convert candidates to the format expected by process_concordance_batch
     batch_pairs = Vector{Tuple{Int,Int,UInt8}}()
     sizehint!(batch_pairs, length(candidates))
@@ -790,17 +789,17 @@ function process_concordance_batch(
 
             try
                 # Set c2 constraint to 1.0 and optimize c1
-                c2_constraint = @constraint(om, c2_constraint,
+                c2_constraint = J.@constraint(om, c2_constraint,
                     C.substitute(constraints.activities[c2_id].value, om[:x]) == 1.0)
 
-                @objective(om, JuMP.MAX_SENSE,
+                J.@objective(om, J.MAX_SENSE,
                     C.substitute(dir_multiplier * constraints.activities[c1_id].value, om[:x]))
 
-                optimize!(om)
+                J.optimize!(om)
 
                 # Get result (use NaN for invalid/missing values)
-                raw_value = if termination_status(om) in (OPTIMAL, LOCALLY_SOLVED) && is_solved_and_feasible(om)
-                    objective_value(om)
+                raw_value = if J.termination_status(om) in (J.OPTIMAL, J.LOCALLY_SOLVED) && J.is_solved_and_feasible(om)
+                    J.objective_value(om)
                 else
                     NaN
                 end
@@ -809,10 +808,10 @@ function process_concordance_batch(
                 actual_value = dir_multiplier == -1 ? (!isnan(raw_value) ? -raw_value : NaN) : raw_value
 
                 # Cleanup
-                delete(om, c2_constraint)
-                JuMP.unregister(om, :c2_constraint)
+                J.delete(om, c2_constraint)
+                J.unregister(om, :c2_constraint)
 
-                return (c1_id, c2_id, direction, dir_multiplier, actual_value, termination_status(om) == TIME_LIMIT)
+                return (c1_id, c2_id, direction, dir_multiplier, actual_value, J.termination_status(om) == J.TIME_LIMIT)
             catch e
                 @warn "Optimization error" c1_id c2_id direction error = string(e)
                 return (c1_id, c2_id, direction, dir_multiplier, NaN, false)
@@ -839,31 +838,31 @@ function process_concordance_batch(
 
         if !isempty(pair_results_by_dir)
             reference_lambda = NaN
-            
+
             for (direction, test_results) in pair_results_by_dir
                 min_val, max_val, timeout_occurred = test_results
 
                 timeout_occurred && (has_timeout = true)
 
                 # Early exit on failure
-                if timeout_occurred || isnan(min_val) || isnan(max_val) || 
+                if timeout_occurred || isnan(min_val) || isnan(max_val) ||
                    abs(min_val - max_val) > concordance_tolerance
-                    @debug "Pair failed concordance test" c1_idx c2_idx direction timeout_occurred min_val max_val diff=abs(min_val - max_val) tolerance=concordance_tolerance
+                    @debug "Pair failed concordance test" c1_idx c2_idx direction timeout_occurred min_val max_val diff = abs(min_val - max_val) tolerance = concordance_tolerance
                     break
                 end
-                
+
                 current_lambda = (min_val + max_val) / 2
                 push!(concordant_directions, direction)
-                
+
                 if isnan(reference_lambda)
                     reference_lambda = current_lambda
                     final_lambda = current_lambda
                 elseif abs(current_lambda - reference_lambda) > concordance_tolerance
-                    @info "Cross-direction lambda mismatch" c1_idx c2_idx reference_lambda current_lambda lambda_diff=abs(current_lambda - reference_lambda) tolerance=concordance_tolerance
+                    @info "Cross-direction lambda mismatch" c1_idx c2_idx reference_lambda current_lambda lambda_diff = abs(current_lambda - reference_lambda) tolerance = concordance_tolerance
                     break
                 end
             end
-            
+
             # Only concordant if we made it here
             all_concordant = !isnan(reference_lambda)
         end
@@ -1029,7 +1028,7 @@ function concordance_analysis(
     rng = if seed === nothing
         Random.GLOBAL_RNG
     else
-        StableRNG(seed::Int)
+        StableRNGs.StableRNG(seed::Int)
     end
 
     @info "Performing Activity Variability Analysis and generating warmup points"
@@ -1203,6 +1202,19 @@ function concordance_analysis(
         end
     end
 
+    # Create filtered activities constraint tree excluding balanced complexes for memory efficiency
+    active_complex_ids = [
+        concordance_tracker.idx_to_id[i]
+        for i in eachindex(concordance_tracker.idx_to_id)
+        if !balanced_complexes[i]
+    ]
+
+    filtered_activities = C.ConstraintTree(
+        id => constraints.activities[id]
+        for id in active_complex_ids
+        if haskey(constraints.activities, id)
+    )
+
     # Use tracker's idx_to_id directly as complexes_vector (it's already a Vector{Symbol})
     complexes_vector = concordance_tracker.idx_to_id
 
@@ -1261,7 +1273,7 @@ function concordance_analysis(
     # Strategy 1: Use extreme boundary points for maximum activity ranges
     if n_extreme_points > 0 && !isempty(warmup)
         # Select most diverse extreme points (max distance from each other)
-        extreme_indices = rand(rng, 1:size(warmup, 1), n_extreme_points)
+        extreme_indices = Random.rand(rng, 1:size(warmup, 1), n_extreme_points)
         for idx in extreme_indices
             push!(start_variables_list, warmup[idx, :])
         end
@@ -1270,7 +1282,7 @@ function concordance_analysis(
     # Strategy 2: Use center point for balanced exploration
     if n_center_points > 0 && !isempty(warmup)
         # Create center point as average of all warmup points
-        center_point = vec(mean(warmup, dims=1))
+        center_point = vec(Statistics.mean(warmup, dims=1))
         push!(start_variables_list, center_point)
     end
 
@@ -1286,11 +1298,11 @@ function concordance_analysis(
             n_base_points = min(n_base_points, size(warmup, 1))
 
             # Select points for maximum diversity
-            base_indices = rand(rng, 1:size(warmup, 1), n_base_points)
+            base_indices = Random.rand(rng, 1:size(warmup, 1), n_base_points)
 
             # Generate weights for uniform interior exploration
             resize!(weights, n_base_points)
-            rand!(rng, weights)
+            Random.rand!(rng, weights)
             weights ./= sum(weights)
 
             # Create convex combination - pre-allocate and reuse
@@ -1332,7 +1344,7 @@ function concordance_analysis(
     samples_tree = COBREXA.sample_constraints(
         COBREXA.sample_chain_achr,
         constraints.balance;
-        output=constraints.activities,
+        output=filtered_activities,
         start_variables=start_variables,
         workers=workers,
         seed=sampling_seed,
@@ -1350,7 +1362,7 @@ function concordance_analysis(
     # @debug "type of samples_tree" typeof(samples_tree)
     @info "Creating chunked streaming filter for memory-efficient processing..."
 
-    @info "Using dynamic batch sizing" target_batches=n_batches n_complexes=length(complexes_vector)
+    @info "Using dynamic batch sizing" target_batches = n_batches n_complexes = length(complexes_vector)
 
     # Create direct streaming filter (eliminates redundant chunking layer)
     filter_time = @elapsed streaming_filter = try
@@ -1408,7 +1420,7 @@ function concordance_analysis(
 
     # Sort modules for deterministic output
     sorted_module_keys = sort(collect(keys(modules)))
-    modules_df = DataFrame(
+    modules_df = DF.DataFrame(
         module_id=String.(sorted_module_keys),
         size=[length(modules[k]) for k in sorted_module_keys],
         complexes=[join(sort(String.(modules[k])), ", ") for k in sorted_module_keys],
@@ -1430,7 +1442,7 @@ function concordance_analysis(
         lambda_values[i] = lambda
     end
 
-    lambda_df = DataFrame(
+    lambda_df = DF.DataFrame(
         c1_idx=lambda_c1_idx,
         c2_idx=lambda_c2_idx,
         direction=lambda_direction,
@@ -1538,17 +1550,17 @@ function concordance_analysis(
 end
 
 function ava_output_with_warmup(dir, om; digits=6, collect_flux=true)
-    if JuMP.termination_status(om) != JuMP.OPTIMAL
+    if J.termination_status(om) != J.OPTIMAL
         return (nothing, nothing)
     end
 
     # Round the results to a reasonable precision to mitigate floating point noise
-    objective_val = round(JuMP.objective_value(om), digits=digits)
+    objective_val = round(J.objective_value(om), digits=digits)
     activity = dir * objective_val
 
     # Only collect flux vector if requested (for memory efficiency)
     if collect_flux
-        flux_vector = round.(JuMP.value.(om[:x]), digits=digits)
+        flux_vector = round.(J.value.(om[:x]), digits=digits)
     else
         flux_vector = Float64[]  # Empty vector to save memory
     end
@@ -1692,7 +1704,7 @@ function build_complexes_dataframe(
     complexes::Dict{Symbol,<:Any},
     modules::Dict{Symbol,Set{Symbol}},
     trivially_balanced::Set{Symbol}
-)::DataFrame
+)::DF.DataFrame
     ids = concordance_tracker.idx_to_id
     n_complexes = length(ids)
 
@@ -1730,7 +1742,7 @@ function build_complexes_dataframe(
     end
 
     # Construct DataFrame with pre-computed columns (zero additional allocations)
-    return DataFrame(
+    return DF.DataFrame(
         :id => ids,  # Reuse existing vector
         :n_metabolites => metabolite_counts,
         :is_trivially_balanced => is_trivially_balanced_lookup,
@@ -1742,13 +1754,13 @@ end
 Add activity columns to DataFrame using type-stable operations.
 """
 function add_activity_columns!(
-    complexes_df::DataFrame,
+    complexes_df::DF.DataFrame,
     concordance_tracker::ConcordanceTracker,
     activity_ranges::Vector{Tuple{Float64,Float64}},
     trivially_balanced::Set{Symbol},
     actual_balanced_tolerance::Float64
 )::Nothing
-    n_complexes_df = nrow(complexes_df)
+    n_complexes_df = DF.nrow(complexes_df)
 
     # Use concrete types instead of Union types for better performance
     min_activities = Vector{Float64}(undef, n_complexes_df)

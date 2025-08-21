@@ -5,9 +5,9 @@ Streaming producer-consumer architecture that processes unlimited candidates
 with constant memory usage (<1MB) through bidirectional filter-analysis communication.
 """
 
-using OnlineStats
-using OnlineStatsBase
-using Statistics
+import OnlineStatsBase
+import Statistics
+# DocStringExtensions macros require using
 using DocStringExtensions
 import ConstraintTrees as C
 import Base: push!, length, isempty, popfirst!
@@ -113,7 +113,7 @@ end
 Custom OnlineStat for coefficient of variation computation using Welford's algorithm.
 Provides numerical stability and supports efficient reuse via Base.empty!.
 """
-mutable struct CVStat <: OnlineStat{Number}
+mutable struct CVStat <: OnlineStatsBase.OnlineStat{Number}
     mean::Float64
     m2::Float64    # Sum of squared differences from mean (for Welford's algorithm)
     n::Int
@@ -154,7 +154,7 @@ Returns (cv, n_valid_samples) where cv = std/mean.
 @inline function compute_cv(o::CVStat, epsilon::Float64=1e-15)::Tuple{Float64,Int}
     o.n < 2 && return (Inf, o.n)
     abs(o.mean) < epsilon && return (Inf, o.n)
-    cv = std(o) / abs(o.mean)
+    cv = Statistics.std(o) / abs(o.mean)
     return (cv, o.n)
 end
 
@@ -381,7 +381,7 @@ function process_pair(filter::StreamingCandidateFilter, i::Int, j::Int)::Union{P
     @inbounds for k in 1:n_samples
         ratio = (c1_samples[k] + epsilon) / (c2_samples[k] + epsilon)
         if isfinite(ratio)
-            fit!(cv_stat, ratio)
+            OnlineStatsBase.fit!(cv_stat, ratio)
         end
     end
 

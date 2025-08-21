@@ -8,15 +8,15 @@ This module handles model preprocessing including:
 """
 module ModelPreparation
 
-using COBREXA
-using AbstractFBCModels
-using HiGHS
-using JuMP
+import COBREXA
+import AbstractFBCModels
+import HiGHS
+import JuMP as J
 import AbstractFBCModels.AbstractFBCModel
 import SBMLFBCModels.SBMLFBCModels
 import AbstractFBCModels.CanonicalModel as CM
-using Logging
-using Distributed
+import Logging
+import Distributed
 
 # Include sub-modules
 include("blocked_reactions.jl")
@@ -33,7 +33,7 @@ function extract_solver_tolerance(optimizer, settings=[])::Float64
 
     try
         # Create a minimal model to query optimizer attributes
-        temp_model = JuMP.Model(optimizer)
+        temp_model = J.Model(optimizer)
 
         # Apply settings to get the actual configured tolerances
         for setting in [COBREXA.configuration.default_solver_settings; settings]
@@ -55,7 +55,7 @@ function extract_solver_tolerance(optimizer, settings=[])::Float64
 
         for attr in tolerance_attrs
             try
-                tol = JuMP.get_optimizer_attribute(temp_model, attr)
+                tol = J.get_optimizer_attribute(temp_model, attr)
                 if isa(tol, Real) && tol > 0 && tol < 1e-3
                     push!(detected_tolerances, Float64(tol))
                 end

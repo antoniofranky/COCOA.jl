@@ -7,12 +7,11 @@ This module handles:
 - Individual reaction blocking verification
 """
 
-using COBREXA
-using HiGHS
-using JuMP
-using Distributed
-import AbstractFBCModels.CanonicalModel as CM
+import COBREXA
+import HiGHS
 import JuMP as J
+import Distributed
+import AbstractFBCModels.CanonicalModel as CM
 
 """
 Find blocked reactions using COBREXA's parallel FVA infrastructure.

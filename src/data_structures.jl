@@ -9,7 +9,7 @@ This module contains:
 - Memory-efficient data structures (SparseConcordantPairs, ObjectPool)
 """
 
-using SparseArrays
+import SparseArrays
 
 
 
@@ -362,13 +362,13 @@ Uses ~1 bit per pair instead of 16 bytes for Set{Tuple{Int,Int}}.
 mutable struct SparseConcordantPairs
     n::Int  # Number of complexes
     # Use sparse matrix for memory efficiency - only stores non-zero entries
-    matrix::SparseMatrixCSC{Bool,Int}
+    matrix::SparseArrays.SparseMatrixCSC{Bool,Int}
     # Track number of pairs for fast counting
     n_pairs::Int
 
     function SparseConcordantPairs(n_complexes::Int)
         # Initialize empty sparse matrix
-        matrix = spzeros(Bool, n_complexes, n_complexes)
+        matrix = SparseArrays.spzeros(Bool, n_complexes, n_complexes)
         new(n_complexes, matrix, 0)
     end
 end
@@ -402,7 +402,7 @@ Merge another SparseConcordantPairs into this one.
 function merge_pairs!(dest::SparseConcordantPairs, src::SparseConcordantPairs)
     # Use sparse matrix operations for efficiency
     dest.matrix = dest.matrix .| src.matrix
-    dest.n_pairs = nnz(dest.matrix)
+    dest.n_pairs = SparseArrays.nnz(dest.matrix)
 end
 
 
@@ -410,7 +410,7 @@ end
 Clear all pairs (for reuse).
 """
 function clear!(pairs::SparseConcordantPairs)
-    pairs.matrix = spzeros(Bool, pairs.n, pairs.n)
+    pairs.matrix = SparseArrays.spzeros(Bool, pairs.n, pairs.n)
     pairs.n_pairs = 0
 end
 
