@@ -8,12 +8,12 @@ model_path = "/work/schaffran1/toolbox/prpd_models/ordered/Schizosaccharomyces_p
 sample_size = 100
 seed = 42
 cv_threshold = 0.01
-n_batches = 1
+batch_size = 100_000
 use_transitivity = true
 # Construct output path based on parameters
 output_path = "/work/schaffran1/results_testjobs/concordance_results_schizo_split_" *
               lpad(string(seed), 2, "0") * "_" *
-              string(n_batches) * "_cv" *
+              string(batch_size) * "_cv" *
               replace(string(cv_threshold), "." => "p") * "_samples" *
               string(sample_size) *
               "_transitivity" * string(use_transitivity) * ".jld2"
@@ -35,7 +35,7 @@ results = COCOA.concordance_analysis(
     sample_size=sample_size,
     seed=seed,
     cv_threshold=cv_threshold,
-    n_batches=n_batches,
+    batch_size=batch_size,
     use_transitivity=use_transitivity
 )
 
