@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=cocoa_scaling_test
+#SBATCH --job-name=cv_test
 #SBATCH --chdir=/work/schaffran1/results_testjobs
-#SBATCH --output=results_testjobs/cocoa_scaling_test_%j.out
+#SBATCH --output=results_testjobs/cocoa_model_test_%j.out
 #SBATCH --time=24:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1

@@ -5,9 +5,9 @@ using SBMLFBCModels, AbstractFBCModels, COBREXA, JLD2
 # --- Hardcoded paths ---
 model_path = "/work/schaffran1/toolbox/prpd_models/ordered/Schizosaccharomyces_pombe.xml"           # Change as needed
 # Parameters for concordance_analysis
-sample_size = 100
+sample_size = 1000
 seed = 42
-cv_threshold = 0.1
+cv_threshold = 0.00001
 batch_size = 100_000
 use_transitivity = true
 # Construct output path based on parameters
