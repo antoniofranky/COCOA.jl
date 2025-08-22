@@ -7,7 +7,7 @@ model_path = "/work/schaffran1/toolbox/prpd_models/ordered/Schizosaccharomyces_p
 # Parameters for concordance_analysis
 sample_size = 100
 seed = 42
-cv_threshold = 0.01
+cv_threshold = 0.1
 batch_size = 100_000
 use_transitivity = true
 # Construct output path based on parameters
