@@ -274,9 +274,19 @@ function process_streaming_batches(
     total_candidates_seen = 0
     batches_processed = 0
 
+    # Track transitivity filtering across batches for detailed logging
+    last_filtered_concordant = 0
+    last_filtered_non_concordant = 0
+
+    # Timing tracking for batch collection and optimization
+    batch_collection_start_time = 0.0
+    total_possible_pairs = streaming_filter.n_complexes * (streaming_filter.n_complexes - 1) ÷ 2
 
     @info "Using fixed batch size: $batch_size candidates per batch"
     @info "Collecting candidates from streaming filter..."
+
+    # Start timing for first batch collection
+    batch_collection_start_time = time()
 
     # Process candidates as they arrive from the streaming filter
     for candidate in streaming_filter
@@ -288,6 +298,22 @@ function process_streaming_batches(
         if length(current_batch) >= batch_size
             batches_processed += 1
 
+            # Log completion of candidate collection for this batch
+            collection_time = time() - batch_collection_start_time
+            function format_time_hms_collection(seconds)
+                h = floor(Int, seconds / 3600)
+                m = floor(Int, (seconds % 3600) / 60)
+                s = seconds % 60
+                if h > 0
+                    return string(h, ":", lpad(m, 2, "0"), ":", lpad(round(s, digits=1), 4, "0"))
+                elseif m > 0
+                    return string(m, ":", lpad(round(s, digits=1), 4, "0"))
+                else
+                    return string(round(s, digits=1), "s")
+                end
+            end
+            @info "Batch $batches_processed: $(length(current_batch)) candidates collected in $(format_time_hms_collection(collection_time))"
+
             @info "Processing streaming batch $batches_processed" batch_size = length(current_batch) total_seen = total_candidates_seen
 
             # Clear module cache before processing to prevent memory buildup
@@ -295,17 +321,89 @@ function process_streaming_batches(
                 clear_module_cache!(concordance_tracker)
             end
 
-            # Process this batch using simplified approach
-            batch_results = process_candidate_batch(
-                constraints,
-                current_batch,
-                concordance_tracker;
-                optimizer=optimizer,
-                settings=settings,
-                workers=workers,
-                concordance_tolerance=concordance_tolerance,
-                use_transitivity=use_transitivity
-            )
+            # Track transitivity filtering for this batch
+            batch_transitive_concordant = 0
+            batch_transitive_non_concordant = 0
+
+            # Count how many candidates in this batch would have been filtered by transitivity
+            # This gives us accurate per-batch statistics
+            for candidate in current_batch
+                if use_transitivity
+                    c1_idx, c2_idx = candidate.c1_idx, candidate.c2_idx
+                    if are_concordant(concordance_tracker, c1_idx, c2_idx)
+                        batch_transitive_concordant += 1
+                    elseif is_non_concordant(concordance_tracker, c1_idx, c2_idx)
+                        batch_transitive_non_concordant += 1
+                    end
+                end
+            end
+
+            # Process batch
+            batch_results = if !isempty(current_batch)
+                # Start optimization timer
+                optimization_start_time = time()
+
+                # Run optimizations
+                opt_results = process_concordance_batch(
+                    constraints,
+                    current_batch,
+                    concordance_tracker;
+                    optimizer=optimizer,
+                    settings=settings,
+                    workers=workers,
+                    concordance_tolerance=concordance_tolerance
+                )
+
+                # Process results inline
+                concordant_pairs = SparseConcordantPairs(n_complexes)
+                non_concordant_count = 0
+                timeout_count = 0
+                opt_dict = Dict{Tuple{Int,Int,Symbol},Float64}()
+
+                for result in opt_results
+                    c1_idx, c2_idx, direction, is_concordant, lambda, has_timeout = result
+
+                    if has_timeout
+                        timeout_count += 1
+                    end
+
+                    if is_concordant
+                        union_sets!(concordance_tracker, c1_idx, c2_idx)
+                        add_pair!(concordant_pairs, c1_idx, c2_idx)
+                        if !isnothing(lambda) && !isnan(lambda)
+                            opt_dict[(c1_idx, c2_idx, direction)] = lambda
+                        end
+                    else
+                        add_non_concordant!(concordance_tracker, c1_idx, c2_idx)
+                        non_concordant_count += 1
+                    end
+                end
+
+                (
+                    batches_completed=1,
+                    pairs_processed=length(current_batch),
+                    concordant_pairs=concordant_pairs,
+                    non_concordant_pairs=non_concordant_count,
+                    skipped_by_transitivity=0,  # These weren't skipped - they passed the filter
+                    transitive_pairs=0,  # No transitive pairs in this batch
+                    transitive_non_concordant_pairs=0,  # No transitive non-concordant in this batch
+                    timeout_pairs=timeout_count,
+                    optimization_results=opt_dict
+                )
+            else
+                # Empty batch - shouldn't happen with proper filtering
+                (
+                    batches_completed=1,
+                    pairs_processed=0,
+                    concordant_pairs=SparseConcordantPairs(n_complexes),
+                    non_concordant_pairs=0,
+                    skipped_by_transitivity=0,
+                    transitive_pairs=0,
+                    transitive_non_concordant_pairs=0,
+                    timeout_pairs=0,
+                    optimization_results=Dict{Tuple{Int,Int,Symbol},Float64}()
+                )
+            end
 
             # Accumulate results efficiently
             total_batches_completed += batch_results.batches_completed
@@ -320,7 +418,41 @@ function process_streaming_batches(
                 batch_results.optimization_results
             )
 
-            @info "Batch $batches_processed completed: $(length(current_batch)) candidates processed, $(batch_results.concordant_pairs.n_pairs) concordant pairs, $(length(current_batch) - batch_results.skipped_by_transitivity) optimized, $(batch_results.skipped_by_transitivity) skipped by transitivity ($(batch_results.transitive_pairs) transitive concordant, $(batch_results.transitive_non_concordant_pairs) transitive non-concordant)"
+            # Calculate optimization time
+            optimization_time = time() - optimization_start_time
+
+            # Get filter stats to show transitivity filtering breakdown
+            current_filter_stats = get_filter_report(streaming_filter)
+
+            # Calculate what was filtered since last batch
+            batch_filtered_concordant = current_filter_stats.breakdown.known_concordant - last_filtered_concordant
+            batch_filtered_non_concordant = current_filter_stats.breakdown.known_non_concordant - last_filtered_non_concordant
+
+            # Update tracking
+            last_filtered_concordant = current_filter_stats.breakdown.known_concordant
+            last_filtered_non_concordant = current_filter_stats.breakdown.known_non_concordant
+
+            # Calculate optimized vs skipped
+            batch_total_filtered = batch_filtered_concordant + batch_filtered_non_concordant
+            batch_optimized = length(current_batch) - batch_total_filtered
+
+            # Format timing and calculate progress
+            function format_time_hms(seconds)
+                h = floor(Int, seconds / 3600)
+                m = floor(Int, (seconds % 3600) / 60)
+                s = seconds % 60
+                if h > 0
+                    return string(h, ":", lpad(m, 2, "0"), ":", lpad(round(s, digits=1), 4, "0"))
+                elseif m > 0
+                    return string(m, ":", lpad(round(s, digits=1), 4, "0"))
+                else
+                    return string(round(s, digits=1), "s")
+                end
+            end
+
+            progress_pct = round(current_filter_stats.pairs_tested / total_possible_pairs * 100, digits=1)
+
+            @info "Batch $batches_processed completed: $(length(current_batch)) candidates processed, $(batch_results.concordant_pairs.n_pairs) concordant pairs, $batch_optimized optimized, $batch_total_filtered skipped by transitivity ($batch_filtered_concordant transitive concordant, $batch_filtered_non_concordant transitive non-concordant) in $(format_time_hms(optimization_time)) - Progress: $(current_filter_stats.pairs_tested)/$total_possible_pairs ($(progress_pct)%)"
 
             # Log memory stats periodically
             if batches_processed % 10 == 0
@@ -331,8 +463,9 @@ function process_streaming_batches(
             # Note: Mid-stream transitivity updates removed to ensure deterministic results
             # regardless of batch size. Transitivity is applied during batch processing only.
 
-            # Clear batch for next round
+            # Clear batch for next round and restart collection timer
             empty!(current_batch)
+            batch_collection_start_time = time()
         end
     end
 
@@ -340,18 +473,87 @@ function process_streaming_batches(
     if !isempty(current_batch)
         batches_processed += 1
 
+        # Log completion of candidate collection for final batch
+        collection_time = time() - batch_collection_start_time
+        function format_time_hms_final(seconds)
+            h = floor(Int, seconds / 3600)
+            m = floor(Int, (seconds % 3600) / 60)
+            s = seconds % 60
+            if h > 0
+                return string(h, ":", lpad(m, 2, "0"), ":", lpad(round(s, digits=1), 4, "0"))
+            elseif m > 0
+                return string(m, ":", lpad(round(s, digits=1), 4, "0"))
+            else
+                return string(round(s, digits=1), "s")
+            end
+        end
+        @info "Batch $batches_processed: $(length(current_batch)) candidates collected in $(format_time_hms_final(collection_time))"
+
         @debug "Processing final streaming batch $batches_processed" batch_size = length(current_batch)
 
-        batch_results = process_candidate_batch(
-            constraints,
-            current_batch,
-            concordance_tracker;
-            optimizer=optimizer,
-            settings=settings,
-            workers=workers,
-            concordance_tolerance=concordance_tolerance,
-            use_transitivity=use_transitivity
-        )
+        # Process final batch directly - transitivity filtering already done in StreamingCandidateFilter
+        batch_results = if !isempty(current_batch)
+            # Start optimization timer
+            optimization_start_time = time()
+
+            opt_results = process_concordance_batch(
+                constraints,
+                current_batch,
+                concordance_tracker;
+                optimizer=optimizer,
+                settings=settings,
+                workers=workers,
+                concordance_tolerance=concordance_tolerance
+            )
+
+            concordant_pairs = SparseConcordantPairs(n_complexes)
+            non_concordant_count = 0
+            timeout_count = 0
+            opt_dict = Dict{Tuple{Int,Int,Symbol},Float64}()
+
+            for result in opt_results
+                c1_idx, c2_idx, direction, is_concordant, lambda, has_timeout = result
+
+                if has_timeout
+                    timeout_count += 1
+                end
+
+                if is_concordant
+                    union_sets!(concordance_tracker, c1_idx, c2_idx)
+                    add_pair!(concordant_pairs, c1_idx, c2_idx)
+                    if !isnothing(lambda) && !isnan(lambda)
+                        opt_dict[(c1_idx, c2_idx, direction)] = lambda
+                    end
+                else
+                    add_non_concordant!(concordance_tracker, c1_idx, c2_idx)
+                    non_concordant_count += 1
+                end
+            end
+
+            (
+                batches_completed=1,
+                pairs_processed=length(current_batch),
+                concordant_pairs=concordant_pairs,
+                non_concordant_pairs=non_concordant_count,
+                skipped_by_transitivity=0,  # Now handled in filter
+                transitive_pairs=0,  # Now handled in filter
+                transitive_non_concordant_pairs=0,  # Now handled in filter
+                timeout_pairs=timeout_count,
+                optimization_results=opt_dict
+            )
+        else
+            (
+                batches_completed=1,
+                pairs_processed=0,
+                concordant_pairs=SparseConcordantPairs(n_complexes),
+                non_concordant_pairs=0,
+                skipped_by_transitivity=0,
+                transitive_pairs=0,
+                transitive_non_concordant_pairs=0,
+                timeout_pairs=0,
+                optimization_results=Dict{Tuple{Int,Int,Symbol},Float64}()
+            )
+        end
 
         # Final accumulation
         total_batches_completed += batch_results.batches_completed
@@ -365,9 +567,47 @@ function process_streaming_batches(
             batch_results.skipped_by_transitivity,
             batch_results.optimization_results
         )
+
+        # Calculate optimization time and add completion log for final batch
+        optimization_time = time() - optimization_start_time
+        function format_time_hms_final_completion(seconds)
+            h = floor(Int, seconds / 3600)
+            m = floor(Int, (seconds % 3600) / 60)
+            s = seconds % 60
+            if h > 0
+                return string(h, ":", lpad(m, 2, "0"), ":", lpad(round(s, digits=1), 4, "0"))
+            elseif m > 0
+                return string(m, ":", lpad(round(s, digits=1), 4, "0"))
+            else
+                return string(round(s, digits=1), "s")
+            end
+        end
+
+        # Get final filter stats for progress
+        final_filter_stats = get_filter_report(streaming_filter)
+        progress_pct = round(final_filter_stats.pairs_tested / total_possible_pairs * 100, digits=1)
+
+        @info "Batch $batches_processed completed: $(length(current_batch)) candidates processed, $(batch_results.concordant_pairs.n_pairs) concordant pairs, $(length(current_batch)) optimized, 0 skipped by transitivity (0 transitive concordant, 0 transitive non-concordant) in $(format_time_hms_final_completion(optimization_time)) - Progress: $(final_filter_stats.pairs_tested)/$total_possible_pairs ($(progress_pct)%)"
     end
 
-    @info "Analysis complete: Total $(accumulator.concordant_pairs.n_pairs) concordant pairs ($(total_pairs_processed - accumulator.skipped_count) optimized, $(accumulator.transitive_count) via transitivity)"
+    # Get comprehensive filter report
+    filter_report = get_filter_report(streaming_filter)
+
+    # Use module-based counting for accurate total
+    total_concordant_from_modules = count_concordant_pairs_from_modules(concordance_tracker)
+
+    # CRITICAL: The total concordant pairs includes:
+    # 1. Pairs found concordant through optimization (in accumulator.concordant_pairs)
+    # 2. Pairs filtered as known concordant by transitivity (never tested)
+    total_concordant_from_optimization = accumulator.concordant_pairs.n_pairs
+    total_concordant_filtered = filter_report.breakdown.known_concordant
+
+    # Note: total_concordant_from_modules includes inferred pairs from module structure
+    # This is expected to be larger than explicit optimization + filtering counts
+
+    @info "Filter efficiency report" filter_report
+
+    @info "Analysis complete: Total $(total_concordant_from_modules) concordant pairs found ($(total_concordant_from_optimization) from optimization, $(total_concordant_filtered) filtered by transitivity)"
 
 
     # Validate results for deterministic behavior
@@ -378,10 +618,10 @@ function process_streaming_batches(
         @warn "Pair processing mismatch detected" expected = expected_pairs_processed actual = actual_pairs_processed difference = expected_pairs_processed - actual_pairs_processed
     end
 
-    # Calculate key metrics including transitive pairs
-    total_concordant_count = accumulator.concordant_pairs.n_pairs
+    # Calculate key metrics using module-based count
+    total_concordant_count = total_concordant_from_modules
     directly_tested = total_pairs_processed - accumulator.skipped_count
-    concordance_rate = total_concordant_count / max(1, total_pairs_processed) * 100
+    concordance_rate = total_concordant_count / max(1, filter_report.pairs_tested) * 100
     transitivity_effectiveness = round(accumulator.skipped_count / max(1, total_candidates_seen) * 100, digits=1)
 
     # Final memory report
@@ -390,14 +630,13 @@ function process_streaming_batches(
 
     @info "Direct streaming processing complete" (
         total_batches=batches_processed,
-        candidates_streamed=total_candidates_seen,
-        candidates_skipped_by_transitivity=accumulator.skipped_count,
+        filter_efficiency=filter_report,
+        candidates_passed_to_optimization=total_candidates_seen,
         pairs_tested_via_optimization=directly_tested,
-        concordant_via_testing=directly_tested,  # Approximation - exact count in batch results
-        concordant_via_transitivity=accumulator.transitive_count,
-        total_concordant_found=total_concordant_count,
+        total_concordant_found=total_concordant_from_modules,
+        concordant_from_optimization=total_concordant_from_optimization,
+        concordant_filtered=total_concordant_filtered,
         concordance_rate_pct=round(concordance_rate, digits=2),
-        transitivity_effectiveness_pct=transitivity_effectiveness,
         final_batch_size=batch_size,
         validation_passed=(expected_pairs_processed == actual_pairs_processed),
         peak_memory_gb=round(memory_monitor.peak_memory, digits=2),
@@ -413,7 +652,7 @@ function process_streaming_batches(
     return (
         batches_completed=total_batches_completed,
         pairs_processed=total_pairs_processed,
-        concordant_pairs=accumulator.concordant_pairs,  # Return SparseConcordantPairs directly
+        concordant_pairs=accumulator.concordant_pairs,  # Only optimization-found pairs (transitivity-filtered pairs already in tracker)
         non_concordant_pairs=accumulator.non_concordant_count,
         skipped_by_transitivity=accumulator.skipped_count,
         transitive_pairs=accumulator.transitive_count,
@@ -422,145 +661,6 @@ function process_streaming_batches(
     )
 end
 
-"""
-$(TYPEDSIGNATURES)
-
-Process a batch of PairCandidate objects directly.
-Simplified version for streaming processing without complex prioritization.
-"""
-function process_candidate_batch(
-    constraints::C.ConstraintTree,
-    candidates::Vector{PairCandidate},
-    concordance_tracker::ConcordanceTracker;
-    optimizer,
-    settings=[],
-    workers=workers,
-    concordance_tolerance::Float64=1e-4,
-    use_transitivity::Bool=true
-)
-    # Extract n_complexes from concordance_tracker for SparseConcordantPairs
-    n_complexes = length(concordance_tracker.idx_to_id)
-
-    # Convert candidates to the format expected by process_concordance_batch
-    batch_pairs = Vector{Tuple{Int,Int,UInt8}}()
-    sizehint!(batch_pairs, length(candidates))
-
-    # Track transitive concordant pairs that we skip testing but should count as concordant
-    transitive_concordant_pairs = SparseConcordantPairs(n_complexes)
-    transitive_non_concordant_pairs = 0
-
-    for candidate in candidates
-        # Apply transitivity filtering if enabled
-        if use_transitivity
-            c1_idx, c2_idx = Int(candidate.c1_idx), Int(candidate.c2_idx)
-            if are_concordant(concordance_tracker, c1_idx, c2_idx)
-                # This pair is transitively concordant - count it but don't test it
-                add_pair!(transitive_concordant_pairs, c1_idx, c2_idx)
-                continue  # Skip testing
-            elseif is_non_concordant(concordance_tracker, c1_idx, c2_idx)
-                # This pair is transitively non-concordant - count it but don't test it  
-                transitive_non_concordant_pairs += 1
-                continue  # Skip testing
-            end
-        end
-
-        push!(batch_pairs, (Int(candidate.c1_idx), Int(candidate.c2_idx), candidate.directions_bits))
-    end
-
-    # Track statistics
-    pairs_processed = length(candidates)
-    skipped_by_transitivity = length(candidates) - length(batch_pairs)
-
-    if isempty(batch_pairs)
-        # All pairs were filtered out by transitivity - but include transitive results
-        return (
-            batches_completed=1,
-            pairs_processed=pairs_processed,
-            concordant_pairs=transitive_concordant_pairs,  # Include transitive concordant pairs
-            non_concordant_pairs=transitive_non_concordant_pairs,  # Include transitive non-concordant
-            skipped_by_transitivity=skipped_by_transitivity,
-            transitive_pairs=transitive_concordant_pairs.n_pairs,
-            transitive_non_concordant_pairs=transitive_non_concordant_pairs,
-            timeout_pairs=0,
-            optimization_results=Dict{Tuple{Int,Int,Symbol},Float64}()
-        )
-    end
-
-    # Process the batch
-    batch_results = try
-        process_concordance_batch(
-            constraints, batch_pairs, concordance_tracker;
-            optimizer=optimizer,
-            settings=settings,
-            workers=workers,
-            concordance_tolerance=concordance_tolerance
-        )
-    catch e
-        @warn "Error processing candidate batch" error = string(e)
-        return (
-            batches_completed=1,
-            pairs_processed=pairs_processed,
-            concordant_pairs=SparseConcordantPairs(n_complexes),
-            non_concordant_pairs=0,
-            skipped_by_transitivity=skipped_by_transitivity,
-            transitive_pairs=0,
-            transitive_non_concordant_pairs=0,
-            timeout_pairs=0,
-            optimization_results=Dict{Tuple{Int,Int,Symbol},Float64}()
-        )
-    end
-
-    # Process results from direct testing
-    directly_concordant_pairs = SparseConcordantPairs(n_complexes)
-    non_concordant_pairs = transitive_non_concordant_pairs  # Start with transitive non-concordant
-    timeout_pairs = 0
-    optimization_results = Dict{Tuple{Int,Int,Symbol},Float64}()
-
-    for result in batch_results
-        c1_idx, c2_idx, direction, is_concordant, lambda, has_timeout = result
-
-        if has_timeout
-            timeout_pairs += 1
-        end
-
-        if is_concordant
-            union_sets!(concordance_tracker, c1_idx, c2_idx)
-            add_pair!(directly_concordant_pairs, c1_idx, c2_idx)
-
-            if !isnothing(lambda)
-                optimization_results[(c1_idx, c2_idx, direction)] = lambda
-            end
-        else
-            add_non_concordant!(concordance_tracker, c1_idx, c2_idx)
-            non_concordant_pairs += 1
-        end
-    end
-
-    # Combine directly tested concordant pairs with transitive concordant pairs
-    merge_pairs!(directly_concordant_pairs, transitive_concordant_pairs)
-
-    # Debug logging for transitive pair accounting
-    if transitive_concordant_pairs.n_pairs > 0
-        @debug "Transitive pair accounting" (
-            directly_tested=directly_concordant_pairs.n_pairs - transitive_concordant_pairs.n_pairs,
-            transitive_added=transitive_concordant_pairs.n_pairs,
-            total_concordant=directly_concordant_pairs.n_pairs,
-            batch_size_used=length(candidates)
-        )
-    end
-
-    return (
-        batches_completed=1,
-        pairs_processed=pairs_processed,
-        concordant_pairs=directly_concordant_pairs,  # Include both direct + transitive (merged)
-        non_concordant_pairs=non_concordant_pairs,  # Include both direct + transitive
-        skipped_by_transitivity=skipped_by_transitivity,
-        transitive_pairs=transitive_concordant_pairs.n_pairs,  # Track transitive concordant pairs found
-        transitive_non_concordant_pairs=transitive_non_concordant_pairs,  # Track transitive non-concordant pairs found
-        timeout_pairs=timeout_pairs,
-        optimization_results=optimization_results
-    )
-end
 
 """
 $(TYPEDSIGNATURES)
@@ -619,7 +719,7 @@ end
 const RESULT_DICT_POOL = ResultPool(() -> Dict{Tuple{Symbol,Symbol,Symbol},Dict{Int,Tuple{OptValue,Bool}}}(), 4)
 const PAIR_DICT_POOL = ResultPool(() -> Dict{Tuple{Symbol,Symbol},Vector{DirectionResult}}(), 4)
 
-function process_optimization_results(optimization_results, batch_pairs, concordance_tracker)
+function process_optimization_results(optimization_results, batch_pairs::Vector{PairCandidate}, concordance_tracker)
     # Get pooled dictionaries to avoid allocations
     result_dict = get_result!(RESULT_DICT_POOL)
     pair_results_dict = get_result!(PAIR_DICT_POOL)
@@ -658,8 +758,8 @@ function process_optimization_results(optimization_results, batch_pairs, concord
     # Cache idx_to_id for better performance
     idx_to_id = concordance_tracker.idx_to_id
 
-    for (i, (c1_idx, c2_idx, _)) in enumerate(batch_pairs)
-        c1_id, c2_id = idx_to_id[c1_idx], idx_to_id[c2_idx]
+    for (i, candidate) in enumerate(batch_pairs)
+        c1_id, c2_id = idx_to_id[candidate.c1_idx], idx_to_id[candidate.c2_idx]
         batch_results[i] = get(pair_results_dict, (c1_id, c2_id), DirectionResult[])
     end
 
@@ -680,19 +780,20 @@ Process a batch of concordance tests using ConstraintTrees templated approach wi
 """
 function process_concordance_batch(
     constraints::C.ConstraintTree,
-    batch_pairs::Vector{Tuple{Int,Int,UInt8}},
+    batch_pairs::Vector{PairCandidate},
     concordance_tracker::ConcordanceTracker;
     optimizer,
     settings=[],
     workers=workers,
     concordance_tolerance::Float64=1e-4
 )
-    # Create COBREXA-style test array with direction multipliers
+    # Create COBREXA-style test array with direction multipliers directly from PairCandidate
     test_array = []
-    for (c1_idx, c2_idx, directions_bits) in batch_pairs
-        c1_id, c2_id = concordance_tracker.idx_to_id[c1_idx], concordance_tracker.idx_to_id[c2_idx]
+    for candidate in batch_pairs
+        c1_id = concordance_tracker.idx_to_id[candidate.c1_idx]
+        c2_id = concordance_tracker.idx_to_id[candidate.c2_idx]
         # Iterate over directions using bit flags
-        for direction in iterate_directions(directions_bits)
+        for direction in iterate_directions(candidate.directions_bits)
             # Add both MIN (-1) and MAX (+1) tests
             push!(test_array, (c1_id, c2_id, direction, -1))  # MIN test
             push!(test_array, (c1_id, c2_id, direction, +1))  # MAX test
@@ -746,7 +847,8 @@ function process_concordance_batch(
 
     final_results = []
     for (i, pair_results_by_dir) in enumerate(batch_results)
-        c1_idx, c2_idx, original_directions_bits = batch_pairs[i]
+        candidate = batch_pairs[i]
+        c1_idx, c2_idx = candidate.c1_idx, candidate.c2_idx
 
         all_concordant = false
         final_lambda = NaN
@@ -947,12 +1049,16 @@ function concordance_analysis(
     end
 
     @info "Performing Activity Variability Analysis and generating warmup points"
+    # Pre-calculate rounding digits based on solver tolerance for efficiency
+    ava_digits = max(1, -floor(Int, log10(solver_tolerance)))
+    ava_output_func = (dir, om) -> ava_output_with_warmup(dir, om; digits=ava_digits)
+    
     ava_time = @elapsed ava_results = COBREXA.constraints_variability(
         constraints.balance,
         constraints.activities;
         optimizer=optimizer,
         settings=settings,
-        output=ava_output_with_warmup,
+        output=ava_output_func,
         output_type=Tuple{Float64,Vector{Float64}},
         workers=workers,
     )
@@ -1045,7 +1151,7 @@ function concordance_analysis(
     # Use BitVectors consistently for optimal performance with large models (50K+ reactions)
     n_complexes = length(concordance_tracker.idx_to_id)
 
-    # Initialize BitVector masks in the ConcordanceTracker for memory efficiency
+    # Initialize BitVector masks in the ConcordanceTracker
     ensure_mask_allocated!(concordance_tracker, :balanced)
     ensure_mask_allocated!(concordance_tracker, :positive)
     ensure_mask_allocated!(concordance_tracker, :negative)
@@ -1255,7 +1361,7 @@ function concordance_analysis(
     else
         UInt64(seed + 1000)  # Deterministic offset from main seed
     end
-
+    @info "Sampling..."
     samples_tree = COBREXA.sample_constraints(
         COBREXA.sample_chain_achr,
         constraints.balance;
@@ -1288,7 +1394,8 @@ function concordance_analysis(
             concordance_tracker;
             cv_threshold=actual_cv_threshold,
             cv_epsilon=cv_epsilon,
-            min_valid_samples=min_valid_samples
+            min_valid_samples=min_valid_samples,
+            use_transitivity=use_transitivity
         )
     catch e
         @error "Failed to create streaming filter." exception = e
@@ -1312,6 +1419,18 @@ function concordance_analysis(
 
     @info "Building concordance modules" concordance_time_sec = round(concordance_time, digits=2)
     modules = extract_modules(concordance_tracker)
+
+    # Use module-based counting for accurate totals
+    total_concordant_from_modules = count_concordant_pairs_from_modules(concordance_tracker)
+
+    # Debug: compare with tracked count
+    tracked_concordant = batch_results.concordant_pairs.n_pairs
+    @info "Concordance counting comparison" (
+        from_modules=total_concordant_from_modules - length(trivial_pairs),
+        from_tracking=tracked_concordant,
+        trivial_pairs=length(trivial_pairs),
+        total_modules=total_concordant_from_modules
+    )
 
     # Build DataFrame with pre-computed columns for better performance
     complexes_df = build_complexes_dataframe(
@@ -1372,10 +1491,10 @@ function concordance_analysis(
         "n_trivially_balanced" => length(trivially_balanced),
         "n_trivial_pairs" => length(trivial_pairs),
         "n_candidate_pairs" => batch_results.pairs_processed,  # Total candidates processed across all chunks
-        "n_concordant_found" => batch_results.concordant_pairs.n_pairs,  # Concordant pairs found during analysis (direct + inferred)
-        "n_concordant_direct" => batch_results.concordant_pairs.n_pairs - batch_results.transitive_pairs,  # Found via direct optimization testing
-        "n_concordant_inferred" => batch_results.transitive_pairs,  # Found via transitivity inference (no optimization needed)
-        "n_concordant_total" => batch_results.concordant_pairs.n_pairs + length(trivial_pairs),  # All concordant pairs (found + trivial)
+        "n_concordant_found" => total_concordant_from_modules - length(trivial_pairs),  # Non-trivial concordant pairs from modules
+        "n_concordant_opt" => batch_results.concordant_pairs.n_pairs,  # Found via direct optimization testing
+        "n_concordant_inferred" => total_concordant_from_modules - length(trivial_pairs) - batch_results.concordant_pairs.n_pairs,  # Found via transitivity
+        "n_concordant_total" => total_concordant_from_modules,  # All concordant pairs from modules
         "n_non_concordant_pairs" => batch_results.non_concordant_pairs,
         "n_candidates_skipped_by_transitivity" => batch_results.skipped_by_transitivity,  # Candidates not tested due to transitivity
         "n_timeout_pairs" => batch_results.timeout_pairs,
@@ -1427,7 +1546,7 @@ function concordance_analysis(
             actual_total=actual_total_concordant,
             found_pairs=stats["n_concordant_found"],
             trivial_pairs=stats["n_trivial_pairs"],
-            via_direct_testing=stats["n_concordant_direct"],
+            via_direct_testing=stats["n_concordant_opt"],
             via_inference=stats["n_concordant_inferred"],
             difference=actual_total_concordant - expected_total_concordant
         )
@@ -1444,7 +1563,7 @@ function concordance_analysis(
     @info "Concordance analysis complete" (
         candidates_generated=stats["n_candidate_pairs"],
         candidates_skipped_by_transitivity=stats["n_candidates_skipped_by_transitivity"],
-        concordant_direct=stats["n_concordant_direct"],
+        concordant_direct=stats["n_concordant_opt"],
         concordant_inferred=stats["n_concordant_inferred"],
         non_concordant=stats["n_non_concordant_pairs"],
         trivial_concordant=stats["n_trivial_pairs"],
@@ -1462,7 +1581,7 @@ function concordance_analysis(
     )
 end
 
-function ava_output_with_warmup(dir, om; digits=6, collect_flux=true)
+function ava_output_with_warmup(dir, om; digits, collect_flux=true)
     if J.termination_status(om) != J.OPTIMAL
         return (nothing, nothing)
     end
@@ -1471,7 +1590,7 @@ function ava_output_with_warmup(dir, om; digits=6, collect_flux=true)
     objective_val = round(J.objective_value(om), digits=digits)
     activity = dir * objective_val
 
-    # Only collect flux vector if requested (for memory efficiency)
+    # Only collect flux vector if requested
     if collect_flux
         flux_vector = round.(J.value.(om[:x]), digits=digits)
     else

@@ -33,7 +33,6 @@ mutable struct ConcordanceTracker
 
     # Non-concordance tracking
     non_concordant_pairs::Set{Tuple{Int,Int}}  # Direct non-concordant pairs
-    # --- MODIFIED: Changed from Dict{Tuple{Int,Int},Bool} to Set for memory efficiency ---
     non_concordant_modules::Set{Tuple{Int,Int}}  # Module relationship cache
     module_members_cache::Dict{Int,Vector{Int}}  # Module membership cache
 
@@ -259,6 +258,30 @@ end
 
 function clear_module_cache!(tracker::ConcordanceTracker)
     empty!(tracker.module_members_cache)
+end
+
+"""
+Count total concordant pairs from modules.
+For a module with n complexes, there are n*(n-1)/2 concordant pairs.
+"""
+function count_concordant_pairs_from_modules(tracker::ConcordanceTracker)::Int
+    # Group complexes by their module representative
+    modules = Dict{Int,Int}()  # representative -> count
+    
+    for i in 1:length(tracker.parent)
+        rep = find_set!(tracker, i)
+        modules[rep] = get(modules, rep, 0) + 1
+    end
+    
+    # Count pairs in each module
+    total_pairs = 0
+    for (rep, size) in modules
+        if size > 1
+            total_pairs += size * (size - 1) ÷ 2
+        end
+    end
+    
+    return total_pairs
 end
 
 # --- BitVector mask management functions ---

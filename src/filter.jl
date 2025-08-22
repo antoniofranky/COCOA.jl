@@ -21,8 +21,8 @@ Packed candidate structure optimized for memory efficiency.
 15 bytes total vs 25+ bytes in previous versions.
 """
 struct PairCandidate
-    c1_idx::UInt32        # 4 bytes - supports up to 4B complexes
-    c2_idx::UInt32        # 4 bytes 
+    c1_idx::Int           # Use Int for direct compatibility with ConcordanceTracker
+    c2_idx::Int           # Avoids Int() conversions throughout pipeline
     directions_bits::UInt8 # 1 byte - bit flags for directions
     cv::Float32           # 4 bytes - sufficient precision for CV values
     n_samples::UInt16     # 2 bytes - supports up to 65K samples
@@ -202,12 +202,14 @@ mutable struct StreamingCandidateFilter
     insufficient_samples::Int
 
     # Enhanced transitivity tracking
-    pairs_skipped_by_transitivity::Int  # Pairs skipped due to existing concordance/non-concordance
+    pairs_transitivity_concordant_filtered::Int  # Pairs filtered as known concordant
+    pairs_transitivity_non_concordant_filtered::Int  # Pairs filtered as known non-concordant
+    pairs_skipped_by_transitivity::Int  # Total pairs skipped (concordant + non-concordant)
     transitivity_updates_received::Int  # How many discovery updates received
 
     # Control flags
     should_stop::Bool
-    # Note: transitivity filtering moved to batch processing stage for better effectiveness
+    use_transitivity::Bool  # Whether to apply transitivity filtering
 end
 
 function StreamingCandidateFilter(
@@ -217,7 +219,8 @@ function StreamingCandidateFilter(
     concordance_tracker::ConcordanceTracker;
     cv_threshold::Float64=0.01,
     cv_epsilon::Float64=1e-15,
-    min_valid_samples::Int=10
+    min_valid_samples::Int=10,
+    use_transitivity::Bool=true
 )
     # Ensure BitVectors are allocated
     ensure_mask_allocated!(concordance_tracker, :balanced)
@@ -239,8 +242,9 @@ function StreamingCandidateFilter(
         CVStat(),
         concordance_tracker.idx_to_id,
         0, 0, 0, 0, 0, 0, 0, 0,  # Original statistics counters
-        0, 0,  # Enhanced transitivity tracking counters
-        false
+        0, 0, 0, 0,  # Enhanced transitivity tracking counters
+        false,  # should_stop
+        use_transitivity  # use_transitivity flag
     )
 end
 
@@ -260,6 +264,12 @@ function Base.iterate(filter::StreamingCandidateFilter, state=nothing)
     while filter.current_i <= filter.n_complexes && !filter.should_stop
         filter.iteration_count += 1
         i, j = filter.current_i, filter.current_j
+
+        # Progress logging every 10% of total possible pairs
+        if state !== nothing && filter.pairs_tested > 0 && filter.pairs_tested % (state ÷ 10) == 0
+            progress_pct = round(filter.pairs_tested / state * 100, digits=1)
+            @info "Candidate generation progress: $(filter.pairs_tested)/$(state) ($(progress_pct)%)" candidates_found = filter.candidates_found
+        end
 
         # Check bounds before processing
         if i <= filter.n_complexes && j <= filter.n_complexes && i < j
@@ -339,13 +349,8 @@ function process_pair(filter::StreamingCandidateFilter, i::Int, j::Int)::Union{P
             return nothing
         end
 
-        # Skip transitivity filtering at candidate generation stage.
-        # Transitivity filtering is more effective during batch processing
-        # when the concordance tracker has built up more relationships.
-        # Early filtering here can miss valid concordant pairs.
-        # 
-        # Note: pairs_concordant_filtered and pairs_skipped_by_transitivity
-        # remain at 0 to indicate no early transitivity filtering occurred.
+        # Skip early transitivity filtering here - it causes O(n²) overhead
+        # Transitivity filtering moved to after CV check for much better performance
 
         # Cache complex IDs lookup
         idx_to_id = filter.idx_to_id
@@ -365,8 +370,8 @@ function process_pair(filter::StreamingCandidateFilter, i::Int, j::Int)::Union{P
         # since we have no evidence to exclude them from concordance analysis
         directions_bits = determine_directions_bits(j, filter.positive, filter.negative)
         return PairCandidate(
-            UInt32(i),
-            UInt32(j),
+            i,
+            j,
             directions_bits,
             Float32(Inf),  # Use Inf CV to indicate missing data
             UInt16(0)      # Zero valid samples
@@ -380,8 +385,8 @@ function process_pair(filter::StreamingCandidateFilter, i::Int, j::Int)::Union{P
         # Include pairs with insufficient samples as candidates with infinite CV
         directions_bits = determine_directions_bits(j, filter.positive, filter.negative)
         return PairCandidate(
-            UInt32(i),
-            UInt32(j),
+            i,
+            j,
             directions_bits,
             Float32(Inf),  # Use Inf CV to indicate insufficient data
             UInt16(n_samples)  # Record actual sample count
@@ -399,12 +404,12 @@ function process_pair(filter::StreamingCandidateFilter, i::Int, j::Int)::Union{P
         # Handle missing values within sample arrays
         c1_val = c1_samples[k]
         c2_val = c2_samples[k]
-        
+
         # Skip missing values using Julia's ismissing() function
         if ismissing(c1_val) || ismissing(c2_val)
             continue
         end
-        
+
         ratio = (c1_val + epsilon) / (c2_val + epsilon)
         if isfinite(ratio)
             OnlineStatsBase.fit!(cv_stat, ratio)
@@ -421,8 +426,8 @@ function process_pair(filter::StreamingCandidateFilter, i::Int, j::Int)::Union{P
         # Don't apply CV threshold since we don't have enough data to make that judgment
         directions_bits = determine_directions_bits(j, filter.positive, filter.negative)
         return PairCandidate(
-            UInt32(i),
-            UInt32(j),
+            i,
+            j,
             directions_bits,
             Float32(cv),  # Record computed CV even if based on few samples
             UInt16(n_valid)
@@ -435,13 +440,27 @@ function process_pair(filter::StreamingCandidateFilter, i::Int, j::Int)::Union{P
         return nothing
     end
 
+    # Apply transitivity filtering AFTER CV check (much more efficient)
+    # Only check transitivity for pairs that passed CV filtering
+    if filter.use_transitivity
+        if are_concordant(filter.concordance_tracker, i, j)
+            filter.pairs_transitivity_concordant_filtered += 1
+            filter.pairs_skipped_by_transitivity += 1
+            return nothing  # Skip known concordant pairs (already in ConcordanceTracker)
+        elseif is_non_concordant(filter.concordance_tracker, i, j)
+            filter.pairs_transitivity_non_concordant_filtered += 1
+            filter.pairs_skipped_by_transitivity += 1
+            return nothing  # Skip known non-concordant pairs
+        end
+    end
+
     # Determine directions
     directions_bits = determine_directions_bits(j, filter.positive, filter.negative)
 
     # Create candidate
     return PairCandidate(
-        UInt32(i),
-        UInt32(j),
+        i,
+        j,
         directions_bits,
         Float32(cv),
         UInt16(n_valid)
@@ -487,12 +506,35 @@ end
 # Section 7: Type Compatibility
 # ========================================================================================
 
+
 """
-Type alias for backward compatibility with analysis.jl.
-PairCandidate has the same field structure as the old PairPriority.
+Get filtering statistics report from a StreamingCandidateFilter.
+Returns a NamedTuple with detailed filtering breakdown.
 """
-const PairPriority = PairCandidate
+function get_filter_report(filter::StreamingCandidateFilter)
+    total_filtered = filter.pairs_balanced_filtered +
+                     filter.pairs_trivial_filtered +
+                     filter.pairs_cv_filtered +
+                     filter.pairs_transitivity_concordant_filtered +
+                     filter.pairs_transitivity_non_concordant_filtered
+
+    return (
+        pairs_tested=filter.pairs_tested,
+        candidates_found=filter.candidates_found,
+        total_filtered=total_filtered,
+        filtering_rate=round(total_filtered / max(1, filter.pairs_tested) * 100, digits=1),
+        breakdown=(
+            balanced=filter.pairs_balanced_filtered,
+            trivial=filter.pairs_trivial_filtered,
+            cv_threshold=filter.pairs_cv_filtered,
+            known_concordant=filter.pairs_transitivity_concordant_filtered,
+            known_non_concordant=filter.pairs_transitivity_non_concordant_filtered,
+            missing_samples=filter.pairs_missing_samples,
+            insufficient_samples=filter.insufficient_samples
+        )
+    )
+end
 
 # Export main interface
-export StreamingCandidateFilter, PairCandidate, PairPriority,
-    update_filter_with_discoveries!, signal_early_stop!
+export StreamingCandidateFilter, PairCandidate,
+    update_filter_with_discoveries!, signal_early_stop!, get_filter_report
