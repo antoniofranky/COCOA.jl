@@ -358,17 +358,34 @@ function process_pair(filter::StreamingCandidateFilter, i::Int, j::Int)::Union{P
     c1_samples = samples_tree[c1_id]
     c2_samples = samples_tree[c2_id]
 
-    # Skip if samples missing
-    if c1_samples === nothing || c2_samples === nothing
+    # Handle missing samples - use ismissing() for proper Julia missing value detection
+    if ismissing(c1_samples) || ismissing(c2_samples) || c1_samples === nothing || c2_samples === nothing
         filter.pairs_missing_samples += 1
-        return nothing
+        # Default behavior: Include pairs with missing samples as candidates
+        # since we have no evidence to exclude them from concordance analysis
+        directions_bits = determine_directions_bits(j, filter.positive, filter.negative)
+        return PairCandidate(
+            UInt32(i),
+            UInt32(j),
+            directions_bits,
+            Float32(Inf),  # Use Inf CV to indicate missing data
+            UInt16(0)      # Zero valid samples
+        )
     end
 
-    # Determine sample size and check minimum requirement
+    # Determine sample size - handle case where samples exist but are insufficient
     n_samples = min(length(c1_samples), length(c2_samples))
     if n_samples < 2
         filter.pairs_missing_samples += 1
-        return nothing
+        # Include pairs with insufficient samples as candidates with infinite CV
+        directions_bits = determine_directions_bits(j, filter.positive, filter.negative)
+        return PairCandidate(
+            UInt32(i),
+            UInt32(j),
+            directions_bits,
+            Float32(Inf),  # Use Inf CV to indicate insufficient data
+            UInt16(n_samples)  # Record actual sample count
+        )
     end
 
     # Reset and compute CV using OnlineStats with Welford's algorithm
@@ -379,7 +396,16 @@ function process_pair(filter::StreamingCandidateFilter, i::Int, j::Int)::Union{P
     epsilon = filter.cv_epsilon
 
     @inbounds for k in 1:n_samples
-        ratio = (c1_samples[k] + epsilon) / (c2_samples[k] + epsilon)
+        # Handle missing values within sample arrays
+        c1_val = c1_samples[k]
+        c2_val = c2_samples[k]
+        
+        # Skip missing values using Julia's ismissing() function
+        if ismissing(c1_val) || ismissing(c2_val)
+            continue
+        end
+        
+        ratio = (c1_val + epsilon) / (c2_val + epsilon)
         if isfinite(ratio)
             OnlineStatsBase.fit!(cv_stat, ratio)
         end
@@ -388,12 +414,22 @@ function process_pair(filter::StreamingCandidateFilter, i::Int, j::Int)::Union{P
     cv, n_valid = compute_cv(filter.cv_stat, filter.cv_epsilon)
 
 
-    # Track insufficient samples but include in candidates
+    # Handle insufficient samples - include them as candidates regardless of CV
     if n_valid < filter.min_valid_samples
         filter.insufficient_samples += 1
+        # Include pairs with insufficient samples as candidates
+        # Don't apply CV threshold since we don't have enough data to make that judgment
+        directions_bits = determine_directions_bits(j, filter.positive, filter.negative)
+        return PairCandidate(
+            UInt32(i),
+            UInt32(j),
+            directions_bits,
+            Float32(cv),  # Record computed CV even if based on few samples
+            UInt16(n_valid)
+        )
     end
 
-    # Apply CV threshold
+    # Apply CV threshold only to pairs with sufficient samples
     if cv > filter.cv_threshold
         filter.pairs_cv_filtered += 1
         return nothing

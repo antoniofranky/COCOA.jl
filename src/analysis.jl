@@ -320,7 +320,7 @@ function process_streaming_batches(
                 batch_results.optimization_results
             )
 
-            @info "Batch $batches_processed completed: $(length(current_batch)) candidates processed, $(batch_results.concordant_pairs.n_pairs) concordant pairs, $(batch_results.pairs_processed) optimized, $(batch_results.skipped_by_transitivity) filtered by transitivity, $(batch_results.transitive_pairs) found via transitivity"
+            @info "Batch $batches_processed completed: $(length(current_batch)) candidates processed, $(batch_results.concordant_pairs.n_pairs) concordant pairs, $(length(current_batch) - batch_results.skipped_by_transitivity) optimized, $(batch_results.skipped_by_transitivity) skipped by transitivity ($(batch_results.transitive_pairs) transitive concordant, $(batch_results.transitive_non_concordant_pairs) transitive non-concordant)"
 
             # Log memory stats periodically
             if batches_processed % 10 == 0
@@ -367,7 +367,7 @@ function process_streaming_batches(
         )
     end
 
-    @info "Analysis complete: Total $(accumulator.concordant_pairs.n_pairs) concordant pairs ($(total_pairs_processed - accumulator.skipped_count) optimized, $(accumulator.transitive_pairs.n_pairs) via transitivity)"
+    @info "Analysis complete: Total $(accumulator.concordant_pairs.n_pairs) concordant pairs ($(total_pairs_processed - accumulator.skipped_count) optimized, $(accumulator.transitive_count) via transitivity)"
 
 
     # Validate results for deterministic behavior
@@ -398,7 +398,7 @@ function process_streaming_batches(
         total_concordant_found=total_concordant_count,
         concordance_rate_pct=round(concordance_rate, digits=2),
         transitivity_effectiveness_pct=transitivity_effectiveness,
-        final_batch_size=current_batch_size,
+        final_batch_size=batch_size,
         validation_passed=(expected_pairs_processed == actual_pairs_processed),
         peak_memory_gb=round(memory_monitor.peak_memory, digits=2),
         memory_used_gb=round(memory_used, digits=2),
@@ -480,6 +480,7 @@ function process_candidate_batch(
             non_concordant_pairs=transitive_non_concordant_pairs,  # Include transitive non-concordant
             skipped_by_transitivity=skipped_by_transitivity,
             transitive_pairs=transitive_concordant_pairs.n_pairs,
+            transitive_non_concordant_pairs=transitive_non_concordant_pairs,
             timeout_pairs=0,
             optimization_results=Dict{Tuple{Int,Int,Symbol},Float64}()
         )
@@ -503,6 +504,7 @@ function process_candidate_batch(
             non_concordant_pairs=0,
             skipped_by_transitivity=skipped_by_transitivity,
             transitive_pairs=0,
+            transitive_non_concordant_pairs=0,
             timeout_pairs=0,
             optimization_results=Dict{Tuple{Int,Int,Symbol},Float64}()
         )
@@ -553,7 +555,8 @@ function process_candidate_batch(
         concordant_pairs=directly_concordant_pairs,  # Include both direct + transitive (merged)
         non_concordant_pairs=non_concordant_pairs,  # Include both direct + transitive
         skipped_by_transitivity=skipped_by_transitivity,
-        transitive_pairs=transitive_concordant_pairs.n_pairs,  # Track transitive pairs found
+        transitive_pairs=transitive_concordant_pairs.n_pairs,  # Track transitive concordant pairs found
+        transitive_non_concordant_pairs=transitive_non_concordant_pairs,  # Track transitive non-concordant pairs found
         timeout_pairs=timeout_pairs,
         optimization_results=optimization_results
     )
