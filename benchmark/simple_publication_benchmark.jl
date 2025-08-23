@@ -40,7 +40,7 @@ function warmup_julia()
         test_model = COBREXA.load_model(test_model_path)
 
         @info "Running warm-up analysis (small sample)"
-        @time warmup_result = concordance_analysis(
+        @time warmup_result = activity_concordance_analysis(
             test_model;
             optimizer=HiGHS.Optimizer,
             settings=[
@@ -240,7 +240,7 @@ function benchmark_single_model(model_file::String; n_runs::Int=3, sample_size::
         sleep(1)
 
         # Create analysis function (model already loaded)
-        analysis_func = () -> concordance_analysis(
+        analysis_func = () -> activity_concordance_analysis(
             model;
             optimizer=HiGHS.Optimizer,
             settings=HIGHS_SETTINGS,

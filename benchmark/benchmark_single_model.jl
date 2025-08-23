@@ -140,12 +140,12 @@ function benchmark_single_model(model_file::String)
     # Pre-compile with a minimal run (conditional for large models)
     precompile_time = 0.0  # Initialize outside try-catch to ensure scope
     if !config.skip_precompile
-        @info "Pre-compiling concordance_analysis..."
+        @info "Pre-compiling activity_concordance_analysis..."
         precompile_start = time()
         precomp_model = COBREXA.load_model("/work/schaffran1/COCOA.jl/test/e_coli_core.xml")
         try
             # Minimal run for precompilation
-            concordance_analysis(
+            activity_concordance_analysis(
                 precomp_model;
                 optimizer=HiGHS.Optimizer,
                 settings=HIGHS_SETTINGS,
@@ -169,7 +169,7 @@ function benchmark_single_model(model_file::String)
     GC.gc()
 
     # Create benchmark function that only measures the analysis
-    analysis_func = () -> concordance_analysis(
+    analysis_func = () -> activity_concordance_analysis(
         model;
         optimizer=HiGHS.Optimizer,
         settings=HIGHS_SETTINGS,

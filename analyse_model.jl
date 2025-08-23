@@ -4,7 +4,7 @@ using SBMLFBCModels, AbstractFBCModels, COBREXA, JLD2
 
 # --- Hardcoded paths ---
 model_path = "/work/schaffran1/toolbox/prpd_models/ordered/Schizosaccharomyces_pombe.xml"           # Change as needed
-# Parameters for concordance_analysis
+# Parameters for activity_concordance_analysis
 sample_size = 1000
 seed = 42
 cv_threshold = 0.00001
@@ -28,7 +28,7 @@ highs_settings = [
     COBREXA.set_optimizer_attribute("presolve", "on"),
 ]
 model = COBREXA.load_model(model_path)
-results = COCOA.concordance_analysis(
+results = COCOA.activity_concordance_analysis(
     model;
     optimizer=HiGHS.Optimizer,
     settings=highs_settings,
