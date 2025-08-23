@@ -300,19 +300,8 @@ function process_streaming_batches(
 
             # Log completion of candidate collection for this batch
             collection_time = time() - batch_collection_start_time
-            function format_time_hms_collection(seconds)
-                h = floor(Int, seconds / 3600)
-                m = floor(Int, (seconds % 3600) / 60)
-                s = seconds % 60
-                if h > 0
-                    return string(h, ":", lpad(m, 2, "0"), ":", lpad(round(s, digits=1), 4, "0"))
-                elseif m > 0
-                    return string(m, ":", lpad(round(s, digits=1), 4, "0"))
-                else
-                    return string(round(s, digits=1), "s")
-                end
-            end
-            @info "Batch $batches_processed: $(length(current_batch)) candidates collected in $(format_time_hms_collection(collection_time))"
+            time_str = Dates.format(Dates.Time(0) + Dates.Second(collection_time), "HH:MM:SS.s")
+            @info "Batch $batches_processed: $(length(current_batch)) candidates collected [$time_str]"
 
             @info "Processing streaming batch $batches_processed" batch_size = length(current_batch) total_seen = total_candidates_seen
 
@@ -437,22 +426,10 @@ function process_streaming_batches(
             batch_optimized = length(current_batch) - batch_total_filtered
 
             # Format timing and calculate progress
-            function format_time_hms(seconds)
-                h = floor(Int, seconds / 3600)
-                m = floor(Int, (seconds % 3600) / 60)
-                s = seconds % 60
-                if h > 0
-                    return string(h, ":", lpad(m, 2, "0"), ":", lpad(round(s, digits=1), 4, "0"))
-                elseif m > 0
-                    return string(m, ":", lpad(round(s, digits=1), 4, "0"))
-                else
-                    return string(round(s, digits=1), "s")
-                end
-            end
-
             progress_pct = round(current_filter_stats.pairs_tested / total_possible_pairs * 100, digits=1)
 
-            @info "Batch $batches_processed completed: $(length(current_batch)) candidates processed, $(batch_results.concordant_pairs.n_pairs) concordant pairs, $batch_optimized optimized, $batch_total_filtered skipped by transitivity ($batch_filtered_concordant transitive concordant, $batch_filtered_non_concordant transitive non-concordant) in $(format_time_hms(optimization_time)) - Progress: $(current_filter_stats.pairs_tested)/$total_possible_pairs ($(progress_pct)%)"
+            opt_time_str = Dates.format(Dates.Time(0) + Dates.Second(optimization_time), "HH:MM:SS.s")
+            @info "Batch $batches_processed completed: $(length(current_batch)) candidates processed, $(batch_results.concordant_pairs.n_pairs) concordant pairs, $batch_optimized optimized, $batch_total_filtered skipped by transitivity ($batch_filtered_concordant transitive concordant, $batch_filtered_non_concordant transitive non-concordant) [$opt_time_str] - Progress: $(current_filter_stats.pairs_tested)/$total_possible_pairs ($(progress_pct)%)"
 
             # Log memory stats periodically
             if batches_processed % 10 == 0
@@ -475,19 +452,8 @@ function process_streaming_batches(
 
         # Log completion of candidate collection for final batch
         collection_time = time() - batch_collection_start_time
-        function format_time_hms_final(seconds)
-            h = floor(Int, seconds / 3600)
-            m = floor(Int, (seconds % 3600) / 60)
-            s = seconds % 60
-            if h > 0
-                return string(h, ":", lpad(m, 2, "0"), ":", lpad(round(s, digits=1), 4, "0"))
-            elseif m > 0
-                return string(m, ":", lpad(round(s, digits=1), 4, "0"))
-            else
-                return string(round(s, digits=1), "s")
-            end
-        end
-        @info "Batch $batches_processed: $(length(current_batch)) candidates collected in $(format_time_hms_final(collection_time))"
+        time_str = Dates.format(Dates.Time(0) + Dates.Second(collection_time), "HH:MM:SS.s")
+        @info "Batch $batches_processed: $(length(current_batch)) candidates collected [$time_str]"
 
         @debug "Processing final streaming batch $batches_processed" batch_size = length(current_batch)
 
@@ -570,24 +536,13 @@ function process_streaming_batches(
 
         # Calculate optimization time and add completion log for final batch
         optimization_time = time() - optimization_start_time
-        function format_time_hms_final_completion(seconds)
-            h = floor(Int, seconds / 3600)
-            m = floor(Int, (seconds % 3600) / 60)
-            s = seconds % 60
-            if h > 0
-                return string(h, ":", lpad(m, 2, "0"), ":", lpad(round(s, digits=1), 4, "0"))
-            elseif m > 0
-                return string(m, ":", lpad(round(s, digits=1), 4, "0"))
-            else
-                return string(round(s, digits=1), "s")
-            end
-        end
 
         # Get final filter stats for progress
         final_filter_stats = get_filter_report(streaming_filter)
         progress_pct = round(final_filter_stats.pairs_tested / total_possible_pairs * 100, digits=1)
 
-        @info "Batch $batches_processed completed: $(length(current_batch)) candidates processed, $(batch_results.concordant_pairs.n_pairs) concordant pairs, $(length(current_batch)) optimized, 0 skipped by transitivity (0 transitive concordant, 0 transitive non-concordant) in $(format_time_hms_final_completion(optimization_time)) - Progress: $(final_filter_stats.pairs_tested)/$total_possible_pairs ($(progress_pct)%)"
+        opt_time_str = Dates.format(Dates.Time(0) + Dates.Second(optimization_time), "HH:MM:SS.s")
+        @info "Batch $batches_processed completed: $(length(current_batch)) candidates processed, $(batch_results.concordant_pairs.n_pairs) concordant pairs, $(length(current_batch)) optimized, 0 skipped by transitivity (0 transitive concordant, 0 transitive non-concordant) [$opt_time_str] - Progress: $(final_filter_stats.pairs_tested)/$total_possible_pairs ($(progress_pct)%)"
     end
 
     # Get comprehensive filter report
