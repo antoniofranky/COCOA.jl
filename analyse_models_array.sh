@@ -25,6 +25,10 @@ mkdir -p "$RESULTS_DIR"
 HEAP_SIZE_GB=$(( SLURM_MEM_PER_NODE * 8 / 10 / 1024 ))
 HEAP_SIZE="${HEAP_SIZE_GB}G"
 
+# Load LIKWID for memory monitoring
+module load arch/r1/zen4
+module load linux-rocky9-zen4/gcc-14.2.0/likwid/5.3.0-gose7xd
+
 # HPC optimizations for Julia
 export JULIA_NUM_THREADS=1
 export OMP_NUM_THREADS=1
@@ -74,7 +78,49 @@ if [ $SLURM_ARRAY_TASK_ID -eq 1 ]; then
     julia --project=/work/schaffran1/COCOA.jl -e "using Pkg; Pkg.precompile()"
 fi
 
-echo "Starting analysis for $MODEL_NAME..."
-time julia $JULIA_OPTS analyse_models_array.jl "$MODEL_FILE" "$RESULTS_DIR" "$MODEL_NAME"
+# Setup LIKWID memory monitoring
+MEMORY_OUTPUT="$RESULTS_DIR/memory_${MODEL_NAME}_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}.txt"
+MEMORY_SUMMARY="$RESULTS_DIR/memory_summary_${MODEL_NAME}_${SLURM_ARRAY_TASK_ID}.csv"
 
-echo "Analysis completed for $MODEL_NAME"
+echo "Starting analysis for $MODEL_NAME with LIKWID memory monitoring..."
+
+# Run analysis with LIKWID memory profiling (zero computational overhead)
+likwid-perfctr -g MEM -m -o "$MEMORY_OUTPUT" julia $JULIA_OPTS analyse_models_array.jl "$MODEL_FILE" "$RESULTS_DIR" "$MODEL_NAME"
+EXIT_CODE=$?
+
+# Create single master CSV for all results (append mode)
+MASTER_CSV="$RESULTS_BASE_DIR/cocoa_performance_results.csv"
+
+# Create header if file doesn't exist
+if [ ! -f "$MASTER_CSV" ]; then
+    echo "model_name,job_id,task_id,timestamp,runtime_sec,peak_memory_mb,memory_bandwidth_mbps,memory_volume_gb,n_reactions,n_metabolites,n_complexes,n_modules,validation_passed" > "$MASTER_CSV"
+fi
+
+# Extract key metrics from LIKWID output
+if [ -f "$MEMORY_OUTPUT" ]; then
+    RUNTIME=$(grep -E "Runtime.*sec" "$MEMORY_OUTPUT" | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    PEAK_MEMORY=$(grep -E "Memory.*MB" "$MEMORY_OUTPUT" | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    MEMORY_BW=$(grep -E "Memory bandwidth" "$MEMORY_OUTPUT" | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    MEMORY_VOL=$(grep -E "Memory.*volume.*GB" "$MEMORY_OUTPUT" | grep -oE '[0-9]+\.[0-9]+' | head -1)
+else
+    RUNTIME=""; PEAK_MEMORY=""; MEMORY_BW=""; MEMORY_VOL=""
+fi
+
+# Extract analysis results from JLD2 file (if exists)
+RESULTS_FILE=$(find "$RESULTS_DIR" -name "concordance_results_${MODEL_NAME}_*.jld2" | head -1)
+if [ -f "$RESULTS_FILE" ]; then
+    # Use Julia to extract key stats and append to CSV
+    julia --project=/work/schaffran1/COCOA.jl -e "
+    using JLD2
+    data = JLD2.load(\"$RESULTS_FILE\")
+    stats = data[\"results\"].stats
+    println(\"${MODEL_NAME},${SLURM_ARRAY_JOB_ID},${SLURM_ARRAY_TASK_ID},$(date -Iseconds),${RUNTIME:-0},${PEAK_MEMORY:-0},${MEMORY_BW:-0},${MEMORY_VOL:-0},\$(get(stats, \"n_reactions\", 0)),\$(get(stats, \"n_metabolites\", 0)),\$(get(stats, \"n_complexes\", 0)),\$(get(stats, \"n_modules\", 0)),\$(get(stats, \"validation_passed\", false))\")" >> "$MASTER_CSV"
+else
+    # Fallback if no JLD2 file found
+    echo "${MODEL_NAME},${SLURM_ARRAY_JOB_ID},${SLURM_ARRAY_TASK_ID},$(date -Iseconds),${RUNTIME:-0},${PEAK_MEMORY:-0},${MEMORY_BW:-0},${MEMORY_VOL:-0},0,0,0,0,false" >> "$MASTER_CSV"
+fi
+
+echo "Results appended to master CSV: $MASTER_CSV"
+
+echo "Analysis completed for $MODEL_NAME with exit code: $EXIT_CODE"
+exit $EXIT_CODE
