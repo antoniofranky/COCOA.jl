@@ -84,7 +84,7 @@ MASTER_CSV="$RESULTS_BASE_DIR/cocoa_performance_results.csv"
 
 # Create header if file doesn't exist
 if [ ! -f "$MASTER_CSV" ]; then
-    echo "model_name,job_id,task_id,timestamp,runtime_sec,peak_memory_mb,peak_vmem_mb,n_robust_metabolites,n_robust_pairs,n_complexes,n_modules,largest_robust_module_size" > "$MASTER_CSV"
+  echo "model_name,job_id,task_id,timestamp,runtime_sec,peak_memory_mb,peak_vmem_mb" > "$MASTER_CSV"
 fi
 
 # Get memory and runtime info from SLURM accounting (wait briefly for accounting data)
@@ -115,28 +115,34 @@ else
     PEAK_MEMORY_MB=0; PEAK_VMEM_MB=0; RUNTIME_SEC=0
 fi
 
-# Extract analysis results from JLD2 file (if exists)
-RESULTS_FILE=$(find "$RESULTS_DIR" -name "kinetic_results_${MODEL_NAME}_*.jld2" | head -1)
-if [ -f "$RESULTS_FILE" ]; then
-    # Use Julia to extract key stats and append to CSV
-    julia --project=/work/schaffran1/COCOA.jl -e "
-    using JLD2
-    data = JLD2.load(\"$RESULTS_FILE\")
-    results = data[\"results\"]
-    n_robust_mets = results.n_robust_metabolites
-    n_robust_pairs = results.n_robust_pairs
-    largest_module = results.largest_robust_module_size
-    summary = results.summary
-    n_complexes = summary !== nothing ? get(summary, \"n_complexes\", 0) : 0
-    n_modules = summary !== nothing ? get(summary, \"n_modules\", 0) : 0
-    println(\"${MODEL_NAME},${SLURM_ARRAY_JOB_ID},${SLURM_ARRAY_TASK_ID},$(date -Iseconds),${RUNTIME_SEC},${PEAK_MEMORY_MB},${PEAK_VMEM_MB},\$n_robust_mets,\$n_robust_pairs,\$n_complexes,\$n_modules,\$largest_module\")
-    " >> "$MASTER_CSV"
-else
-    # Fallback if no JLD2 file found
-    echo "${MODEL_NAME},${SLURM_ARRAY_JOB_ID},${SLURM_ARRAY_TASK_ID},$(date -Iseconds),${RUNTIME_SEC},${PEAK_MEMORY_MB},${PEAK_VMEM_MB},0,0,0,0,0" >> "$MASTER_CSV"
-fi
+# # Extract analysis results from JLD2 file (if exists)
+# RESULTS_FILE=$(find "$RESULTS_DIR" -name "kinetic_results_${MODEL_NAME}_*.jld2" | head -1)
+# if [ -f "$RESULTS_FILE" ]; then
+#     # Use Julia to extract key stats and append to CSV
+#     julia --project=/work/schaffran1/COCOA.jl -e "
+#     using JLD2
+#     data = JLD2.load(\"$RESULTS_FILE\")
+#     results = data[\"results\"]
+#     n_robust_mets = results.n_robust_metabolites
+#     n_robust_pairs = results.n_robust_pairs
+#     largest_module = results.largest_robust_module_size
+#     summary = results.summary
+#     n_complexes = summary !== nothing ? get(summary, \"n_complexes\", 0) : 0
+#     n_modules = summary !== nothing ? get(summary, \"n_modules\", 0) : 0
+#     println(\"${MODEL_NAME},${SLURM_ARRAY_JOB_ID},${SLURM_ARRAY_TASK_ID},$(date -Iseconds),${RUNTIME_SEC},${PEAK_MEMORY_MB},${PEAK_VMEM_MB},\$n_robust_mets,\$n_robust_pairs,\$n_complexes,\$n_modules,\$largest_module\")
+#     " >> "$MASTER_CSV"
+# else
+#     # Fallback if no JLD2 file found
+#     echo "${MODEL_NAME},${SLURM_ARRAY_JOB_ID},${SLURM_ARRAY_TASK_ID},$(date -Iseconds),${RUNTIME_SEC},${PEAK_MEMORY_MB},${PEAK_VMEM_MB},0,0,0,0,0" >> "$MASTER_CSV"
+# fi
 
-echo "Results appended to master CSV: $MASTER_CSV"
+  # Write basic performance data to CSV (no JLD2 analysis needed)        
+  echo
+  "${MODEL_NAME},${SLURM_ARRAY_JOB_ID},${SLURM_ARRAY_TASK_ID},$(date     
+   -Iseconds),${RUNTIME_SEC},${PEAK_MEMORY_MB},${PEAK_VMEM_MB}" >>       
+  "$MASTER_CSV"
+
+  echo "Results appended to master CSV: $MASTER_CSV"
 
 echo "Analysis completed for $MODEL_NAME with exit code: $EXIT_CODE"
 exit $EXIT_CODE
