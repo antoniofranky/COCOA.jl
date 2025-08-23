@@ -24,7 +24,7 @@ mkdir -p "$RESULTS_DIR"
 HEAP_SIZE_GB=$(( SLURM_MEM_PER_NODE * 8 / 10 / 1024 ))
 HEAP_SIZE="${HEAP_SIZE_GB}G"
 
-# Load LIKWID for memory monitoring
+# Load LIKWID for CPU pinning
 module load arch/r1/zen4
 module load linux-rocky9-zen4/gcc-14.2.0/likwid/5.3.0-gose7xd
 
@@ -77,14 +77,10 @@ if [ $SLURM_ARRAY_TASK_ID -eq 1 ]; then
     julia --project=/work/schaffran1/COCOA.jl -e "using Pkg; Pkg.precompile()"
 fi
 
-# Setup LIKWID memory monitoring
-MEMORY_OUTPUT="$RESULTS_DIR/memory_${MODEL_NAME}_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}.txt"
-MEMORY_SUMMARY="$RESULTS_DIR/memory_summary_${MODEL_NAME}_${SLURM_ARRAY_TASK_ID}.csv"
+echo "Starting analysis for $MODEL_NAME with LIKWID CPU pinning..."
 
-echo "Starting analysis for $MODEL_NAME with LIKWID memory monitoring..."
-
-# Run analysis with LIKWID memory profiling (zero computational overhead)
-likwid-perfctr -C 0-63 -g MEM1 -m -o "$MEMORY_OUTPUT" julia $JULIA_OPTS analyse_models_array.jl "$MODEL_FILE" "$RESULTS_DIR" "$MODEL_NAME"
+# Run analysis with LIKWID CPU pinning (memory tracked by SLURM)
+likwid-pin -c 0-63 julia $JULIA_OPTS analyse_models_array.jl "$MODEL_FILE" "$RESULTS_DIR" "$MODEL_NAME"
 EXIT_CODE=$?
 
 # Create single master CSV for all results (append mode)
@@ -92,17 +88,35 @@ MASTER_CSV="$RESULTS_BASE_DIR/cocoa_performance_results.csv"
 
 # Create header if file doesn't exist
 if [ ! -f "$MASTER_CSV" ]; then
-    echo "model_name,job_id,task_id,timestamp,runtime_sec,peak_memory_mb,memory_bandwidth_mbps,memory_volume_gb,n_robust_metabolites,n_robust_pairs,n_complexes,n_modules,largest_robust_module_size" > "$MASTER_CSV"
+    echo "model_name,job_id,task_id,timestamp,runtime_sec,peak_memory_mb,peak_vmem_mb,n_robust_metabolites,n_robust_pairs,n_complexes,n_modules,largest_robust_module_size" > "$MASTER_CSV"
 fi
 
-# Extract key metrics from LIKWID output
-if [ -f "$MEMORY_OUTPUT" ]; then
-    RUNTIME=$(grep -E "Runtime.*sec" "$MEMORY_OUTPUT" | grep -oE '[0-9]+\.[0-9]+' | head -1)
-    PEAK_MEMORY=$(grep -E "Memory.*MB" "$MEMORY_OUTPUT" | grep -oE '[0-9]+\.[0-9]+' | head -1)
-    MEMORY_BW=$(grep -E "Memory bandwidth" "$MEMORY_OUTPUT" | grep -oE '[0-9]+\.[0-9]+' | head -1)
-    MEMORY_VOL=$(grep -E "Memory.*volume.*GB" "$MEMORY_OUTPUT" | grep -oE '[0-9]+\.[0-9]+' | head -1)
+# Get memory and runtime info from SLURM accounting (wait briefly for accounting data)
+sleep 2
+SLURM_METRICS=$(sacct -j $SLURM_JOB_ID.$SLURM_ARRAY_TASK_ID --format=MaxRSS,MaxVMSize,Elapsed --noheader --parsable2)
+if [ -n "$SLURM_METRICS" ]; then
+    PEAK_MEMORY_KB=$(echo "$SLURM_METRICS" | cut -d'|' -f1 | sed 's/K$//')
+    PEAK_VMEM_KB=$(echo "$SLURM_METRICS" | cut -d'|' -f2 | sed 's/K$//')
+    RUNTIME_STR=$(echo "$SLURM_METRICS" | cut -d'|' -f3)
+    
+    # Convert memory from KB to MB
+    PEAK_MEMORY_MB=$((PEAK_MEMORY_KB / 1024))
+    PEAK_VMEM_MB=$((PEAK_VMEM_KB / 1024))
+    
+    # Convert runtime to seconds (format: HH:MM:SS or MM:SS)
+    if [[ $RUNTIME_STR =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; then
+        # HH:MM:SS format
+        IFS=':' read -r hours minutes seconds <<< "$RUNTIME_STR"
+        RUNTIME_SEC=$((hours * 3600 + minutes * 60 + seconds))
+    elif [[ $RUNTIME_STR =~ ^[0-9]+:[0-9]+$ ]]; then
+        # MM:SS format
+        IFS=':' read -r minutes seconds <<< "$RUNTIME_STR"
+        RUNTIME_SEC=$((minutes * 60 + seconds))
+    else
+        RUNTIME_SEC=0
+    fi
 else
-    RUNTIME=""; PEAK_MEMORY=""; MEMORY_BW=""; MEMORY_VOL=""
+    PEAK_MEMORY_MB=0; PEAK_VMEM_MB=0; RUNTIME_SEC=0
 fi
 
 # Extract analysis results from JLD2 file (if exists)
@@ -119,11 +133,11 @@ if [ -f "$RESULTS_FILE" ]; then
     summary = results.summary
     n_complexes = summary !== nothing ? get(summary, \"n_complexes\", 0) : 0
     n_modules = summary !== nothing ? get(summary, \"n_modules\", 0) : 0
-    println(\"${MODEL_NAME},${SLURM_ARRAY_JOB_ID},${SLURM_ARRAY_TASK_ID},$(date -Iseconds),${RUNTIME:-0},${PEAK_MEMORY:-0},${MEMORY_BW:-0},${MEMORY_VOL:-0},\$n_robust_mets,\$n_robust_pairs,\$n_complexes,\$n_modules,\$largest_module\")
+    println(\"${MODEL_NAME},${SLURM_ARRAY_JOB_ID},${SLURM_ARRAY_TASK_ID},$(date -Iseconds),${RUNTIME_SEC},${PEAK_MEMORY_MB},${PEAK_VMEM_MB},\$n_robust_mets,\$n_robust_pairs,\$n_complexes,\$n_modules,\$largest_module\")
     " >> "$MASTER_CSV"
 else
     # Fallback if no JLD2 file found
-    echo "${MODEL_NAME},${SLURM_ARRAY_JOB_ID},${SLURM_ARRAY_TASK_ID},$(date -Iseconds),${RUNTIME:-0},${PEAK_MEMORY:-0},${MEMORY_BW:-0},${MEMORY_VOL:-0},0,0,0,0,0" >> "$MASTER_CSV"
+    echo "${MODEL_NAME},${SLURM_ARRAY_JOB_ID},${SLURM_ARRAY_TASK_ID},$(date -Iseconds),${RUNTIME_SEC},${PEAK_MEMORY_MB},${PEAK_VMEM_MB},0,0,0,0,0" >> "$MASTER_CSV"
 fi
 
 echo "Results appended to master CSV: $MASTER_CSV"
