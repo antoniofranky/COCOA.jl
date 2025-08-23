@@ -102,25 +102,11 @@ try
     println("Memory allocated: $(round(memory_allocated / 1e9, digits=2)) GB")
     println("GC time: $(round(gc_time, digits=2)) seconds")
 
-    # Save results with memory statistics (optimized for size)
+    # Save results
     println("\nSaving results to: $output_path")
     
-    # Create compact summary instead of full results to reduce file size
-    compact_results = Dict(
-        "n_robust_metabolites" => results.n_robust_metabolites,
-        "n_robust_pairs" => results.n_robust_pairs,
-        "largest_robust_module_size" => results.largest_robust_module_size,
-        "robust_metabolites" => results.robust_metabolites,
-        "robust_metabolite_pairs" => results.robust_metabolite_pairs,
-        "summary" => results.summary,
-        # Save only essential concordance statistics, not full DataFrames
-        "n_complexes" => results.summary !== nothing ? get(results.summary, "n_complexes", 0) : 0,
-        "n_modules" => results.summary !== nothing ? get(results.summary, "n_modules", 0) : 0,
-        "n_kinetic_modules" => results.summary !== nothing ? get(results.summary, "n_kinetic_modules", 0) : 0
-    )
-    
     JLD2.save(output_path,
-        "results", compact_results,
+        "results", results,
         "model_name", model_name,
         "model_file", model_file,
         "analysis_parameters", Dict(
