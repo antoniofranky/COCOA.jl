@@ -5,7 +5,7 @@
 
 # Default parameters - modify as needed
 DEFAULT_MODELS_DIR="/work/schaffran1/toolbox/prpd_models/ordered"
-DEFAULT_RESULTS_DIR="/work/schaffran1/results_testjobs"
+DEFAULT_RESULTS_DIR="/work/schaffran1/jobresults"
 DEFAULT_EMAIL="schaffran1@uni-potsdam.de"
 
 # Parse command line arguments
