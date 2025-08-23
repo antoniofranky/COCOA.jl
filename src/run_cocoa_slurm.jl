@@ -312,7 +312,7 @@ function main()
         println("  Random seed: $(args["seed"])")
 
         println("\nRunning concordance analysis...")
-        results = COCOA.concordance_analysis(
+        results = COCOA.activity_concordance_analysis(
             model;
             optimizer=get_optimizer(args["optimizer"]),
             workers=workers(),
@@ -382,7 +382,7 @@ function main()
         # Step 4: Run concordance analysis
         println("\nStep 4: Running concordance analysis...")
         println("Timing concordance analysis:")
-        concordance_time = @time results = COCOA.concordance_analysis(
+        concordance_time = @time results = COCOA.activity_concordance_analysis(
             prepared_model;
             optimizer=get_optimizer(args["optimizer"]),
             workers=workers(),
@@ -417,7 +417,7 @@ function main()
             "workers" => nworkers(),
             "optimizer" => args["optimizer"]
         )
-        
+
         # Merge with concordance analysis stats
         merged_stats = merge(results.stats, model_stats)
         stats_file = joinpath(output_dir, "model_stats_split$(args["split-fraction"])_subs$(args["max-substrates"])_prods$(args["max-products"]).jld2")
@@ -426,7 +426,7 @@ function main()
 
         # Log comprehensive timing info for scaling analysis
         total_time = split_time + prep_time + concordance_time
-        @info "Performance Analysis" split_fraction=args["split-fraction"] max_substrates=args["max-substrates"] max_products=args["max-products"] n_reactions=model_stats["prepared_reactions"] n_metabolites=model_stats["prepared_metabolites"] total_time_min=round(total_time/60, digits=2) concordance_time_min=round(concordance_time/60, digits=2) n_complexes=nrow(results.complexes) n_modules=nrow(results.modules)
+        @info "Performance Analysis" split_fraction = args["split-fraction"] max_substrates = args["max-substrates"] max_products = args["max-products"] n_reactions = model_stats["prepared_reactions"] n_metabolites = model_stats["prepared_metabolites"] total_time_min = round(total_time / 60, digits=2) concordance_time_min = round(concordance_time / 60, digits=2) n_complexes = nrow(results.complexes) n_modules = nrow(results.modules)
 
         println("\nSplit-and-Analyze Summary:")
         println("  Original model: $(model_stats["original_reactions"]) reactions, $(model_stats["original_metabolites"]) metabolites")

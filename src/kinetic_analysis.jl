@@ -666,7 +666,7 @@ according to the kinetic modules paper, using the same split reactions as concor
 
 # Arguments
 - `constraints`: Constraint tree from `concordance_constraints`
-- `concordance_results`: Results from `concordance_analysis`
+- `concordance_results`: Results from `activity_concordance_analysis`
 - `min_module_size::Int=2`: Minimum size for a kinetic module
 - `workers=D.workers()`: Worker processes for parallel computation
 
@@ -1010,7 +1010,7 @@ all key metrics for analyzing 343 models efficiently.
 - `include_kinetic_modules::Bool=true`: Whether to identify kinetic modules
 - `include_robustness::Bool=true`: Whether to analyze concentration robustness
 - `min_module_size::Int=2`: Minimum size for kinetic modules
-- `kwargs...`: Additional arguments passed to `concordance_analysis`
+- `kwargs...`: Additional arguments passed to `activity_concordance_analysis`
 
 # Returns
 Enhanced results with `.summary` field containing:
@@ -1040,7 +1040,7 @@ function kinetic_concordance_analysis(
 
     # Step 1: Run concordance analysis (this builds constraints internally)
     @info "Running concordance analysis"
-    concordance_results = concordance_analysis(model; optimizer=optimizer, workers=workers, kwargs...)
+    concordance_results = activity_concordance_analysis(model; optimizer=optimizer, workers=workers, kwargs...)
 
     # Extract basic model statistics
     n_reactions = length(AbstractFBCModels.reactions(model))
@@ -1048,7 +1048,7 @@ function kinetic_concordance_analysis(
     n_complexes = concordance_results.stats["n_complexes"]
 
     # Extract concordance statistics
-    n_concordant_pairs = concordance_results.stats["n_concordant_pairs"]
+    n_concordant_pairs = concordance_results.stats["n_concordant_total"]
     n_balanced_complexes = concordance_results.stats["n_balanced"]
     n_trivially_balanced = concordance_results.stats["n_trivially_balanced"]
     n_trivially_concordant = concordance_results.stats["n_trivial_pairs"]
@@ -1068,7 +1068,15 @@ function kinetic_concordance_analysis(
     else
         # Step 2: Build constraints separately for kinetic analysis
         @info "Building concordance constraints for kinetic analysis"
-        constraints = concordance_constraints(model; kwargs...)
+
+        # Filter kwargs to only include those accepted by concordance_constraints
+        constraints_kwargs = Dict(
+            :modifications => get(kwargs, :modifications, Function[]),
+            :interface => get(kwargs, :interface, nothing),
+            :use_unidirectional_constraints => get(kwargs, :use_unidirectional_constraints, true)
+        )
+
+        constraints = concordance_constraints(model; constraints_kwargs...)
 
         # Step 3: Run kinetic module analysis using constraints
         @info "Running kinetic module analysis"

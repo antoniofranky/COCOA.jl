@@ -300,7 +300,7 @@ function process_streaming_batches(
 
             # Log completion of candidate collection for this batch
             collection_time = time() - batch_collection_start_time
-            time_str = Dates.format(Dates.Time(0) + Dates.Second(collection_time), "HH:MM:SS.s")
+            time_str = Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, collection_time * 1000)), "HH:MM:SS.s")
             @info "Batch $batches_processed: $(length(current_batch)) candidates collected [$time_str]"
 
             @info "Processing streaming batch $batches_processed" batch_size = length(current_batch) total_seen = total_candidates_seen
@@ -428,7 +428,7 @@ function process_streaming_batches(
             # Format timing and calculate progress
             progress_pct = round(current_filter_stats.pairs_tested / total_possible_pairs * 100, digits=1)
 
-            opt_time_str = Dates.format(Dates.Time(0) + Dates.Second(optimization_time), "HH:MM:SS.s")
+            opt_time_str = Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, optimization_time * 1000)), "HH:MM:SS.s")
             @info "Batch $batches_processed completed: $(length(current_batch)) candidates processed, $(batch_results.concordant_pairs.n_pairs) concordant pairs, $batch_optimized optimized, $batch_total_filtered skipped by transitivity ($batch_filtered_concordant transitive concordant, $batch_filtered_non_concordant transitive non-concordant) [$opt_time_str] - Progress: $(current_filter_stats.pairs_tested)/$total_possible_pairs ($(progress_pct)%)"
 
             # Log memory stats periodically
@@ -452,7 +452,7 @@ function process_streaming_batches(
 
         # Log completion of candidate collection for final batch
         collection_time = time() - batch_collection_start_time
-        time_str = Dates.format(Dates.Time(0) + Dates.Second(collection_time), "HH:MM:SS.s")
+        time_str = Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, collection_time * 1000)), "HH:MM:SS.s")
         @info "Batch $batches_processed: $(length(current_batch)) candidates collected [$time_str]"
 
         @debug "Processing final streaming batch $batches_processed" batch_size = length(current_batch)
@@ -541,7 +541,7 @@ function process_streaming_batches(
         final_filter_stats = get_filter_report(streaming_filter)
         progress_pct = round(final_filter_stats.pairs_tested / total_possible_pairs * 100, digits=1)
 
-        opt_time_str = Dates.format(Dates.Time(0) + Dates.Second(optimization_time), "HH:MM:SS.s")
+        opt_time_str = Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, optimization_time * 1000)), "HH:MM:SS.s")
         @info "Batch $batches_processed completed: $(length(current_batch)) candidates processed, $(batch_results.concordant_pairs.n_pairs) concordant pairs, $(length(current_batch)) optimized, 0 skipped by transitivity (0 transitive concordant, 0 transitive non-concordant) [$opt_time_str] - Progress: $(final_filter_stats.pairs_tested)/$total_possible_pairs ($(progress_pct)%)"
     end
 
@@ -904,7 +904,7 @@ The statistics follow these mathematical relationships:
 The transitivity optimization means that many candidate pairs are identified as concordant
 without requiring expensive optimization, significantly reducing computational cost.
 """
-function concordance_analysis(
+function activity_concordance_analysis(
     model;
     modifications=Function[],
     optimizer,
@@ -1007,7 +1007,7 @@ function concordance_analysis(
     # Pre-calculate rounding digits based on solver tolerance for efficiency
     ava_digits = max(1, -floor(Int, log10(solver_tolerance)))
     ava_output_func = (dir, om) -> ava_output_with_warmup(dir, om; digits=ava_digits)
-    
+
     ava_time = @elapsed ava_results = COBREXA.constraints_variability(
         constraints.balance,
         constraints.activities;
@@ -1017,7 +1017,8 @@ function concordance_analysis(
         output_type=Tuple{Float64,Vector{Float64}},
         workers=workers,
     )
-    @info "AVA processing complete" ava_time_sec = round(ava_time, digits=2)
+    ava_time_str = Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, ava_time * 1000)), "HH:MM:SS.s")
+    @info "AVA processing complete [$ava_time_str]"
 
     concordance_tracker = ConcordanceTracker(complex_ids)
 
@@ -1357,7 +1358,8 @@ function concordance_analysis(
         rethrow(e)
     end
 
-    @info "Direct streaming filter created" filter_time_sec = round(filter_time, digits=2)
+    filter_time_str = Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, filter_time * 1000)), "HH:MM:SS.s")
+    @info "Direct streaming filter created [$filter_time_str]"
 
     @info "Processing concordance tests with direct streaming (deterministic batch processing)"
     concordance_time = @elapsed batch_results = process_streaming_batches(
@@ -1372,7 +1374,8 @@ function concordance_analysis(
         use_transitivity=use_transitivity,
     )
 
-    @info "Building concordance modules" concordance_time_sec = round(concordance_time, digits=2)
+    concordance_time_str = Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, concordance_time * 1000)), "HH:MM:SS.s")
+    @info "Building concordance modules [$concordance_time_str]"
     modules = extract_modules(concordance_tracker)
 
     # Use module-based counting for accurate totals
@@ -1523,7 +1526,7 @@ function concordance_analysis(
         non_concordant=stats["n_non_concordant_pairs"],
         trivial_concordant=stats["n_trivial_pairs"],
         total_concordant=stats["n_concordant_total"],
-        elapsed_time_sec=round(stats["elapsed_time"], digits=2)
+        elapsed_time=Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, stats["elapsed_time"] * 1000)), "HH:MM:SS.s")
     )
 
     @debug "Full concordance analysis statistics" stats

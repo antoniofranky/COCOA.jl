@@ -29,12 +29,12 @@ COCOA implements reproducible random number generation using StableRNGs.jl:
 
 ```julia
 # Same seed will produce identical results across runs and platforms
-results1 = concordance_analysis(model; optimizer=optimizer, seed=1234)
-results2 = concordance_analysis(model; optimizer=optimizer, seed=1234)
+results1 = activity_concordance_analysis(model; optimizer=optimizer, seed=1234)
+results2 = activity_concordance_analysis(model; optimizer=optimizer, seed=1234)
 # results1 == results2 (within numerical precision)
 
 # Different seeds produce different but reproducible results
-results3 = concordance_analysis(model; optimizer=optimizer, seed=5678)
+results3 = activity_concordance_analysis(model; optimizer=optimizer, seed=5678)
 # results3 != results1, but results3 is reproducible with seed=5678
 ```
 
@@ -56,16 +56,13 @@ import Statistics
 import Random
 import StableRNGs
 import JuMP as J
-import ProgressMeter
-
-# Already properly qualified
+import Dates
 import ConstraintTrees as C
 import Distributed as D
 import JLD2
 import HiGHS
 import Graphs
 
-# Macros require `using` - acceptable exception per Julia docs
 using DocStringExtensions
 
 # Include preprocessing modules
@@ -83,7 +80,7 @@ include("kinetic_analysis.jl")
 
 
 # Re-export main functions
-export concordance_constraints, concordance_analysis
+export concordance_constraints, activity_concordance_analysis
 # Re-export streaming filter functions
 export StreamingCandidateFilter, process_streaming_batches
 export split_into_elementary_steps
