@@ -10,7 +10,7 @@
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=schaffran1@uni-potsdam.de
 #SBATCH --hint=nomultithread
-#SBATCH --array=1-ARRAY_SIZE%10  # Process up to 10 jobs concurrently
+#SBATCH --array=1-ARRAY_SIZE%15  # Process up to 15 jobs concurrently
 
 # Parameters to modify
 MODELS_DIR="/work/schaffran1/toolbox/prpd_models/ordered"  # Directory containing models

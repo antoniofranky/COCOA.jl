@@ -15,15 +15,15 @@ model_name = ARGS[3]
 # Modify these parameters as needed
 sample_size = 1000
 seed = 42
-cv_threshold = 0.00001
+cv_threshold = 0.01
 batch_size = 100_000
 use_transitivity = true
-concordance_tolerance = 1e-4
-balanced_tolerance = 1e-6
+
 
 # HiGHS solver settings
 highs_settings = [
     COBREXA.set_optimizer_attribute("primal_feasibility_tolerance", 1e-7),
+    COBREXA.set_optimizer_attribute("dual_feasibility_tolerance", 1e-7),
     COBREXA.set_optimizer_attribute("dual_feasibility_tolerance", 1e-7),
     COBREXA.set_optimizer_attribute("mip_feasibility_tolerance", 1e-7),
     COBREXA.set_optimizer_attribute("random_seed", seed),
@@ -38,6 +38,11 @@ output_filename = "concordance_results_" * model_name * "_" *
                   replace(string(cv_threshold), "." => "p") * "_samples" *
                   string(sample_size) *
                   "_transitivity" * string(use_transitivity) * ".jld2"
+lpad(string(seed), 2, "0") * "_" *
+string(batch_size) * "_cv" *
+replace(string(cv_threshold), "." => "p") * "_samples" *
+string(sample_size) *
+"_transitivity" * string(use_transitivity) * ".jld2"
 
 output_path = joinpath(results_dir, output_filename)
 
@@ -47,6 +52,7 @@ println("COCOA Concordance Analysis")
 println("="^60)
 println("Model: $model_name")
 println("Input file: $model_file")
+println("Input file: $model_file")
 println("Output file: $output_path")
 println("Parameters:")
 println("  Sample size: $sample_size")
@@ -54,8 +60,6 @@ println("  Seed: $seed")
 println("  CV threshold: $cv_threshold")
 println("  Batch size: $batch_size")
 println("  Use transitivity: $use_transitivity")
-println("  Concordance tolerance: $concordance_tolerance")
-println("  Balanced tolerance: $balanced_tolerance")
 println("="^60)
 
 # Check if model file exists
@@ -70,6 +74,7 @@ try
     # Load the model
     println("Loading model: $model_file")
     model = COBREXA.load_model(model_file)
+
 
     # Get basic model info
     n_reactions = length(AbstractFBCModels.reactions(model))
@@ -223,6 +228,7 @@ try
     println("  Validation passed: $(stats["validation_passed"])")
     println("="^60)
 
+
 catch e
     println("\nERROR: Analysis failed for model $model_name")
     println("Error details: ", e)
@@ -231,9 +237,11 @@ catch e
         println("  ", line)
     end
 
+
     # Save error information
     error_filename = "error_" * model_name * "_" * string(Int(round(time()))) * ".txt"
     error_path = joinpath(results_dir, error_filename)
+
 
     open(error_path, "w") do f
         println(f, "Error in analysis of model: $model_name")
@@ -245,6 +253,7 @@ catch e
             println(f, "  $line")
         end
     end
+
 
     println("Error details saved to: $error_path")
     rethrow(e)

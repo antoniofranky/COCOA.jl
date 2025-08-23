@@ -36,11 +36,9 @@ DEFAULT_EMAIL="your.email@uni-potsdam.de"
 ```julia
 sample_size = 1000
 seed = 42
-cv_threshold = 0.00001
+cv_threshold = 0.01
 batch_size = 100_000
 use_transitivity = true
-concordance_tolerance = 1e-4
-balanced_tolerance = 1e-6
 ```
 
 ### 3. Submit Array Job
