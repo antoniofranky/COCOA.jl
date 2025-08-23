@@ -24,10 +24,6 @@ mkdir -p "$RESULTS_DIR"
 HEAP_SIZE_GB=$(( SLURM_MEM_PER_NODE * 8 / 10 / 1024 ))
 HEAP_SIZE="${HEAP_SIZE_GB}G"
 
-# Load LIKWID for CPU pinning
-module load arch/r1/zen4
-module load linux-rocky9-zen4/gcc-14.2.0/likwid/5.3.0-gose7xd
-
 # HPC optimizations for Julia
 export JULIA_NUM_THREADS=1
 export OMP_NUM_THREADS=1
@@ -77,10 +73,10 @@ if [ $SLURM_ARRAY_TASK_ID -eq 1 ]; then
     julia --project=/work/schaffran1/COCOA.jl -e "using Pkg; Pkg.precompile()"
 fi
 
-echo "Starting analysis for $MODEL_NAME with LIKWID CPU pinning..."
+echo "Starting analysis for $MODEL_NAME..."
 
 # Run analysis with LIKWID CPU pinning (memory tracked by SLURM)
-likwid-pin -c 0-63 julia $JULIA_OPTS analyse_models_array.jl "$MODEL_FILE" "$RESULTS_DIR" "$MODEL_NAME"
+julia $JULIA_OPTS analyse_models_array.jl "$MODEL_FILE" "$RESULTS_DIR" "$MODEL_NAME"
 EXIT_CODE=$?
 
 # Create single master CSV for all results (append mode)
