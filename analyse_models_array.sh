@@ -16,9 +16,8 @@
 MODELS_DIR="/work/schaffran1/toolbox/prpd_models/ordered"  # Directory containing models
 RESULTS_BASE_DIR="/work/schaffran1/results_testjobs"       # Base directory for results
 
-# Create timestamp for this array job run
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RESULTS_DIR="${RESULTS_BASE_DIR}/cocoa_array_${SLURM_ARRAY_JOB_ID}_${TIMESTAMP}"
+# Use single results directory
+RESULTS_DIR="$RESULTS_BASE_DIR"
 mkdir -p "$RESULTS_DIR"
 
 # Calculate heap size hint (80% of allocated memory from SLURM_MEM_PER_NODE)
@@ -85,7 +84,7 @@ MEMORY_SUMMARY="$RESULTS_DIR/memory_summary_${MODEL_NAME}_${SLURM_ARRAY_TASK_ID}
 echo "Starting analysis for $MODEL_NAME with LIKWID memory monitoring..."
 
 # Run analysis with LIKWID memory profiling (zero computational overhead)
-likwid-perfctr -g MEM -m -o "$MEMORY_OUTPUT" julia $JULIA_OPTS analyse_models_array.jl "$MODEL_FILE" "$RESULTS_DIR" "$MODEL_NAME"
+likwid-perfctr -C 0-63 -g MEM1 -m -o "$MEMORY_OUTPUT" julia $JULIA_OPTS analyse_models_array.jl "$MODEL_FILE" "$RESULTS_DIR" "$MODEL_NAME"
 EXIT_CODE=$?
 
 # Create single master CSV for all results (append mode)
@@ -93,7 +92,7 @@ MASTER_CSV="$RESULTS_BASE_DIR/cocoa_performance_results.csv"
 
 # Create header if file doesn't exist
 if [ ! -f "$MASTER_CSV" ]; then
-    echo "model_name,job_id,task_id,timestamp,runtime_sec,peak_memory_mb,memory_bandwidth_mbps,memory_volume_gb,n_reactions,n_metabolites,n_complexes,n_modules,validation_passed" > "$MASTER_CSV"
+    echo "model_name,job_id,task_id,timestamp,runtime_sec,peak_memory_mb,memory_bandwidth_mbps,memory_volume_gb,n_robust_metabolites,n_robust_pairs,n_complexes,n_modules,largest_robust_module_size" > "$MASTER_CSV"
 fi
 
 # Extract key metrics from LIKWID output
@@ -107,17 +106,24 @@ else
 fi
 
 # Extract analysis results from JLD2 file (if exists)
-RESULTS_FILE=$(find "$RESULTS_DIR" -name "concordance_results_${MODEL_NAME}_*.jld2" | head -1)
+RESULTS_FILE=$(find "$RESULTS_DIR" -name "kinetic_results_${MODEL_NAME}_*.jld2" | head -1)
 if [ -f "$RESULTS_FILE" ]; then
     # Use Julia to extract key stats and append to CSV
     julia --project=/work/schaffran1/COCOA.jl -e "
     using JLD2
     data = JLD2.load(\"$RESULTS_FILE\")
-    stats = data[\"results\"].stats
-    println(\"${MODEL_NAME},${SLURM_ARRAY_JOB_ID},${SLURM_ARRAY_TASK_ID},$(date -Iseconds),${RUNTIME:-0},${PEAK_MEMORY:-0},${MEMORY_BW:-0},${MEMORY_VOL:-0},\$(get(stats, \"n_reactions\", 0)),\$(get(stats, \"n_metabolites\", 0)),\$(get(stats, \"n_complexes\", 0)),\$(get(stats, \"n_modules\", 0)),\$(get(stats, \"validation_passed\", false))\")" >> "$MASTER_CSV"
+    results = data[\"results\"]
+    n_robust_mets = results.n_robust_metabolites
+    n_robust_pairs = results.n_robust_pairs
+    largest_module = results.largest_robust_module_size
+    summary = results.summary
+    n_complexes = summary !== nothing ? get(summary, \"n_complexes\", 0) : 0
+    n_modules = summary !== nothing ? get(summary, \"n_modules\", 0) : 0
+    println(\"${MODEL_NAME},${SLURM_ARRAY_JOB_ID},${SLURM_ARRAY_TASK_ID},$(date -Iseconds),${RUNTIME:-0},${PEAK_MEMORY:-0},${MEMORY_BW:-0},${MEMORY_VOL:-0},\$n_robust_mets,\$n_robust_pairs,\$n_complexes,\$n_modules,\$largest_module\")
+    " >> "$MASTER_CSV"
 else
     # Fallback if no JLD2 file found
-    echo "${MODEL_NAME},${SLURM_ARRAY_JOB_ID},${SLURM_ARRAY_TASK_ID},$(date -Iseconds),${RUNTIME:-0},${PEAK_MEMORY:-0},${MEMORY_BW:-0},${MEMORY_VOL:-0},0,0,0,0,false" >> "$MASTER_CSV"
+    echo "${MODEL_NAME},${SLURM_ARRAY_JOB_ID},${SLURM_ARRAY_TASK_ID},$(date -Iseconds),${RUNTIME:-0},${PEAK_MEMORY:-0},${MEMORY_BW:-0},${MEMORY_VOL:-0},0,0,0,0,0" >> "$MASTER_CSV"
 fi
 
 echo "Results appended to master CSV: $MASTER_CSV"

@@ -42,10 +42,11 @@ done
 echo ""
 echo "Job Configuration:"
 echo "  Array size: 1-$MODEL_COUNT"
-echo "  Max concurrent jobs: 10"
+echo "  Max concurrent jobs: 15"
 echo "  Time limit: 24 hours per job"
 echo "  Memory: 128GB per job"
-echo "  CPUs: 64 per job"
+echo "  CPUs: 64 per job (pinned 0-63)"
+echo "  LIKWID: MEM1 performance group"
 
 # Create a temporary copy of the job script with the correct array size and paths
 TEMP_SCRIPT="analyse_models_array_temp_$$.sh"
