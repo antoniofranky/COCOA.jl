@@ -136,11 +136,8 @@ fi
 #     echo "${MODEL_NAME},${SLURM_ARRAY_JOB_ID},${SLURM_ARRAY_TASK_ID},$(date -Iseconds),${RUNTIME_SEC},${PEAK_MEMORY_MB},${PEAK_VMEM_MB},0,0,0,0,0" >> "$MASTER_CSV"
 # fi
 
-  # Write basic performance data to CSV (no JLD2 analysis needed)        
-  echo
-  "${MODEL_NAME},${SLURM_ARRAY_JOB_ID},${SLURM_ARRAY_TASK_ID},$(date     
-   -Iseconds),${RUNTIME_SEC},${PEAK_MEMORY_MB},${PEAK_VMEM_MB}" >>       
-  "$MASTER_CSV"
+# Write basic performance data to CSV (no JLD2 analysis needed)        
+echo "${MODEL_NAME},${SLURM_ARRAY_JOB_ID},${SLURM_ARRAY_TASK_ID},$(date -Iseconds),${RUNTIME_SEC},${PEAK_MEMORY_MB},${PEAK_VMEM_MB}" >> "$MASTER_CSV"
 
   echo "Results appended to master CSV: $MASTER_CSV"
 
