@@ -959,16 +959,35 @@ function identify_concentration_robustness(
 
                 elseif n_differences == 2 && include_pairs
                     # Two metabolite differences = concentration ratio robustness
-                    # Check that complexes share all but two metabolites
+                    # Apply upstream algorithm's strict structural validation (qq1, qq2, qq3)
+                    # These conditions ensure the complexes have minimal structure required for robustness:
+                    # - qq1: Exactly 2 metabolite differences between complexes
+                    # - qq2: Complex 1 participates in exactly 1 additional metabolite (beyond the 2 differences)  
+                    # - qq3: Complex 2 participates in exactly 1 additional metabolite (beyond the 2 differences)
+                    # This validates the specific stoichiometric relationship needed for ratio robustness
                     met_idx1, met_idx2 = differing_indices
 
                     if met_idx1 <= length(metabolite_names) && met_idx2 <= length(metabolite_names)
-                        met_name1 = metabolite_names[met_idx1]
-                        met_name2 = metabolite_names[met_idx2]
+                        # qq1: Exactly 2 differences (already confirmed above)
+                        qq1 = true
+                        
+                        # qq2: Complex 1 has exactly 1 additional non-zero metabolite beyond the differences
+                        non_zero_vec1 = findall(!iszero, vec1)
+                        qq2 = length(setdiff(non_zero_vec1, differing_indices)) == 1
+                        
+                        # qq3: Complex 2 has exactly 1 additional non-zero metabolite beyond the differences  
+                        non_zero_vec2 = findall(!iszero, vec2)
+                        qq3 = length(setdiff(non_zero_vec2, differing_indices)) == 1
+                        
+                        # Only accept pairs that satisfy ALL three conditions (upstream algorithm logic)
+                        if qq1 && qq2 && qq3
+                            met_name1 = metabolite_names[met_idx1]
+                            met_name2 = metabolite_names[met_idx2]
 
-                        # Store pair in canonical order
-                        pair = met_name1 < met_name2 ? (met_name1, met_name2) : (met_name2, met_name1)
-                        push!(robust_metabolite_pairs, pair)
+                            # Store pair in canonical order
+                            pair = met_name1 < met_name2 ? (met_name1, met_name2) : (met_name2, met_name1)
+                            push!(robust_metabolite_pairs, pair)
+                        end
                     end
                 end
             end

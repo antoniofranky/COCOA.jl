@@ -254,6 +254,163 @@ include("envz_ompr_model.jl")
         println("\n✓ Full paper compliance validated!")
     end
 
+    @testset "Robust Metabolite Pairs Validation" begin
+        println("Testing robust metabolite pairs with structural validation fix...")
+
+        # Create a simple predictable test model
+        function create_simple_predictable_model()
+            model = CM.Model()
+
+            # 4 metabolites: A, B, C, D
+            model.metabolites = Dict(
+                "A" => CM.Metabolite(name="Metabolite A"),
+                "B" => CM.Metabolite(name="Metabolite B"), 
+                "C" => CM.Metabolite(name="Metabolite C"),
+                "D" => CM.Metabolite(name="Metabolite D")
+            )
+
+            # R1: A + C ⇄ B + C (reversible, C acts as catalyst)
+            # This will create complexes: A+C and B+C which should form a robust pair (A,B)
+            model.reactions["R1"] = CM.Reaction(
+                name="A + C to B + C", 
+                stoichiometry=Dict("A" => -1.0, "C" => -1.0, "B" => 1.0, "C" => 1.0),
+                lower_bound=-1000.0,  # Reversible
+                upper_bound=1000.0
+            )
+
+            # R2: B → D (irreversible) 
+            # This creates complexes: B and D (should NOT be robust - no catalyst)
+            model.reactions["R2"] = CM.Reaction(
+                name="B to D",
+                stoichiometry=Dict("B" => -1.0, "D" => 1.0),
+                lower_bound=0.0,    
+                upper_bound=1000.0
+            )
+
+            # Exchange reactions for feasibility
+            model.reactions["EX_A"] = CM.Reaction(
+                name="Exchange A",
+                stoichiometry=Dict("A" => 1.0),
+                lower_bound=-10.0, upper_bound=10.0
+            )
+            model.reactions["EX_C"] = CM.Reaction(
+                name="Exchange C", 
+                stoichiometry=Dict("C" => 1.0),
+                lower_bound=-10.0, upper_bound=10.0
+            )
+            model.reactions["EX_D"] = CM.Reaction(
+                name="Exchange D",
+                stoichiometry=Dict("D" => -1.0),
+                lower_bound=0.0, upper_bound=10.0
+            )
+
+            return model
+        end
+
+        # Test with synthetic Y matrix first (bypassing constraint system issues)
+        println("  Testing with synthetic Y matrix...")
+        
+        # Create Y matrix that represents the expected complexes:
+        # Complex 1: A+C [1,0,1,0] 
+        # Complex 2: B+C [0,1,1,0]  
+        # These should be robust: differ in A,B (qq1=2), each has C additional (qq2=qq3=1)
+        # Complex 3: B   [0,1,0,0]
+        # Complex 4: D   [0,0,0,1]
+        # These should NOT be robust: differ in B,D (qq1=2), no additional metabolites (qq2=qq3=0)
+        
+        test_Y = sparse([
+            1.0 0.0 0.0 0.0;  # A
+            0.0 1.0 1.0 0.0;  # B  
+            1.0 1.0 0.0 0.0;  # C
+            0.0 0.0 0.0 1.0   # D
+        ])
+        
+        metabolite_names = ["A", "B", "C", "D"]
+        
+        robust_pairs = COCOA.identify_concentration_robustness(
+            test_Y,
+            metabolite_names,
+            include_pairs=true
+        )
+        
+        println("    Found $(length(robust_pairs)) robust pairs: $robust_pairs")
+        
+        # Manually verify which pairs should be valid
+        println("    Manual validation:")
+        manual_pairs = Set()
+        for i in 1:size(test_Y, 2)
+            for j in (i+1):size(test_Y, 2)
+                vec1 = test_Y[:, i]
+                vec2 = test_Y[:, j]
+                
+                diff_mask = vec1 .!= vec2
+                differing_indices = findall(diff_mask)
+                n_differences = length(differing_indices)
+                
+                if n_differences == 2
+                    met_idx1, met_idx2 = differing_indices
+                    
+                    # qq conditions
+                    non_zero_vec1 = findall(!iszero, vec1)
+                    non_zero_vec2 = findall(!iszero, vec2)
+                    qq1 = true  # already confirmed
+                    qq2 = length(setdiff(non_zero_vec1, differing_indices)) == 1
+                    qq3 = length(setdiff(non_zero_vec2, differing_indices)) == 1
+                    
+                    println("      Complex $i vs $j: qq1=$qq1, qq2=$qq2, qq3=$qq3")
+                    println("        Vec1: $(Array(vec1)), Vec2: $(Array(vec2))")
+                    println("        Differences: $differing_indices")
+                    println("        Additional in Vec1: $(setdiff(non_zero_vec1, differing_indices))")  
+                    println("        Additional in Vec2: $(setdiff(non_zero_vec2, differing_indices))")
+                    
+                    if qq1 && qq2 && qq3
+                        met_name1 = metabolite_names[met_idx1]
+                        met_name2 = metabolite_names[met_idx2]
+                        pair = met_name1 < met_name2 ? (met_name1, met_name2) : (met_name2, met_name1)
+                        push!(manual_pairs, pair)
+                        println("        ✓ Valid robust pair: $pair")
+                    else
+                        println("        ✗ Invalid (fails qq conditions)")
+                    end
+                end
+            end
+        end
+        
+        # Expected result: Only (A,B) should be robust due to catalyst C
+        @test Set(robust_pairs) == Set([("A", "B")])
+        @test length(robust_pairs) == 1
+        println("    ✓ Correct result: Only (A,B) is robust as expected")
+        
+        # Test edge cases
+        println("  Testing edge cases...")
+        
+        # Empty matrix
+        empty_pairs = COCOA.identify_concentration_robustness(
+            spzeros(0, 0), String[], include_pairs=true
+        )
+        @test isempty(empty_pairs)
+        
+        # Single complex
+        single_pairs = COCOA.identify_concentration_robustness(
+            sparse([1.0; 0.0; 1.0;;]), ["X", "Y", "Z"], include_pairs=true
+        )
+        @test isempty(single_pairs)
+        
+        # Two complexes, no catalyst (should fail qq2/qq3)
+        no_catalyst_Y = sparse([
+            1.0 0.0;  # A
+            0.0 1.0   # B
+        ])
+        no_catalyst_pairs = COCOA.identify_concentration_robustness(
+            no_catalyst_Y, ["A", "B"], include_pairs=true
+        )
+        @test isempty(no_catalyst_pairs)
+        println("    ✓ No robust pairs when no catalyst present")
+        
+        println("    ✓ Edge cases handled correctly")
+        println("✓ Robust metabolite pairs validation complete!")
+    end
+
     @testset "Architecture Integration Test" begin
         println("Testing end-to-end architecture integration...")
 

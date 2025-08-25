@@ -18,11 +18,11 @@ Find blocked reactions using COBREXA's parallel FVA infrastructure.
 """
 function find_blocked_reactions_parallel(model::CM.Model, optimizer, flux_tolerance::Float64, workers)
     # Convert to COBREXA constraints for FVA
-    constraints = flux_balance_constraints(model)
+    constraints = COBREXA.flux_balance_constraints(model)
 
     # Run parallel FVA
     @info "Running parallel FVA on $(length(model.reactions)) reactions..."
-    fva_results = constraints_variability(
+    fva_results = COBREXA.constraints_variability(
         constraints,
         constraints.fluxes;
         optimizer=optimizer,
@@ -65,8 +65,8 @@ function find_blocked_reactions_fast(model::CM.Model, optimizer, flux_tolerance:
     S = AbstractFBCModels.stoichiometry(model)  # This is part of AbstractFBCModels stable API
 
     # Create LP model
-    lp = Model(optimizer)
-    set_silent(lp)
+    lp = J.Model(optimizer)
+    J.set_silent(lp)
 
     # Variables: fluxes + slack variables
     J.@variable(lp, v[1:n_rxns])
@@ -82,12 +82,12 @@ function find_blocked_reactions_fast(model::CM.Model, optimizer, flux_tolerance:
     # Minimize total slack
     J.@objective(lp, Min, sum(z))
 
-    optimize!(lp)
+    J.optimize!(lp)
 
     # Reactions with non-zero slack are potentially blocked
     blocked = String[]
-    if termination_status(lp) == MOI.OPTIMAL
-        z_vals = value.(z)
+    if J.termination_status(lp) == J.MOI.OPTIMAL
+        z_vals = J.value.(z)
         for (i, z_val) in enumerate(z_vals)
             if z_val > flux_tolerance
                 # Double-check with individual FVA
@@ -106,28 +106,28 @@ end
 Helper for checking individual reactions.
 """
 function is_reaction_blocked(model::CM.Model, rxn_id::String, optimizer, tolerance::Float64)
-    constraints = flux_balance_constraints(model)
+    constraints = COBREXA.flux_balance_constraints(model)
     rxn_sym = Symbol(rxn_id)
 
     # Check max flux
-    max_result = optimized_values(
+    max_result = COBREXA.optimized_values(
         constraints;
         objective=constraints.fluxes[rxn_sym].value,
         optimizer=optimizer,
         settings=[],
-        sense=Maximal
+        sense=COBREXA.Maximal
     )
 
     isnothing(max_result) && return true
     abs(max_result.fluxes[rxn_sym]) > tolerance && return false
 
     # Check min flux
-    min_result = optimized_values(
+    min_result = COBREXA.optimized_values(
         constraints;
         objective=constraints.fluxes[rxn_sym].value,
         optimizer=optimizer,
         settings=[],
-        sense=Minimal
+        sense=COBREXA.Minimal
     )
 
     isnothing(min_result) && return true
