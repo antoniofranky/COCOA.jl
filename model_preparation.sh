@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=model_prep_array
 #SBATCH --chdir=/work/schaffran1/results_testjobs
-#SBATCH --output=/model_prep_%A_%a.out
+#SBATCH --output=/work/schaffran1/results_testjobs/model_prep_%A_%a.out
 #SBATCH --time=10:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
