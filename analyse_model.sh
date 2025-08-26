@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=cv_test
+#SBATCH --job-name=bmtest
 #SBATCH --chdir=/work/schaffran1/results_testjobs
-#SBATCH --output=results_testjobs/cocoa_model_test_%j.out
+#SBATCH --output=results_testjobs/big_model_test_%j.out
 #SBATCH --time=48:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -39,8 +39,8 @@ JULIA_OPTS="$JULIA_OPTS --history-file=no"
 cd /work/schaffran1/COCOA.jl
 
 # Force consistent package precompilation
-echo "Precompiling packages..."
-julia --project=/work/schaffran1/COCOA.jl -e "using Pkg; Pkg.precompile()"
+# echo "Precompiling packages..."
+# julia --project=/work/schaffran1/COCOA.jl -e "using Pkg; Pkg.precompile()"
 
 echo "Starting analysis..."
 time julia $JULIA_OPTS analyse_model.jl
