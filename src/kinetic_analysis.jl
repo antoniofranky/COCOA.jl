@@ -689,12 +689,31 @@ function identify_kinetic_modules(
     concordance_modules_df = concordance_results.modules
     complexes_df = concordance_results.complexes
 
-    # Convert concordance modules to kinetic modules using autonomy filtering
+    # Follow upstream algorithm approach: combine concordance modules with balanced complexes before autonomy filtering
     kinetic_modules = Dict{Symbol,Vector{Symbol}}()
 
-    # Process each concordance module
+    # First, get balanced complexes indices
+    balanced_complexes = DF.filter(row -> row.module == "balanced", complexes_df)
+    balanced_indices = Int[]
+    if DF.nrow(balanced_complexes) > 0
+        for row in DF.eachrow(balanced_complexes)
+            complex_name = String(row.id)
+            if haskey(network_data.complex_to_idx, complex_name)
+                push!(balanced_indices, network_data.complex_to_idx[complex_name])
+            end
+        end
+    end
+    @info "Found balanced complexes" n_balanced = length(balanced_indices)
+
+    # Process each concordance module by combining it with balanced complexes (upstream algorithm approach)
     for row in DF.eachrow(concordance_modules_df)
         module_id = Symbol(row.module_id)
+        
+        # Skip balanced module since we handle it separately
+        if String(module_id) == "balanced"
+            continue
+        end
+        
         # Handle both string and vector format for complexes
         complex_names = if isa(row.complexes, String)
             split(row.complexes, ", ")
@@ -706,20 +725,26 @@ function identify_kinetic_modules(
             continue
         end
 
-        # Get complex indices
-        complex_indices = Int[]
+        # Get complex indices for this concordance module
+        concordance_indices = Int[]
         for complex_name in complex_names
             if haskey(network_data.complex_to_idx, complex_name)
-                push!(complex_indices, network_data.complex_to_idx[complex_name])
+                push!(concordance_indices, network_data.complex_to_idx[complex_name])
             end
         end
 
-        if length(complex_indices) < min_module_size
+        if length(concordance_indices) < min_module_size
             continue
         end
 
-        # Apply four-phase autonomy filtering
-        autonomous_indices = apply_four_phase_autonomy_filter(complex_indices, network_data.A_matrix)
+        # CRITICAL: Combine concordance module with balanced complexes (upstream algorithm approach)
+        # This dramatically improves chances of finding autonomous subsets
+        combined_indices = union(concordance_indices, balanced_indices)
+        @info "Processing module $module_id" concordance_size = length(concordance_indices) balanced_size = length(balanced_indices) combined_size = length(combined_indices)
+        
+        # Apply four-phase autonomy filtering to combined set
+        autonomous_indices = apply_four_phase_autonomy_filter(combined_indices, network_data.A_matrix)
+        @info "Autonomy filtering result for $module_id" input_size = length(combined_indices) output_size = length(autonomous_indices)
 
         if length(autonomous_indices) >= min_module_size
             # Convert back to complex names
@@ -742,22 +767,37 @@ function identify_kinetic_modules(
                 # Sort for deterministic output
                 sort!(autonomous_names)
                 kinetic_modules[module_id] = autonomous_names
+                @info "Created kinetic module $module_id" size = length(autonomous_names)
             end
         end
     end
 
-    # Add balanced complexes as separate module if they exist
-    # Look for balanced complexes in the complexes DataFrame
-    balanced_complexes = DF.filter(row -> row.module == "balanced", complexes_df)
-    if DF.nrow(balanced_complexes) >= min_module_size
+    # Add balanced-only module if there are balanced complexes not already included in other modules
+    if length(balanced_indices) >= min_module_size
         balanced_names = Symbol[]
-        for row in DF.eachrow(balanced_complexes)
-            push!(balanced_names, Symbol(row.id))
+        for idx in balanced_indices
+            # Find complex name from index
+            complex_name = nothing
+            for (name, idx_val) in network_data.complex_to_idx
+                if idx_val == idx
+                    complex_name = name
+                    break
+                end
+            end
+            if complex_name !== nothing
+                push!(balanced_names, Symbol(complex_name))
+            end
         end
-        # Sort for deterministic output
-        sort!(balanced_names)
-        kinetic_modules[:balanced] = balanced_names
+        
+        if !isempty(balanced_names)
+            # Sort for deterministic output
+            sort!(balanced_names)
+            kinetic_modules[:balanced] = balanced_names
+            @info "Created balanced module" size = length(balanced_names)
+        end
     end
+    
+    @info "Total kinetic modules created" n_modules = length(kinetic_modules)
 
     # Apply module merging logic
     @info "Applying module merging logic"
