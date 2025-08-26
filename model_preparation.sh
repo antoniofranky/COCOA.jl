@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=model_prep_array
 #SBATCH --chdir=/work/schaffran1/results_testjobs
-#SBATCH --output=results_testjobs/model_prep_%A_%a.out
+#SBATCH --output=/work/schaffran1/results_testjobs/model_prep_%A_%a.out
 #SBATCH --time=10:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -37,4 +37,4 @@ JULIA_OPTS="$JULIA_OPTS --check-bounds=no"
 cd /work/schaffran1/COCOA.jl
 
 echo "Processing model array task ${SLURM_ARRAY_TASK_ID}/$NUM_MODELS..."
-julia $JULIA_OPTS model_preparation.jl
+julia $JULIA_OPTS custom_model_prep.jl
