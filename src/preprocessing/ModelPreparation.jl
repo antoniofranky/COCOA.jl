@@ -108,7 +108,23 @@ function prepare_model_for_concordance(model::AbstractFBCModel;
     n_original_rxns = length(work_model.reactions)
     flux_tolerance = extract_solver_tolerance(optimizer, settings)
 
-    # 1. Find blocked reactions using parallel FVA
+    # 1. Remove zero rows/columns FIRST (matching upstream algorithm Step 1)
+    if remove_zero_rows || remove_zero_cols
+        @info "Removing zero stoichiometry rows/columns..."
+        remove_zero_stoichiometry!(work_model, remove_zero_rows, remove_zero_cols)
+    end
+
+    # 2. Split reversible reactions (upstream Step 2 - convert to irreversible)
+    if split_reversible
+        @info "Splitting reversible reactions..."
+        n_rev = count_reversible_reactions(work_model)
+        if n_rev > 0
+            split_reversible_reactions!(work_model)
+            @info "Split $n_rev reversible reactions"
+        end
+    end
+
+    # 3. Find and remove blocked reactions LAST (matching upstream algorithm Step 3)
     if remove_blocked
         if fast
             @info "Finding blocked reactions using fast method with flux tolerance $(flux_tolerance)..."
@@ -123,21 +139,6 @@ function prepare_model_for_concordance(model::AbstractFBCModel;
         end
     end
 
-    # 2. Split reversible reactions
-    if split_reversible
-        @info "Splitting reversible reactions..."
-        n_rev = count_reversible_reactions(work_model)
-        if n_rev > 0
-            split_reversible_reactions!(work_model)
-            @info "Split $n_rev reversible reactions"
-        end
-    end
-
-    # 3. Remove zero rows/columns
-    if remove_zero_rows || remove_zero_cols
-        remove_zero_stoichiometry!(work_model, remove_zero_rows, remove_zero_cols)
-    end
-
     @info "Model preparation complete: $(n_original_rxns) → $(length(work_model.reactions)) reactions"
 
     exported_model = convert(output_type, work_model)
@@ -145,7 +146,6 @@ function prepare_model_for_concordance(model::AbstractFBCModel;
     if output_type == SBMLFBCModels.SBMLFBCModel
         exported_model = fix_objective_conversion(exported_model)
     end
-
     return exported_model
 
 end

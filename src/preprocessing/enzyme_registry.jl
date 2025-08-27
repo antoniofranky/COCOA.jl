@@ -64,13 +64,13 @@ function build_enzyme_registry(model::CM.Model)
                 end
             end
             
-            # Add EC numbers as artificial gene associations (matching MATLAB line 26)
-            # This ensures consistent processing through GPR logic
+            # Store EC-derived artificial genes for later use (don't modify model in-place)
+            # This matches MATLAB line 26 behavior but deferred to avoid model corruption
             if !isempty(ec_enzyme_ids)
                 # Create artificial gene names from EC numbers for GPR system
                 artificial_genes = [replace(ec_id, "ENZ_EC_" => "") for ec_id in ec_enzyme_ids]
-                # Each EC code becomes a separate gene group (isoenzyme)
-                rxn.gene_association_dnf = [[gene] for gene in artificial_genes]
+                # Note: We don't modify rxn.gene_association_dnf here to avoid model structure issues
+                # The artificial genes are handled through the enzyme registry lookup
             end
         end
         
@@ -123,25 +123,18 @@ end
 Extract enzyme IDs for a reaction from all available sources.
 
 Enhanced to match MATLAB algorithm behavior by checking:
-1. Gene associations (GPR rules)
-2. EC number annotations 
-3. Generic enzymes for core metabolic reactions
+1. Gene associations (GPR rules, including EC-derived artificial genes)
+2. No fallback mechanisms (reactions without enzymes remain unexpanded)
 """
-function extract_reaction_enzymes(rxn::CM.Reaction, enzyme_registry::Dict{String,String}, 
-                                 rid::String="")
+function extract_reaction_enzymes(rxn::CM.Reaction, enzyme_registry::Dict{String,String})
     enzyme_ids = String[]
 
-    # 1. Extract from gene associations (including EC-derived artificial genes)
+    # 1. Extract from gene associations (original GPR rules)
     if !isnothing(rxn.gene_association_dnf) && !isempty(rxn.gene_association_dnf)
         for gene_group in rxn.gene_association_dnf
             if length(gene_group) == 1
                 gene_name = gene_group[1]
-                # Check if this is an EC-derived artificial gene
-                if count('_', gene_name) >= 3 && all(c -> isdigit(c) || c == '_', gene_name)
-                    enzyme_id = "ENZ_EC_$gene_name"  # EC-derived
-                else
-                    enzyme_id = "ENZ_$gene_name"  # Regular gene
-                end
+                enzyme_id = "ENZ_$gene_name"
             else
                 complex_name = join(sort(gene_group), "_")
                 enzyme_id = "ENZ_$complex_name"
@@ -153,8 +146,15 @@ function extract_reaction_enzymes(rxn::CM.Reaction, enzyme_registry::Dict{String
         end
     end
     
-    # 2. No fallback needed - EC codes are now integrated into GPR system (like MATLAB)
-    # If no enzymes found through GPR (including EC-derived), reaction remains unexpanded
+    # 2. Extract from EC number annotations directly (fallback for reactions without GPR)
+    if isempty(enzyme_ids)
+        ec_enzyme_ids = extract_ec_enzymes("", rxn)  # Get EC enzymes directly
+        for ec_enzyme_id in ec_enzyme_ids
+            if haskey(enzyme_registry, ec_enzyme_id)
+                push!(enzyme_ids, ec_enzyme_id)
+            end
+        end
+    end
 
     return enzyme_ids
 end

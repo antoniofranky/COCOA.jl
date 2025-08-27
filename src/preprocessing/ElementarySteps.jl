@@ -193,7 +193,7 @@ function split_into_elementary_steps(
             products = [(mid, coeff) for (mid, coeff) in rxn.stoichiometry if coeff > 0]
 
             # Extract enzymes for this reaction
-            reaction_enzymes = extract_reaction_enzymes(rxn, enzyme_registry, rid)
+            reaction_enzymes = extract_reaction_enzymes(rxn, enzyme_registry)
 
             if isempty(reaction_enzymes)
                 # No enzymes - keep original reaction unexpanded (like upstream algorithm)
@@ -250,6 +250,9 @@ function split_into_elementary_steps(
     else
         @info "✓ Elementary model is compatible with mass action kinetics"
     end
+
+    # Clean up unused metabolites before model conversion (fixes ConstraintTrees issues)
+    cleanup_unused_metabolites!(elementary_model)
 
     # Convert to requested output type
     exported_model = convert(output_type, elementary_model)
@@ -348,6 +351,39 @@ function validate_split_model(original_model::A.AbstractFBCModel,
     end
 
     return true
+end
+
+"""
+Remove metabolites that don't participate in any reactions.
+This prevents ConstraintTrees from creating invalid zero constraints.
+"""
+function cleanup_unused_metabolites!(model::CM.Model)
+    # Count metabolite participation in reactions
+    met_reaction_count = Dict{String, Int}()
+    
+    for (mid, met) in model.metabolites
+        met_reaction_count[mid] = 0
+    end
+    
+    for (rid, rxn) in model.reactions
+        for (mid, coeff) in rxn.stoichiometry
+            if haskey(met_reaction_count, mid)
+                met_reaction_count[mid] += 1
+            end
+        end
+    end
+    
+    # Remove metabolites with no reactions
+    unused_mets = [mid for (mid, count) in met_reaction_count if count == 0]
+    
+    if !isempty(unused_mets)
+        for mid in unused_mets
+            delete!(model.metabolites, mid)
+        end
+        @info "Removed $(length(unused_mets)) unused metabolites (had no reactions)"
+    end
+    
+    return nothing
 end
 
 end # module
