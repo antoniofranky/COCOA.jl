@@ -179,6 +179,9 @@ function split_into_elementary_steps(
     # Track intermediate metabolites and mappings
     intermediate_registry = Dict{Vector{String},String}()
     reaction_count = 0
+    
+    # Track unexpanded reactions (matching upstream algorithm)
+    unexpanded_reactions = String[]
 
     # Process each reaction
     for (rid, rxn) in work_model.reactions
@@ -193,8 +196,9 @@ function split_into_elementary_steps(
             reaction_enzymes = extract_reaction_enzymes(rxn, enzyme_registry, rid)
 
             if isempty(reaction_enzymes)
-                # No enzymes - keep original reaction
+                # No enzymes - keep original reaction unexpanded (like upstream algorithm)
                 elementary_model.reactions[rid] = deepcopy(rxn)
+                push!(unexpanded_reactions, rid)
             else
                 # Split reaction for each enzyme
                 for enzyme_id in reaction_enzymes
@@ -214,8 +218,9 @@ function split_into_elementary_steps(
                 end
             end
         else
-            # Keep original reaction
+            # Keep original reaction unexpanded (no mechanism assigned)
             elementary_model.reactions[rid] = deepcopy(rxn)
+            push!(unexpanded_reactions, rid)
         end
     end
 
@@ -225,8 +230,15 @@ function split_into_elementary_steps(
     # Copy couplings if any
     elementary_model.couplings = deepcopy(work_model.couplings)
 
-    @info "Split $(length(work_model.reactions)) reactions into $(length(elementary_model.reactions)) elementary steps"
-    @info "Created $(length(enzyme_registry)) enzymes and $(length(intermediate_registry)) intermediate complexes"
+    # Calculate reaction statistics
+    expanded_reactions = length(elementary_model.reactions) - length(unexpanded_reactions)
+    
+    @info "Reaction splitting summary (matching upstream algorithm):"
+    @info "  - Original reactions: $(length(work_model.reactions))"
+    @info "  - Elementary steps created: $expanded_reactions" 
+    @info "  - Unexpanded reactions: $(length(unexpanded_reactions))"
+    @info "  - Total final reactions: $(length(elementary_model.reactions))"
+    @info "  - Enzymes: $(length(enzyme_registry)), Intermediates: $(length(intermediate_registry))"
     
     # Validate model properties
     validate_split_model(model, elementary_model)

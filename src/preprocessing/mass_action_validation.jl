@@ -198,9 +198,8 @@ function analyze_reaction_complexity(model::CM.Model)
             elementary_count += 1
         else
             complex_count += 1
-            if length(reactants) > 4 || length(products) > 4
-                push!(violations, "Very complex reaction $rid ($(length(reactants)) reactants, $(length(products)) products)")
-            end
+            # Don't warn about individual complex reactions - this is normal in hybrid models
+            # The upstream algorithm keeps many reactions unexpanded by design
         end
     end
     
@@ -213,10 +212,14 @@ function analyze_reaction_complexity(model::CM.Model)
     - Transport-like reactions: $transport_count
     - Total reactions: $total_reactions"""
     
-    # Warn if too few reactions are elementary
-    if elementary_fraction < 0.5
-        push!(violations, "Only $(round(elementary_fraction*100, digits=1))% of reactions are elementary (should be >50% for good mass action kinetics)")
+    # Note: In hybrid models (like upstream algorithm), having unexpanded reactions is normal
+    # Only warn if very few reactions are elementary (indicating potential issues)
+    if elementary_fraction < 0.1  # Very conservative threshold
+        push!(violations, "Only $(round(elementary_fraction*100, digits=1))% of reactions are elementary - this severely limits mass action kinetics applicability")
     end
+    
+    # Always provide summary info but not as warning
+    @info "Hybrid model composition: $(round(elementary_fraction*100, digits=1))% elementary reactions suitable for mass action kinetics"
     
     return violations
 end
