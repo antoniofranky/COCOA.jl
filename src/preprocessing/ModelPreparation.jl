@@ -138,6 +138,10 @@ function prepare_model_for_concordance(model::AbstractFBCModel;
             @info "Removed $(length(blocked)) blocked reactions"
         end
     end
+    if remove_zero_rows || remove_zero_cols
+        @info "Removing zero stoichiometry rows/columns..."
+        remove_zero_stoichiometry!(work_model, remove_zero_rows, remove_zero_cols)
+    end
 
     @info "Model preparation complete: $(n_original_rxns) → $(length(work_model.reactions)) reactions"
 
