@@ -274,7 +274,8 @@ function process_streaming_batches(
     total_candidates_seen = 0
     batches_processed = 0
 
-    # Track transitivity filtering across batches for detailed logging
+    # Track filtering across batches for detailed logging
+    last_filtered_cv = 0
     last_filtered_concordant = 0
     last_filtered_non_concordant = 0
 
@@ -300,10 +301,8 @@ function process_streaming_batches(
 
             # Log completion of candidate collection for this batch
             collection_time = time() - batch_collection_start_time
-            time_str = Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, collection_time * 1000)), "HH:MM:SS.s")
-            @info "Batch $batches_processed: $(length(current_batch)) candidates collected [$time_str]"
-
-            @info "Processing streaming batch $batches_processed" batch_size = length(current_batch) total_seen = total_candidates_seen
+            collection_time_str = Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, collection_time * 1000)), "HH:MM:SS.s")
+            @info "Batch $batches_processed: $(length(current_batch)) candidates collected [$collection_time_str] (total candidates seen: $total_candidates_seen)"
 
             # Clear module cache before processing to prevent memory buildup
             if isa(concordance_tracker, ConcordanceTracker)
@@ -410,26 +409,27 @@ function process_streaming_batches(
             # Calculate optimization time
             optimization_time = time() - optimization_start_time
 
-            # Get filter stats to show transitivity filtering breakdown
+            # Get filter stats to show filtering breakdown
             current_filter_stats = get_filter_report(streaming_filter)
 
             # Calculate what was filtered since last batch
+            batch_cv_filtered = current_filter_stats.breakdown.cv_threshold - last_filtered_cv
             batch_filtered_concordant = current_filter_stats.breakdown.known_concordant - last_filtered_concordant
             batch_filtered_non_concordant = current_filter_stats.breakdown.known_non_concordant - last_filtered_non_concordant
+            batch_transitivity_total = batch_filtered_concordant + batch_filtered_non_concordant
 
-            # Update tracking
+            # Update tracking for next batch
+            last_filtered_cv = current_filter_stats.breakdown.cv_threshold
             last_filtered_concordant = current_filter_stats.breakdown.known_concordant
             last_filtered_non_concordant = current_filter_stats.breakdown.known_non_concordant
 
-            # Calculate optimized vs skipped
-            batch_total_filtered = batch_filtered_concordant + batch_filtered_non_concordant
-            batch_optimized = length(current_batch) - batch_total_filtered
-
             # Format timing and calculate progress
             progress_pct = round(current_filter_stats.pairs_tested / total_possible_pairs * 100, digits=1)
-
             opt_time_str = Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, optimization_time * 1000)), "HH:MM:SS.s")
-            @info "Batch $batches_processed completed: $(length(current_batch)) candidates processed, $(batch_results.concordant_pairs.n_pairs) concordant pairs, $batch_optimized optimized, $batch_total_filtered skipped by transitivity ($batch_filtered_concordant transitive concordant, $batch_filtered_non_concordant transitive non-concordant) [$opt_time_str] - Progress: $(current_filter_stats.pairs_tested)/$total_possible_pairs ($(progress_pct)%)"
+
+            # Improved logging: Show optimization results and filtering summary
+            @info "Batch $batches_processed: $(length(current_batch)) optimized → $(batch_results.concordant_pairs.n_pairs) concordant, $(batch_results.non_concordant_pairs) non-concordant [$opt_time_str]"
+            @info "  Since last batch: $batch_cv_filtered filtered by CV, $batch_transitivity_total by transitivity ($batch_filtered_concordant concordant, $batch_filtered_non_concordant non-concordant) - Progress: $(current_filter_stats.pairs_tested)/$total_possible_pairs ($(progress_pct)%)"
 
             # Log memory stats periodically
             if batches_processed % 10 == 0
@@ -452,8 +452,8 @@ function process_streaming_batches(
 
         # Log completion of candidate collection for final batch
         collection_time = time() - batch_collection_start_time
-        time_str = Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, collection_time * 1000)), "HH:MM:SS.s")
-        @info "Batch $batches_processed: $(length(current_batch)) candidates collected [$time_str]"
+        collection_time_str = Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, collection_time * 1000)), "HH:MM:SS.s")
+        @info "Batch $batches_processed: $(length(current_batch)) candidates collected [$collection_time_str]"
 
         @debug "Processing final streaming batch $batches_processed" batch_size = length(current_batch)
 
@@ -542,7 +542,9 @@ function process_streaming_batches(
         progress_pct = round(final_filter_stats.pairs_tested / total_possible_pairs * 100, digits=1)
 
         opt_time_str = Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, optimization_time * 1000)), "HH:MM:SS.s")
-        @info "Batch $batches_processed completed: $(length(current_batch)) candidates processed, $(batch_results.concordant_pairs.n_pairs) concordant pairs, $(length(current_batch)) optimized, 0 skipped by transitivity (0 transitive concordant, 0 transitive non-concordant) [$opt_time_str] - Progress: $(final_filter_stats.pairs_tested)/$total_possible_pairs ($(progress_pct)%)"
+
+        # Final batch logging - optimization results only (no filtering since it's the final batch)
+        @info "Batch $batches_processed: $(length(current_batch)) optimized → $(batch_results.concordant_pairs.n_pairs) concordant, $(batch_results.non_concordant_pairs) non-concordant [$opt_time_str] - Progress: $(final_filter_stats.pairs_tested)/$total_possible_pairs ($(progress_pct)%)"
     end
 
     # Get comprehensive filter report

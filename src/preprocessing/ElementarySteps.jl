@@ -21,8 +21,10 @@ import AbstractFBCModels.CanonicalModel as CM
 include("enzyme_registry.jl")
 include("intermediates.jl")
 include("mechanisms.jl")
+include("mass_action_validation.jl")
 
-export split_into_elementary_steps, validate_split_model, normalize_bounds!, fix_objective_after_conversion
+export split_into_elementary_steps, validate_split_model, normalize_bounds!, fix_objective_after_conversion,
+       validate_mass_action_kinetics, check_enzyme_conservation
 
 """
     normalize_bounds!(model::CM.Model; 
@@ -188,7 +190,7 @@ function split_into_elementary_steps(
             products = [(mid, coeff) for (mid, coeff) in rxn.stoichiometry if coeff > 0]
 
             # Extract enzymes for this reaction
-            reaction_enzymes = extract_reaction_enzymes(rxn, enzyme_registry)
+            reaction_enzymes = extract_reaction_enzymes(rxn, enzyme_registry, rid)
 
             if isempty(reaction_enzymes)
                 # No enzymes - keep original reaction
@@ -225,7 +227,17 @@ function split_into_elementary_steps(
 
     @info "Split $(length(work_model.reactions)) reactions into $(length(elementary_model.reactions)) elementary steps"
     @info "Created $(length(enzyme_registry)) enzymes and $(length(intermediate_registry)) intermediate complexes"
+    
+    # Validate model properties
     validate_split_model(model, elementary_model)
+    
+    # Validate mass action kinetics compatibility
+    is_mass_action_valid, ma_violations = validate_mass_action_kinetics(elementary_model, verbose=true)
+    if !is_mass_action_valid
+        @warn "Elementary model may not be fully compatible with mass action kinetics"
+    else
+        @info "✓ Elementary model is compatible with mass action kinetics"
+    end
 
     # Convert to requested output type
     exported_model = convert(output_type, elementary_model)
@@ -233,9 +245,6 @@ function split_into_elementary_steps(
     if output_type == SBMLFBCModels.SBMLFBCModel
         exported_model = fix_objective_after_conversion(exported_model)
     end
-
-    # Validate model integrity
-
 
     return exported_model
 end
