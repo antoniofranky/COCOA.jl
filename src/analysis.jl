@@ -1344,7 +1344,7 @@ function activity_concordance_analysis(
     @info "Using fixed batch size" batch_size = batch_size n_complexes = length(complexes_vector)
 
     # Create direct streaming filter (eliminates redundant chunking layer)
-    filter_time = @elapsed streaming_filter = try
+    streaming_filter = try
         StreamingCandidateFilter(
             complexes_vector,
             trivial_pairs_indices,
@@ -1360,8 +1360,7 @@ function activity_concordance_analysis(
         rethrow(e)
     end
 
-    filter_time_str = Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, filter_time * 1000)), "HH:MM:SS.s")
-    @info "Direct streaming filter created [$filter_time_str]"
+    @info "Direct streaming filter created"
 
     @info "Processing concordance tests with direct streaming (deterministic batch processing)"
     concordance_time = @elapsed batch_results = process_streaming_batches(

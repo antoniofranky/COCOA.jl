@@ -424,10 +424,12 @@ $(TYPEDSIGNATURES)
 Add pure balanced linkage classes as separate kinetic modules.
 This replicates the R code that finds weak connected components containing only balanced complexes.
 """
-function add_pure_balanced_linkage_classes(candidate_modules, largest_group_indices, network_data)
+function add_pure_balanced_linkage_classes(candidate_modules, largest_group_indices, network_data, min_module_size::Int=2)
     # Find weak connected components in the network graph
     A_matrix = network_data.A_matrix
     n_complexes = size(A_matrix, 1)
+    
+    @info "Finding pure balanced linkage classes" n_balanced_complexes = length(largest_group_indices)
     
     # Create adjacency matrix for undirected graph (weak connectivity)
     adj_matrix = falses(n_complexes, n_complexes)
@@ -468,18 +470,43 @@ function add_pure_balanced_linkage_classes(candidate_modules, largest_group_indi
         end
     end
     
+    @info "Found weak connected components" n_components = length(components) component_sizes = [length(c) for c in components]
+    
     # Check which components contain only balanced complexes
     balanced_set = Set(largest_group_indices)  # largest group contains balanced complexes
     result_modules = copy(candidate_modules)
     
-    for component in components
-        if length(component) > 1  # Skip singleton components
-            # Check if component contains only balanced complexes
-            if all(idx -> idx in balanced_set, component)
-                push!(result_modules, component)
+    # Track which balanced complexes are already in existing candidate modules
+    covered_balanced = Set{Int}()
+    for candidate_module in candidate_modules
+        for complex_idx in candidate_module
+            if complex_idx in balanced_set
+                push!(covered_balanced, complex_idx)
             end
         end
     end
+    
+    @info "Balanced complexes already covered" n_covered = length(covered_balanced) n_uncovered = length(balanced_set) - length(covered_balanced)
+    
+    # Add components that contain only balanced complexes AND have sufficient size
+    pure_balanced_count = 0
+    for component in components
+        if length(component) >= min_module_size  # Check minimum size first
+            # Check if component contains only balanced complexes
+            if all(idx -> idx in balanced_set, component)
+                # Check if this component adds new balanced complexes not already covered
+                uncovered_in_component = setdiff(Set(component), covered_balanced)
+                if length(uncovered_in_component) > 0
+                    push!(result_modules, component)
+                    pure_balanced_count += 1
+                    union!(covered_balanced, Set(component))
+                    @info "Added pure balanced linkage class" component_size = length(component) new_balanced = length(uncovered_in_component)
+                end
+            end
+        end
+    end
+    
+    @info "Pure balanced linkage class processing complete" added_count = pure_balanced_count total_modules = length(result_modules)
     
     return result_modules
 end
@@ -969,15 +996,16 @@ function identify_kinetic_modules(
     
     @info "Found largest group" largest_group_idx = largest_group_idx largest_group_size = largest_group_size
 
-    # STEP 3: Process smaller groups with largest group using Upstream Algorithm
+    # STEP 3: Process ALL groups using complete Upstream Algorithm
     candidate_modules = Vector{Vector{Int}}()
     
-    @info "Processing smaller groups" n_smaller_groups = length(class_with_balanced) - 1
+    @info "Processing all groups with Upstream Algorithm" n_groups = length(class_with_balanced)
     
+    # First, process smaller groups combined with largest group (original logic)
     for i in 1:length(class_with_balanced)
-        # Skip the largest group (equivalent to R: if (i != maxj))
+        # Skip the largest group for now (equivalent to R: if (i != maxj))
         if i != largest_group_idx
-            @info "Processing group $i" group_size = length(class_with_balanced[i])
+            @info "Processing smaller group $i combined with largest" group_size = length(class_with_balanced[i])
             
             # Combine smaller group with largest group
             combined_indices = union(class_with_balanced[i], class_with_balanced[largest_group_idx])
@@ -990,9 +1018,42 @@ function identify_kinetic_modules(
             
             if length(remaining_indices) >= min_module_size
                 push!(candidate_modules, remaining_indices)
-                @info "Added candidate module" module_size = length(remaining_indices)
+                @info "Added candidate module from combined group" module_size = length(remaining_indices)
             else
-                @info "Rejected small module" module_size = length(remaining_indices) min_size = min_module_size
+                @info "Rejected small combined module" module_size = length(remaining_indices) min_size = min_module_size
+            end
+        end
+    end
+    
+    # Process largest group (balanced complexes) separately
+    @info "Processing largest group (balanced complexes) separately" group_size = length(class_with_balanced[largest_group_idx])
+    largest_group_indices = class_with_balanced[largest_group_idx]
+    
+    # Apply autonomy filter to largest group alone
+    removed_from_largest = apply_r_autonomy_filter(largest_group_indices, network_data.A_matrix)
+    remaining_from_largest = setdiff(largest_group_indices, removed_from_largest)
+    @info "Largest group after autonomy filter" removed_count = length(removed_from_largest) remaining_count = length(remaining_from_largest)
+    
+    if length(remaining_from_largest) >= min_module_size
+        push!(candidate_modules, remaining_from_largest)
+        @info "Added candidate module from largest group" module_size = length(remaining_from_largest)
+    else
+        @info "Largest group too small after filtering" module_size = length(remaining_from_largest) min_size = min_module_size
+    end
+    
+    # Process individual groups separately (additional modules beyond combinations)
+    for i in 1:length(class_with_balanced)
+        if i != largest_group_idx && length(class_with_balanced[i]) >= min_module_size
+            @info "Processing individual group $i separately" group_size = length(class_with_balanced[i])
+            
+            # Apply autonomy filter to individual group
+            removed_indices = apply_r_autonomy_filter(class_with_balanced[i], network_data.A_matrix)
+            remaining_indices = setdiff(class_with_balanced[i], removed_indices)
+            @info "Individual group after autonomy filter" removed_count = length(removed_indices) remaining_count = length(remaining_indices)
+            
+            if length(remaining_indices) >= min_module_size
+                push!(candidate_modules, remaining_indices)
+                @info "Added candidate module from individual group" module_size = length(remaining_indices)
             end
         end
     end
@@ -1000,43 +1061,68 @@ function identify_kinetic_modules(
     @info "Created candidate modules" n_candidates = length(candidate_modules)
 
     # STEP 4: Add pure balanced linkage classes
-    candidate_modules = add_pure_balanced_linkage_classes(candidate_modules, class_with_balanced[largest_group_idx], network_data)
+    candidate_modules = add_pure_balanced_linkage_classes(candidate_modules, class_with_balanced[largest_group_idx], network_data, min_module_size)
 
     # STEP 5: Merge overlapping modules via overlap graph
     final_modules = merge_overlapping_modules(candidate_modules)
+    
+    # STEP 6: Add singleton modules for unassigned complexes
+    @info "Adding singleton modules for unassigned complexes"
+    
+    # Track which complexes are assigned to modules
+    assigned_complexes = Set{Int}()
+    for kinetic_module in final_modules
+        union!(assigned_complexes, Set(kinetic_module))
+    end
+    
+    # Find all complexes in the network
+    all_complexes = Set(1:size(network_data.A_matrix, 1))
+    unassigned_complexes = setdiff(all_complexes, assigned_complexes)
+    
+    @info "Complex assignment status" total_complexes = length(all_complexes) assigned = length(assigned_complexes) unassigned = length(unassigned_complexes)
+    
+    # Add singleton modules for unassigned complexes (if min_module_size allows)
+    if min_module_size <= 1
+        for complex_idx in unassigned_complexes
+            push!(final_modules, [complex_idx])
+        end
+        @info "Added singleton modules" singleton_count = length(unassigned_complexes)
+    else
+        @info "Skipping singleton modules (min_module_size = $min_module_size > 1)" unassigned_count = length(unassigned_complexes)
+    end
+    
+    @info "Final module creation" total_modules = length(final_modules)
 
-    # STEP 6: Convert to kinetic modules dictionary
+    # STEP 7: Convert to kinetic modules dictionary
     kinetic_modules = Dict{Symbol,Vector{Symbol}}()
     kinetic_module_counter = 1
     
     # Convert final modules to kinetic modules dictionary
     for (i, module_indices) in enumerate(final_modules)
-        if length(module_indices) >= min_module_size
-            # Convert indices back to complex names
-            upstream_names = Symbol[]
-            for idx in module_indices
-                # Find complex name from index
-                complex_name = nothing
-                for (name, idx_val) in network_data.complex_to_idx
-                    if idx_val == idx
-                        complex_name = name
-                        break
-                    end
-                end
-                if complex_name !== nothing
-                    push!(upstream_names, Symbol(complex_name))
+        # Convert indices back to complex names
+        upstream_names = Symbol[]
+        for idx in module_indices
+            # Find complex name from index
+            complex_name = nothing
+            for (name, idx_val) in network_data.complex_to_idx
+                if idx_val == idx
+                    complex_name = name
+                    break
                 end
             end
-
-            if !isempty(upstream_names)
-                # Sort for deterministic output
-                sort!(upstream_names)
-
-                # Create unique kinetic module name
-                kinetic_module_name = Symbol("kinetic_module_$kinetic_module_counter")
-                kinetic_modules[kinetic_module_name] = upstream_names
-                kinetic_module_counter += 1
+            if complex_name !== nothing
+                push!(upstream_names, Symbol(complex_name))
             end
+        end
+
+        if !isempty(upstream_names)
+            # Sort for deterministic output
+            sort!(upstream_names)
+
+            # Create unique kinetic module name
+            kinetic_module_name = Symbol("kinetic_module_$kinetic_module_counter")
+            kinetic_modules[kinetic_module_name] = upstream_names
+            kinetic_module_counter += 1
         end
     end
 
