@@ -76,7 +76,7 @@ A matrix: complexes × reactions, entries are +1/-1 for product/substrate relati
 """
 function extract_network_matrices_from_constraints(constraints, model::AbstractFBCModels.AbstractFBCModel)
     # Extract complexes using COCOA's system
-    complexes = COCOA.extract_complexes_from_model(model)
+    complexes = extract_complexes_from_constraints(model, constraints)
 
     # Get reaction information - check if we have split reactions
     if haskey(constraints.balance, :fluxes_forward) && haskey(constraints.balance, :fluxes_reverse)
@@ -230,191 +230,42 @@ end
 """
 $(TYPEDSIGNATURES)
 
-Extract Y (species-complex) and A (complex-reaction) matrices from model.
-Y matrix uses Float64 for stoichiometric coefficients, A matrix uses Int8 for incidence (1/-1).
-"""
-function extract_network_matrices(model)
-    # Get model information and cache lengths
-    metabolites = AbstractFBCModels.metabolites(model)
-    reactions = AbstractFBCModels.reactions(model)
-    n_metabolites = length(metabolites)
-    n_reactions = length(reactions)
-
-    # Build species-reaction stoichiometric matrix first
-    S = AbstractFBCModels.stoichiometry(model)
-
-    # Pre-allocate vectors with estimated sizes for better performance
-    estimated_complexes = 2 * n_reactions  # substrate + product per reaction
-    estimated_entries = n_metabolites * 2  # rough estimate for matrix entries
-
-    complexes = Vector{String}()
-    sizehint!(complexes, estimated_complexes)
-
-    Y_rows = Vector{Int}()
-    Y_cols = Vector{Int}()
-    Y_vals = Vector{Float64}()
-    sizehint!(Y_rows, estimated_entries)
-    sizehint!(Y_cols, estimated_entries)
-    sizehint!(Y_vals, estimated_entries)
-
-    A_rows = Vector{Int}()
-    A_cols = Vector{Int}()
-    A_vals = Vector{Int8}()
-    sizehint!(A_rows, estimated_complexes)
-    sizehint!(A_cols, estimated_complexes)
-    sizehint!(A_vals, estimated_complexes)
-
-    complex_idx = 1
-
-    # Simplified: create substrate and product complexes for each reaction
-    for (rxn_idx, rxn_id) in enumerate(reactions)
-        # Get stoichiometry for this reaction
-        rxn_stoich = S[:, rxn_idx]
-
-        # Create substrate complex
-        substrate_indices = findall(x -> x < 0, rxn_stoich)
-        if !isempty(substrate_indices)
-            push!(complexes, "$(rxn_id)_substrate")
-            for met_idx in substrate_indices
-                push!(Y_rows, met_idx)
-                push!(Y_cols, complex_idx)
-                push!(Y_vals, -rxn_stoich[met_idx])
-            end
-            # Add to A matrix (substrate -> reaction)
-            push!(A_rows, complex_idx)
-            push!(A_cols, rxn_idx)
-            push!(A_vals, Int8(-1))
-            complex_idx += 1
-        end
-
-        # Create product complex
-        product_indices = findall(x -> x > 0, rxn_stoich)
-        if !isempty(product_indices)
-            push!(complexes, "$(rxn_id)_product")
-            for met_idx in product_indices
-                push!(Y_rows, met_idx)
-                push!(Y_cols, complex_idx)
-                push!(Y_vals, rxn_stoich[met_idx])
-            end
-            # Add to A matrix (reaction -> product)
-            push!(A_rows, complex_idx)
-            push!(A_cols, rxn_idx)
-            push!(A_vals, Int8(1))
-            complex_idx += 1
-        end
-    end
-
-    n_complexes = length(complexes)
-
-    Y_matrix = SparseArrays.sparse(Y_rows, Y_cols, Y_vals, n_metabolites, n_complexes)
-    A_matrix = SparseArrays.sparse(A_rows, A_cols, A_vals, n_complexes, n_reactions)
-
-    # Create index mappings with pre-allocated sizes
-    complex_to_idx = Dict{String,Int}()
-    sizehint!(complex_to_idx, n_complexes)
-    @inbounds for i in eachindex(complexes)
-        complex_to_idx[complexes[i]] = i
-    end
-
-    metabolite_to_idx = Dict{String,Int}()
-    sizehint!(metabolite_to_idx, n_metabolites)
-    @inbounds for i in eachindex(metabolites)
-        metabolite_to_idx[metabolites[i]] = i
-    end
-
-    reaction_to_idx = Dict{String,Int}()
-    sizehint!(reaction_to_idx, n_reactions)
-    @inbounds for i in eachindex(reactions)
-        reaction_to_idx[reactions[i]] = i
-    end
-
-    return (
-        Y_matrix=Y_matrix,
-        A_matrix=A_matrix,
-        metabolite_names=collect(metabolites),
-        complex_names=complexes,
-        reaction_names=collect(reactions),
-        complex_to_idx=complex_to_idx,
-        metabolite_to_idx=metabolite_to_idx,
-        reaction_to_idx=reaction_to_idx
-    )
-end
-
-"""
-$(TYPEDSIGNATURES)
-
-Create class_with_balanced groups by grouping mutually concordant complexes using transitive closure.
-This replicates the MATLAB preprocessing step that creates `class_with_balanced`.
+Create class_with_balanced groups by using existing concordance module assignments.
+This directly maps the concordance results to kinetic module candidates without 
+incorrectly merging separate concordance modules.
 """
 function create_class_with_balanced_groups(concordance_results, network_data)
     complexes_df = concordance_results.complexes
-    
-    # Create concordance pairs (CP) - equivalent to [CP(:,1),CP(:,2)] = find(CC~=0) in MATLAB
-    concordance_pairs = Vector{Tuple{Int,Int}}()
-    
-    # Add pairs within each concordance module (including balanced)
+
+    @info "Creating class_with_balanced from existing concordance modules" n_concordance_modules = length(unique(complexes_df.module))
+
+    # Create one class_with_balanced group per concordance module
+    class_with_balanced = Vector{Vector{Int}}()
+
+    # Process each concordance module separately (preserving existing boundaries)
     for module_id in unique(complexes_df.module)
         module_complexes = DF.filter(row -> row.module == module_id, complexes_df)
-        if DF.nrow(module_complexes) > 1
+
+        if DF.nrow(module_complexes) >= 1  # Include even single-complex modules
             complex_indices = Int[]
+
             for row in DF.eachrow(module_complexes)
                 complex_name = String(row.id)
                 if haskey(network_data.complex_to_idx, complex_name)
                     push!(complex_indices, network_data.complex_to_idx[complex_name])
                 end
             end
-            
-            # Create all pairs within this module
-            for i in 1:length(complex_indices)
-                for j in (i+1):length(complex_indices)
-                    push!(concordance_pairs, (complex_indices[i], complex_indices[j]))
-                end
+
+            if !isempty(complex_indices)
+                # Sort for determinism
+                sort!(complex_indices)
+                push!(class_with_balanced, complex_indices)
             end
         end
     end
-    
-    # Get all unique complex indices
-    all_indices = Set{Int}()
-    for (i, j) in concordance_pairs
-        push!(all_indices, i)
-        push!(all_indices, j)
-    end
-    unclassified = collect(all_indices)
-    
-    # Group using transitive closure (equivalent to MATLAB while loop)
-    class_with_balanced = Vector{Vector{Int}}()
-    
-    while !isempty(unclassified)
-        # Start new group with first unclassified complex
-        i = unclassified[1]
-        current_group = [i]
-        
-        # Find all pairs involving complexes in current group
-        changed = true
-        while changed
-            old_size = length(current_group)
-            
-            # Find all concordance pairs that involve any complex in current group
-            for (c1, c2) in concordance_pairs
-                if c1 in current_group && !(c2 in current_group)
-                    push!(current_group, c2)
-                elseif c2 in current_group && !(c1 in current_group)
-                    push!(current_group, c1)
-                end
-            end
-            
-            # Remove duplicates
-            current_group = unique(current_group)
-            changed = length(current_group) > old_size
-        end
-        
-        # Remove classified complexes from unclassified
-        unclassified = setdiff(unclassified, current_group)
-        
-        # Add completed group
-        push!(class_with_balanced, current_group)
-    end
-    
+
+    @info "Created class_with_balanced groups from concordance modules" n_groups = length(class_with_balanced) group_sizes = [length(g) for g in class_with_balanced]
+
     return class_with_balanced
 end
 
@@ -428,15 +279,15 @@ function add_pure_balanced_linkage_classes(candidate_modules, largest_group_indi
     # Find weak connected components in the network graph
     A_matrix = network_data.A_matrix
     n_complexes = size(A_matrix, 1)
-    
+
     @info "Finding pure balanced linkage classes" n_balanced_complexes = length(largest_group_indices)
-    
+
     # Create adjacency matrix for undirected graph (weak connectivity)
     adj_matrix = falses(n_complexes, n_complexes)
     for reaction_idx in 1:size(A_matrix, 2)
         substrates = findall(x -> x < 0, A_matrix[:, reaction_idx])
         products = findall(x -> x > 0, A_matrix[:, reaction_idx])
-        
+
         # Connect all substrates to all products (undirected)
         for s in substrates
             for p in products
@@ -444,17 +295,17 @@ function add_pure_balanced_linkage_classes(candidate_modules, largest_group_indi
             end
         end
     end
-    
+
     # Find connected components using simple BFS
     visited = falses(n_complexes)
     components = Vector{Vector{Int}}()
-    
+
     for i in 1:n_complexes
         if !visited[i]
             component = [i]
             queue = [i]
             visited[i] = true
-            
+
             while !isempty(queue)
                 current = popfirst!(queue)
                 for neighbor in 1:n_complexes
@@ -465,17 +316,17 @@ function add_pure_balanced_linkage_classes(candidate_modules, largest_group_indi
                     end
                 end
             end
-            
+
             push!(components, component)
         end
     end
-    
+
     @info "Found weak connected components" n_components = length(components) component_sizes = [length(c) for c in components]
-    
+
     # Check which components contain only balanced complexes
     balanced_set = Set(largest_group_indices)  # largest group contains balanced complexes
     result_modules = copy(candidate_modules)
-    
+
     # Track which balanced complexes are already in existing candidate modules
     covered_balanced = Set{Int}()
     for candidate_module in candidate_modules
@@ -485,9 +336,9 @@ function add_pure_balanced_linkage_classes(candidate_modules, largest_group_indi
             end
         end
     end
-    
+
     @info "Balanced complexes already covered" n_covered = length(covered_balanced) n_uncovered = length(balanced_set) - length(covered_balanced)
-    
+
     # Add components that contain only balanced complexes AND have sufficient size
     pure_balanced_count = 0
     for component in components
@@ -505,9 +356,9 @@ function add_pure_balanced_linkage_classes(candidate_modules, largest_group_indi
             end
         end
     end
-    
+
     @info "Pure balanced linkage class processing complete" added_count = pure_balanced_count total_modules = length(result_modules)
-    
+
     return result_modules
 end
 
@@ -521,9 +372,9 @@ function merge_overlapping_modules(candidate_modules)
     if isempty(candidate_modules)
         return Vector{Vector{Int}}()
     end
-    
+
     n_modules = length(candidate_modules)
-    
+
     # Create overlap matrix (mdiff in R)
     overlap_matrix = zeros(Int, n_modules, n_modules)
     for i in 1:(n_modules-1)
@@ -532,21 +383,21 @@ function merge_overlapping_modules(candidate_modules)
             overlap_matrix[i, j] = overlap_matrix[j, i] = overlap
         end
     end
-    
+
     # Create adjacency matrix (any overlap > 0 means modules should be merged)
     adj_matrix = overlap_matrix .> 0
-    
+
     # Find connected components
     visited = falses(n_modules)
     final_modules = Vector{Vector{Int}}()
-    
+
     for i in 1:n_modules
         if !visited[i]
             # Find connected component starting from i
             component_indices = [i]
             queue = [i]
             visited[i] = true
-            
+
             while !isempty(queue)
                 current = popfirst!(queue)
                 for j in 1:n_modules
@@ -557,19 +408,19 @@ function merge_overlapping_modules(candidate_modules)
                     end
                 end
             end
-            
+
             # Merge all modules in this component
             merged_module = Vector{Int}()
             for module_idx in component_indices
                 append!(merged_module, candidate_modules[module_idx])
             end
-            
+
             # Remove duplicates
             merged_module = unique(merged_module)
             push!(final_modules, merged_module)
         end
     end
-    
+
     return final_modules
 end
 
@@ -583,7 +434,7 @@ function apply_r_autonomy_filter(complex_indices::Vector{Int}, A_matrix::SparseA
     """
     Implements the Upstream Algorithm autonomy filter from Section S.2.3.
     
-    CRITICAL: Returns the UNION of removed complexes from Phase III and Phase IV.
+    CRITICAL: Returns the UNION of removed complexes from ALL phases.
     The remaining complexes after removal form the autonomous and feeding upstream set.
     
     Upstream Algorithm:
@@ -600,7 +451,7 @@ function apply_r_autonomy_filter(complex_indices::Vector{Int}, A_matrix::SparseA
 
     x = copy(complex_indices)  # Current set being processed
     original_count = length(x)
-    @info "Autonomy filter starting" input_size = original_count
+    # Phase I through IV autonomy filtering (reduced logging)
 
     # Phase I: Remove entry complexes iteratively
     f = true
@@ -635,7 +486,7 @@ function apply_r_autonomy_filter(complex_indices::Vector{Int}, A_matrix::SparseA
             @info "Phase I removed complexes" removed_count = removed_this_round remaining_count = length(x)
         end
     end
-    
+
     @info "Phase I completed" remaining_after_phase_I = length(x)
 
     # Phase II: Remove sink complexes (degree 0)
@@ -655,7 +506,7 @@ function apply_r_autonomy_filter(complex_indices::Vector{Int}, A_matrix::SparseA
             @info "Phase II removed sinks" removed_count = removed_phase_II remaining_count = length(x)
         end
     end
-    
+
     @info "Phase II completed" remaining_after_phase_II = length(x)
 
     # Phase III: Remove exit complexes iteratively
@@ -768,10 +619,14 @@ function apply_r_autonomy_filter(complex_indices::Vector{Int}, A_matrix::SparseA
     end
 
     total_removed = union(phase_III_removed, phase_IV_removed)
-    @info "Autonomy filter completed" total_removed_count = length(total_removed) original_size = original_count final_size = original_count - length(total_removed)
 
-    # Return union of removed complexes (this is what R returns!)
-    return total_removed
+    # The remaining complexes after all filtering phases form the upstream autonomous set
+    remaining_complexes = setdiff(x, phase_IV_removed)  # x already excludes Phase III removed complexes
+
+    @info "Autonomy filter completed" total_removed_count = length(total_removed) original_size = original_count final_autonomous_set_size = length(remaining_complexes)
+
+    # Return the remaining autonomous complexes (this is the upstream set)
+    return remaining_complexes
 end
 
 """
@@ -844,110 +699,6 @@ end
 """
 $(TYPEDSIGNATURES)
 
-Save kinetic analysis results to JLD2 file with compression.
-"""
-function save_kinetic_results(results::KineticModuleResults, filepath::String)
-    JLD2.jldsave(filepath;
-        # Concordance results
-        concordance_complexes=results.concordance_results.complexes,
-        concordance_modules=results.concordance_results.modules,
-        concordance_lambdas=results.concordance_results.lambdas,
-        concordance_stats=results.concordance_results.stats,
-
-        # Kinetic results
-        kinetic_modules=results.kinetic_modules,
-        giant_module_id=results.giant_module_id,
-        interface_reactions=results.interface_reactions,
-
-        # Network matrices
-        Y_matrix=results.Y_matrix,
-        A_matrix=results.A_matrix,
-
-        # Names and mappings
-        metabolite_names=results.metabolite_names,
-        reaction_names=results.reaction_names,
-        complex_to_idx=results.complex_to_idx,
-        metabolite_to_idx=results.metabolite_to_idx,
-        reaction_to_idx=results.reaction_to_idx, compress=true
-    )
-end
-
-"""
-$(TYPEDSIGNATURES)
-
-Load kinetic analysis results from JLD2 file.
-"""
-function load_kinetic_results(filepath::String)
-    data = JLD2.load(filepath)
-
-    concordance_results = (
-        complexes=data["concordance_complexes"],
-        modules=data["concordance_modules"],
-        lambdas=data["concordance_lambdas"],
-        stats=data["concordance_stats"]
-    )
-
-    return KineticModuleResults(
-        concordance_results,
-        data["kinetic_modules"],
-        data["giant_module_id"],
-        data["interface_reactions"],
-        data["Y_matrix"],
-        data["A_matrix"],
-        data["metabolite_names"],
-        data["reaction_names"],
-        data["complex_to_idx"],
-        data["metabolite_to_idx"],
-        data["reaction_to_idx"],
-        nothing  # summary will be populated by analysis functions
-    )
-end
-
-"""
-$(TYPEDSIGNATURES)
-
-Save concentration robustness results to JLD2 file.
-"""
-function save_robustness_results(results::ConcentrationRobustnessResults, filepath::String)
-    # Save kinetic results first
-    kinetic_file = replace(filepath, ".jld2" => "_kinetic.jld2")
-    save_kinetic_results(results.kinetic_results, kinetic_file)
-
-    # Save robustness-specific data
-    JLD2.jldsave(filepath;
-        kinetic_results_file=kinetic_file,
-        robust_metabolites=results.robust_metabolites,
-        robust_metabolite_pairs=results.robust_metabolite_pairs,
-        n_robust_metabolites=results.n_robust_metabolites,
-        n_robust_pairs=results.n_robust_pairs,
-        giant_kinetic_module_size=results.giant_kinetic_module_size,
-        compress=true
-    )
-end
-
-"""
-$(TYPEDSIGNATURES)
-
-Load concentration robustness results from JLD2 file.
-"""
-function load_robustness_results(filepath::String)
-    data = JLD2.load(filepath)
-    kinetic_results = load_kinetic_results(data["kinetic_results_file"])
-
-    return ConcentrationRobustnessResults(
-        kinetic_results,
-        data["robust_metabolites"],
-        data["robust_metabolite_pairs"],
-        data["n_robust_metabolites"],
-        data["n_robust_pairs"],
-        data["giant_kinetic_module_size"],
-        nothing  # summary will be populated by analysis functions
-    )
-end
-
-"""
-$(TYPEDSIGNATURES)
-
 Identify kinetic modules from concordance analysis results using constraints.
 
 Takes concordance analysis results and constraints to identify kinetic modules
@@ -981,8 +732,8 @@ function identify_kinetic_modules(
     # STEP 1: Create class_with_balanced groups (equivalent to MATLAB preprocessing)
     # This groups mutually concordant complexes including balanced complexes
     class_with_balanced = create_class_with_balanced_groups(concordance_results, network_data)
-    
-    @info "Created class_with_balanced groups" n_groups = length(class_with_balanced) group_sizes = [length(g) for g in class_with_balanced]
+
+    @info "Created class_with_balanced groups" n_groups = length(class_with_balanced)
 
     # STEP 2: Find largest class_with_balanced group (equivalent to maxj in R)
     largest_group_idx = 1
@@ -993,71 +744,61 @@ function identify_kinetic_modules(
             largest_group_idx = i
         end
     end
-    
-    @info "Found largest group" largest_group_idx = largest_group_idx largest_group_size = largest_group_size
 
     # STEP 3: Process ALL groups using complete Upstream Algorithm
     candidate_modules = Vector{Vector{Int}}()
-    
-    @info "Processing all groups with Upstream Algorithm" n_groups = length(class_with_balanced)
-    
+
+    @info "Processing upstream algorithm on $(length(class_with_balanced)) groups" largest_group_size = largest_group_size
+
     # First, process smaller groups combined with largest group (original logic)
     for i in 1:length(class_with_balanced)
         # Skip the largest group for now (equivalent to R: if (i != maxj))
         if i != largest_group_idx
-            @info "Processing smaller group $i combined with largest" group_size = length(class_with_balanced[i])
-            
             # Combine smaller group with largest group
             combined_indices = union(class_with_balanced[i], class_with_balanced[largest_group_idx])
-            @info "Combined with largest group" combined_size = length(combined_indices)
-            
+
             # Apply Upstream Algorithm to combined set
             removed_indices = apply_r_autonomy_filter(combined_indices, network_data.A_matrix)
             remaining_indices = setdiff(combined_indices, removed_indices)
-            @info "After Upstream Algorithm" removed_count = length(removed_indices) remaining_count = length(remaining_indices)
-            
+
             if length(remaining_indices) >= min_module_size
                 push!(candidate_modules, remaining_indices)
-                @info "Added candidate module from combined group" module_size = length(remaining_indices)
-            else
-                @info "Rejected small combined module" module_size = length(remaining_indices) min_size = min_module_size
             end
         end
     end
-    
+
     # Process largest group (balanced complexes) separately
-    @info "Processing largest group (balanced complexes) separately" group_size = length(class_with_balanced[largest_group_idx])
     largest_group_indices = class_with_balanced[largest_group_idx]
-    
+
     # Apply autonomy filter to largest group alone
     removed_from_largest = apply_r_autonomy_filter(largest_group_indices, network_data.A_matrix)
     remaining_from_largest = setdiff(largest_group_indices, removed_from_largest)
     @info "Largest group after autonomy filter" removed_count = length(removed_from_largest) remaining_count = length(remaining_from_largest)
-    
+
     if length(remaining_from_largest) >= min_module_size
         push!(candidate_modules, remaining_from_largest)
         @info "Added candidate module from largest group" module_size = length(remaining_from_largest)
     else
         @info "Largest group too small after filtering" module_size = length(remaining_from_largest) min_size = min_module_size
     end
-    
+
     # Process individual groups separately (additional modules beyond combinations)
     for i in 1:length(class_with_balanced)
         if i != largest_group_idx && length(class_with_balanced[i]) >= min_module_size
             @info "Processing individual group $i separately" group_size = length(class_with_balanced[i])
-            
+
             # Apply autonomy filter to individual group
             removed_indices = apply_r_autonomy_filter(class_with_balanced[i], network_data.A_matrix)
             remaining_indices = setdiff(class_with_balanced[i], removed_indices)
             @info "Individual group after autonomy filter" removed_count = length(removed_indices) remaining_count = length(remaining_indices)
-            
+
             if length(remaining_indices) >= min_module_size
                 push!(candidate_modules, remaining_indices)
                 @info "Added candidate module from individual group" module_size = length(remaining_indices)
             end
         end
     end
-    
+
     @info "Created candidate modules" n_candidates = length(candidate_modules)
 
     # STEP 4: Add pure balanced linkage classes
@@ -1065,22 +806,22 @@ function identify_kinetic_modules(
 
     # STEP 5: Merge overlapping modules via overlap graph
     final_modules = merge_overlapping_modules(candidate_modules)
-    
+
     # STEP 6: Add singleton modules for unassigned complexes
     @info "Adding singleton modules for unassigned complexes"
-    
+
     # Track which complexes are assigned to modules
     assigned_complexes = Set{Int}()
     for kinetic_module in final_modules
         union!(assigned_complexes, Set(kinetic_module))
     end
-    
+
     # Find all complexes in the network
     all_complexes = Set(1:size(network_data.A_matrix, 1))
     unassigned_complexes = setdiff(all_complexes, assigned_complexes)
-    
+
     @info "Complex assignment status" total_complexes = length(all_complexes) assigned = length(assigned_complexes) unassigned = length(unassigned_complexes)
-    
+
     # Add singleton modules for unassigned complexes (if min_module_size allows)
     if min_module_size <= 1
         for complex_idx in unassigned_complexes
@@ -1090,13 +831,13 @@ function identify_kinetic_modules(
     else
         @info "Skipping singleton modules (min_module_size = $min_module_size > 1)" unassigned_count = length(unassigned_complexes)
     end
-    
+
     @info "Final module creation" total_modules = length(final_modules)
 
     # STEP 7: Convert to kinetic modules dictionary
     kinetic_modules = Dict{Symbol,Vector{Symbol}}()
     kinetic_module_counter = 1
-    
+
     # Convert final modules to kinetic modules dictionary
     for (i, module_indices) in enumerate(final_modules)
         # Convert indices back to complex names

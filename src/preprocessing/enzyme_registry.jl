@@ -104,8 +104,8 @@ function extract_ec_enzymes(rid::String, rxn::CM.Reaction)::Vector{String}
                 for ec in ec_data
                     ec_str = strip(string(ec))
                     if !isempty(ec_str) && ec_str != "None" && ec_str != "none" 
-                        # Create enzyme ID from EC number
-                        clean_ec = replace(ec_str, r"[^\d\.]" => "_")
+                        # Create enzyme ID from EC number (replace dots with underscores for SBML compatibility)
+                        clean_ec = replace(ec_str, r"[^\d]" => "_")
                         enzyme_id = "ENZ_EC_$clean_ec"
                         if !in(enzyme_id, enzyme_ids)  # Avoid duplicates
                             push!(enzyme_ids, enzyme_id)

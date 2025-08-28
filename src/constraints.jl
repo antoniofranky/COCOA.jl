@@ -179,6 +179,7 @@ function extract_complexes_from_constraints(
         # Split constraints are nested under balance
         return extract_complexes_from_split_constraints(model, constraints.balance)
     else
+        @warn "Constraints do not appear to be split into forward and reverse fluxes. Falling back to model-based extraction which may not respect reaction directionality."
         # Fall back to original model-based extraction
         return extract_complexes_from_model(model)
     end

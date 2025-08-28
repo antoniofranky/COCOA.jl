@@ -87,8 +87,6 @@ export split_into_elementary_steps
 export prepare_model_for_concordance
 export extract_reaction_enzymes, build_enzyme_registry
 # Export kinetic analysis functions
-export identify_kinetic_modules, identify_concentration_robustness, kinetic_concordance_analysis
+export identify_kinetic_modules, identify_concentration_robustness, kinetic_concordance_analysis, extract_network_matrices_from_constraints
 export KineticModuleResults, ConcentrationRobustnessResults
-export save_kinetic_results, load_kinetic_results, save_robustness_results, load_robustness_results
-
 end # module COCOA
