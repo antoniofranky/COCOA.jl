@@ -18,7 +18,7 @@ f = model_files[task_id]
 println("Processing model $task_id/$(length(model_files)): $(basename(f))")
 
 try
-    for rdm in collect(0.1:0.1:0.9)
+    for rdm in collect(0.0:0.1:0.9)
         model = load_model(f)
         model_splt = split_into_elementary_steps(model, seed=42, normalize_bounds=true,
             random_fraction=rdm)

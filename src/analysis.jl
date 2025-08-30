@@ -562,7 +562,7 @@ function process_streaming_batches(
     # Note: total_concordant_from_modules includes inferred pairs from module structure
     # This is expected to be larger than explicit optimization + filtering counts
 
-    @info "Filter efficiency report" filter_report
+    @debug "Filter efficiency report" filter_report
 
     @info "Analysis complete: Total $(total_concordant_from_modules) concordant pairs found ($(total_concordant_from_optimization) from optimization, $(total_concordant_filtered) filtered by transitivity)"
 
@@ -585,21 +585,9 @@ function process_streaming_batches(
     final_memory = check_memory!(memory_monitor)
     memory_used = memory_monitor.peak_memory - memory_monitor.initial_memory
 
-    @info "Direct streaming processing complete" (
-        total_batches=batches_processed,
-        filter_efficiency=filter_report,
-        candidates_passed_to_optimization=total_candidates_seen,
-        pairs_tested_via_optimization=directly_tested,
-        total_concordant_found=total_concordant_from_modules,
-        concordant_from_optimization=total_concordant_from_optimization,
-        concordant_filtered=total_concordant_filtered,
-        concordance_rate_pct=round(concordance_rate, digits=2),
-        final_batch_size=batch_size,
-        validation_passed=(expected_pairs_processed == actual_pairs_processed),
-        peak_memory_gb=round(memory_monitor.peak_memory, digits=2),
-        memory_used_gb=round(memory_used, digits=2),
-        gc_time_sec=round(memory_monitor.gc_time, digits=2)
-    )
+    @info "Direct streaming processing complete"
+    @info "  Batches: $(batches_processed), Candidates: $(total_candidates_seen), Tested: $(directly_tested)"  
+    @info "  Memory: $(round(memory_monitor.peak_memory, digits=2))GB peak, $(round(memory_used, digits=2))GB used, GC: $(round(memory_monitor.gc_time, digits=2))s"
     # Convert optimization results vector to Dict
     opt_results_dict = Dict{Tuple{Int,Int,Symbol},Float64}()
     for (i, j, dir, val) in accumulator.optimization_results
@@ -987,7 +975,10 @@ function activity_concordance_analysis(
     # Get sorted complex IDs for fully deterministic ConcordanceTracker initialization
     # Sort by string representation to ensure consistent ordering across platforms
     complex_ids = sort!(collect(keys(complexes)); by=string)
-    n_reactions = length(AbstractFBCModels.reactions(model))
+
+    # Get correct reaction count from constraints (accounts for reaction splitting)
+    n_reactions = C.var_count(constraints.balance)
+
     @info "Model statistics" n_complexes n_reactions
 
     @info "Finding trivially balanced complexes"
@@ -1384,7 +1375,7 @@ function activity_concordance_analysis(
 
     # Debug: compare with tracked count
     tracked_concordant = batch_results.concordant_pairs.n_pairs
-    @info "Concordance counting comparison" (
+    @debug "Concordance counting comparison" (
         from_modules=total_concordant_from_modules - length(trivial_pairs),
         from_tracking=tracked_concordant,
         trivial_pairs=length(trivial_pairs),
@@ -1519,16 +1510,11 @@ function activity_concordance_analysis(
     stats["validation_passed"] = validation_passed
 
     # Clear summary of the analysis results
-    @info "Concordance analysis complete" (
-        candidates_generated=stats["n_candidate_pairs"],
-        candidates_skipped_by_transitivity=stats["n_candidates_skipped_by_transitivity"],
-        concordant_direct=stats["n_concordant_opt"],
-        concordant_inferred=stats["n_concordant_inferred"],
-        non_concordant=stats["n_non_concordant_pairs"],
-        trivial_concordant=stats["n_trivial_pairs"],
-        total_concordant=stats["n_concordant_total"],
-        elapsed_time=Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, stats["elapsed_time"] * 1000)), "HH:MM:SS.s")
-    )
+    @info "Concordance analysis complete"
+    @info "  Total concordant pairs: $(stats["n_concordant_total"])"
+    @info "  Breakdown: $(stats["n_concordant_opt"]) from optimization, $(stats["n_candidates_skipped_by_transitivity"]) filtered by transitivity"
+    @info "  Processing: $(stats["n_candidate_pairs"]) candidates, $(stats["n_trivial_pairs"]) trivial pairs"
+    @info "  Elapsed time: $(Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, stats["elapsed_time"] * 1000)), "HH:MM:SS.s"))"
 
     @debug "Full concordance analysis statistics" stats
 

@@ -265,11 +265,6 @@ function Base.iterate(filter::StreamingCandidateFilter, state=nothing)
         filter.iteration_count += 1
         i, j = filter.current_i, filter.current_j
 
-        # Progress logging every 10% of total possible pairs
-        if state !== nothing && filter.pairs_tested > 0 && filter.pairs_tested % (state ÷ 10) == 0
-            progress_pct = round(filter.pairs_tested / state * 100, digits=1)
-            @info "Candidate generation progress: $(filter.pairs_tested)/$(state) ($(progress_pct)%)" candidates_found = filter.candidates_found
-        end
 
         # Check bounds before processing
         if i <= filter.n_complexes && j <= filter.n_complexes && i < j
@@ -307,22 +302,6 @@ function Base.iterate(filter::StreamingCandidateFilter, state=nothing)
     total_pairs_possible = filter.n_complexes * (filter.n_complexes - 1) ÷ 2
     transitivity_effectiveness = round(filter.pairs_skipped_by_transitivity / max(1, filter.pairs_tested) * 100, digits=1)
 
-    @info "Streaming filter complete"
-    pairs_tested = filter.pairs_tested,
-    total_pairs_possible = total_pairs_possible,
-    candidates_found = filter.candidates_found,
-    pairs_balanced_filtered = filter.pairs_balanced_filtered,
-    pairs_trivial_filtered = filter.pairs_trivial_filtered,
-    pairs_concordant_filtered = filter.pairs_concordant_filtered,
-    pairs_skipped_by_transitivity = filter.pairs_skipped_by_transitivity,
-    transitivity_effectiveness_pct = transitivity_effectiveness,
-    transitivity_updates_received = filter.transitivity_updates_received,
-    pairs_missing_samples = filter.pairs_missing_samples,
-    pairs_cv_filtered = filter.pairs_cv_filtered,
-    insufficient_samples = filter.insufficient_samples,
-    cv_threshold = filter.cv_threshold,
-    total_iterations = filter.iteration_count,
-    final_position = (filter.current_i, filter.current_j)
     return nothing
 end
 

@@ -423,7 +423,7 @@ end
 $(TYPEDSIGNATURES)
 
 Add complex activity variables and constraints to base constraints.
-Uses constraint-aware complex extraction to respect reaction splitting.
+Uses universal mapping to ensure consistency with matrix construction.
 """
 function add_complex_activities_to_constraints(
     model::AbstractFBCModels.AbstractFBCModel,
@@ -437,7 +437,7 @@ function add_complex_activities_to_constraints(
         complex_id => C.Constraint(
             value=C.sum(
                 (
-                    contribution * get_flux_variable(base_constraints, Symbol(rxn_id))
+                    contribution * get_flux_variable_universal(base_constraints, Symbol(rxn_id))
                     for (rxn_id, contribution) in complexes[complex_id].reaction_contributions
                     if flux_variable_exists(base_constraints, Symbol(rxn_id))
                 ),
@@ -449,6 +449,31 @@ function add_complex_activities_to_constraints(
 
     constraints_with_activities = base_constraints * (:activities^complex_activity_constraints)
     return constraints_with_activities, complexes
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Universal flux variable getter that uses the mapping system.
+Ensures consistency between activity constraints and matrix construction.
+"""
+function get_flux_variable_universal(constraints::C.ConstraintTree, rxn_symbol::Symbol)
+    reaction_vars = get_reaction_variables(constraints, rxn_symbol)
+    
+    if reaction_vars.is_split
+        # For split reactions, use the original flux variable (after substitution)
+        # This maintains the correct semantics for complex activities
+        balance_constraints = haskey(constraints, :balance) ? constraints.balance : constraints
+        if haskey(balance_constraints, :fluxes) && haskey(balance_constraints.fluxes, rxn_symbol)
+            return balance_constraints.fluxes[rxn_symbol].value
+        else
+            # Fall back to forward flux if original flux not available
+            return reaction_vars.forward.value
+        end
+    else
+        # For standard reactions, use the standard flux variable
+        return reaction_vars.standard.value
+    end
 end
 
 """
@@ -484,6 +509,110 @@ function flux_variable_exists(constraints::C.ConstraintTree, rxn_symbol::Symbol)
     return (haskey(constraints, :fluxes_forward) && haskey(constraints.fluxes_forward, rxn_symbol)) ||
            (haskey(constraints, :fluxes_reverse) && haskey(constraints.fluxes_reverse, rxn_symbol)) ||
            (haskey(constraints, :fluxes) && haskey(constraints.fluxes, rxn_symbol))
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Universal reaction mapping: get the actual constraint variables for a base reaction name.
+Handles both split and standard reactions consistently.
+
+Returns a NamedTuple containing:
+- For split reactions: (forward=var, reverse=var, forward_name=string, reverse_name=string)
+- For standard reactions: (standard=var, standard_name=string)
+"""
+function get_reaction_variables(constraints::C.ConstraintTree, base_reaction_name::Symbol)
+    balance_constraints = haskey(constraints, :balance) ? constraints.balance : constraints
+    
+    if haskey(balance_constraints, :fluxes_forward) && haskey(balance_constraints, :fluxes_reverse)
+        # Split reactions: return both forward and reverse if they exist
+        forward_var = get(balance_constraints.fluxes_forward, base_reaction_name, nothing)
+        reverse_var = get(balance_constraints.fluxes_reverse, base_reaction_name, nothing)
+        
+        return (
+            forward=forward_var,
+            reverse=reverse_var,
+            forward_name=string(base_reaction_name) * "_forward",
+            reverse_name=string(base_reaction_name) * "_reverse",
+            is_split=true
+        )
+    else
+        # Standard reactions: return single variable
+        standard_var = get(balance_constraints.fluxes, base_reaction_name, nothing)
+        
+        return (
+            standard=standard_var,
+            standard_name=string(base_reaction_name),
+            is_split=false
+        )
+    end
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Build comprehensive reaction name mapping from constraints.
+Creates bidirectional mapping between base reaction names and actual constraint variable names.
+
+Returns:
+- base_to_constraint: Dict mapping base names to constraint variable name(s)
+- constraint_to_base: Dict mapping constraint variable names back to base names
+- all_reaction_names: Vector of all constraint reaction names (with _forward/_reverse suffixes if split)
+"""
+function build_reaction_name_mapping(constraints::C.ConstraintTree)
+    balance_constraints = haskey(constraints, :balance) ? constraints.balance : constraints
+    
+    base_to_constraint = Dict{String, Vector{String}}()
+    constraint_to_base = Dict{String, String}()
+    all_reaction_names = String[]
+    
+    if haskey(balance_constraints, :fluxes_forward) && haskey(balance_constraints, :fluxes_reverse)
+        # Split reactions case
+        for rxn_symbol in keys(balance_constraints.fluxes_forward)
+            base_name = string(rxn_symbol)
+            forward_name = base_name * "_forward"
+            reverse_name = base_name * "_reverse"
+            
+            # Base to constraint mapping (one base -> multiple constraints)
+            base_to_constraint[base_name] = [forward_name, reverse_name]
+            
+            # Constraint to base mapping (each constraint -> one base)
+            constraint_to_base[forward_name] = base_name
+            constraint_to_base[reverse_name] = base_name
+            
+            # Add to all reaction names
+            push!(all_reaction_names, forward_name)
+            push!(all_reaction_names, reverse_name)
+        end
+    else
+        # Standard reactions case
+        for rxn_symbol in keys(balance_constraints.fluxes)
+            base_name = string(rxn_symbol)
+            
+            # One-to-one mapping
+            base_to_constraint[base_name] = [base_name]
+            constraint_to_base[base_name] = base_name
+            
+            push!(all_reaction_names, base_name)
+        end
+    end
+    
+    return (
+        base_to_constraint=base_to_constraint,
+        constraint_to_base=constraint_to_base,
+        all_reaction_names=all_reaction_names
+    )
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Get all reaction names from constraints in the format used for matrix construction.
+Handles split reactions by returning _forward/_reverse suffixed names.
+"""
+function get_reaction_names_from_constraints(constraints::C.ConstraintTree)
+    mapping = build_reaction_name_mapping(constraints)
+    return mapping.all_reaction_names
 end
 
 
