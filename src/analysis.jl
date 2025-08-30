@@ -564,7 +564,7 @@ function process_streaming_batches(
 
     @debug "Filter efficiency report" filter_report
 
-    @info "Analysis complete: Total $(total_concordant_from_modules) concordant pairs found ($(total_concordant_from_optimization) from optimization, $(total_concordant_filtered) filtered by transitivity)"
+    @info "Analysis complete: Total $(total_concordant_from_modules) concordant pairs found ($(total_concordant_from_optimization) from optimization, $(total_concordant_filtered) added by transitivity inference)"
 
 
     # Validate results for deterministic behavior
@@ -586,7 +586,7 @@ function process_streaming_batches(
     memory_used = memory_monitor.peak_memory - memory_monitor.initial_memory
 
     @info "Direct streaming processing complete"
-    @info "  Batches: $(batches_processed), Candidates: $(total_candidates_seen), Tested: $(directly_tested)"  
+    @info "  Batches: $(batches_processed), Candidates tested: $(total_candidates_seen)"
     @info "  Memory: $(round(memory_monitor.peak_memory, digits=2))GB peak, $(round(memory_used, digits=2))GB used, GC: $(round(memory_monitor.gc_time, digits=2))s"
     # Convert optimization results vector to Dict
     opt_results_dict = Dict{Tuple{Int,Int,Symbol},Float64}()
