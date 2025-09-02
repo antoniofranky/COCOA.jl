@@ -80,8 +80,6 @@ function concordance_constraints(
 )
     if use_unidirectional_constraints
         constraints, split_indices = create_unidirectional_constraints(model)
-        @info "Using unidirectional constraints" n_reversible_split = C.var_count(constraints.fluxes_forward) +
-                                                                      C.var_count(constraints.fluxes_reverse)
     else
         constraints = COBREXA.flux_balance_constraints(model; interface)
         split_indices = Set{Int}()
@@ -459,7 +457,7 @@ Ensures consistency between activity constraints and matrix construction.
 """
 function get_flux_variable_universal(constraints::C.ConstraintTree, rxn_symbol::Symbol)
     reaction_vars = get_reaction_variables(constraints, rxn_symbol)
-    
+
     if reaction_vars.is_split
         # For split reactions, use the original flux variable (after substitution)
         # This maintains the correct semantics for complex activities
@@ -523,12 +521,12 @@ Returns a NamedTuple containing:
 """
 function get_reaction_variables(constraints::C.ConstraintTree, base_reaction_name::Symbol)
     balance_constraints = haskey(constraints, :balance) ? constraints.balance : constraints
-    
+
     if haskey(balance_constraints, :fluxes_forward) && haskey(balance_constraints, :fluxes_reverse)
         # Split reactions: return both forward and reverse if they exist
         forward_var = get(balance_constraints.fluxes_forward, base_reaction_name, nothing)
         reverse_var = get(balance_constraints.fluxes_reverse, base_reaction_name, nothing)
-        
+
         return (
             forward=forward_var,
             reverse=reverse_var,
@@ -539,7 +537,7 @@ function get_reaction_variables(constraints::C.ConstraintTree, base_reaction_nam
     else
         # Standard reactions: return single variable
         standard_var = get(balance_constraints.fluxes, base_reaction_name, nothing)
-        
+
         return (
             standard=standard_var,
             standard_name=string(base_reaction_name),
@@ -561,42 +559,44 @@ Returns:
 """
 function build_reaction_name_mapping(constraints::C.ConstraintTree)
     balance_constraints = haskey(constraints, :balance) ? constraints.balance : constraints
-    
-    base_to_constraint = Dict{String, Vector{String}}()
-    constraint_to_base = Dict{String, String}()
+
+    base_to_constraint = Dict{String,Vector{String}}()
+    constraint_to_base = Dict{String,String}()
     all_reaction_names = String[]
-    
+
     if haskey(balance_constraints, :fluxes_forward) && haskey(balance_constraints, :fluxes_reverse)
-        # Split reactions case
-        for rxn_symbol in keys(balance_constraints.fluxes_forward)
+        # Split reactions case - sort keys for deterministic order
+        sorted_rxn_symbols = sort!(collect(keys(balance_constraints.fluxes_forward)); by=string)
+        for rxn_symbol in sorted_rxn_symbols
             base_name = string(rxn_symbol)
             forward_name = base_name * "_forward"
             reverse_name = base_name * "_reverse"
-            
+
             # Base to constraint mapping (one base -> multiple constraints)
             base_to_constraint[base_name] = [forward_name, reverse_name]
-            
+
             # Constraint to base mapping (each constraint -> one base)
             constraint_to_base[forward_name] = base_name
             constraint_to_base[reverse_name] = base_name
-            
+
             # Add to all reaction names
             push!(all_reaction_names, forward_name)
             push!(all_reaction_names, reverse_name)
         end
     else
-        # Standard reactions case
-        for rxn_symbol in keys(balance_constraints.fluxes)
+        # Standard reactions case - sort keys for deterministic order
+        sorted_rxn_symbols = sort!(collect(keys(balance_constraints.fluxes)); by=string)
+        for rxn_symbol in sorted_rxn_symbols
             base_name = string(rxn_symbol)
-            
+
             # One-to-one mapping
             base_to_constraint[base_name] = [base_name]
             constraint_to_base[base_name] = base_name
-            
+
             push!(all_reaction_names, base_name)
         end
     end
-    
+
     return (
         base_to_constraint=base_to_constraint,
         constraint_to_base=constraint_to_base,

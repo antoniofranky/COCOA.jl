@@ -50,7 +50,8 @@ module COCOA
 # Use qualified imports to avoid namespace pollution and improve code clarity
 import COBREXA
 import AbstractFBCModels
-import DataFrames as DF
+import AbstractFBCModels.CanonicalModel as CM
+import SBMLFBCModels
 import SparseArrays
 import Statistics
 import Random
@@ -75,12 +76,14 @@ using .ModelPreparation
 include("data_structures.jl")
 include("constraints.jl")
 include("filter.jl")
-include("analysis.jl")
+include("variability.jl")
+include("concordance.jl")
 include("kinetic_analysis.jl")
+include("custom_upstream_algorithm.jl")
 
 
 # Re-export main functions
-export concordance_constraints, activity_concordance_analysis
+export concordance_constraints, activity_concordance_analysis, activity_variability_analysis
 # Re-export streaming filter functions
 export StreamingCandidateFilter, process_streaming_batches
 export split_into_elementary_steps

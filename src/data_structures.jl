@@ -7,10 +7,8 @@ This module contains:
 - Sample storage abstractions (SampleStorage, MemoryStreamStorage, DiskStreamStorage)
 - Concordance tracking (ConcordanceTracker)
 - Memory-efficient data structures (SparseConcordantPairs, ObjectPool)
+- Complete concordance model results
 """
-
-import SparseArrays
-
 
 
 """
@@ -82,7 +80,6 @@ mutable struct ConcordanceTracker
     end
 end
 
-
 # Union-Find operations for regular tracker - optimized with iterative path compression
 @inline function find_set!(tracker::ConcordanceTracker, x::Int)
     root = x
@@ -127,7 +124,6 @@ function union_sets!(tracker::ConcordanceTracker, x::Int, y::Int)
 
     return new_root
 end
-
 
 # Generic operations - using Int (Julia's native integer type) for consistency
 @inline function are_concordant(tracker::ConcordanceTracker, x::Int, y::Int)
@@ -197,9 +193,6 @@ function is_non_concordant(tracker::ConcordanceTracker, x::Int, y::Int)
     return false
 end
 
-# All index operations now use Int consistently - no conversion needed
-
-
 function ensure_module_cached!(tracker::ConcordanceTracker, rep::Int)
     if !haskey(tracker.module_members_cache, rep)
         # Pre-allocate with estimated size for better performance
@@ -267,12 +260,12 @@ For a module with n complexes, there are n*(n-1)/2 concordant pairs.
 function count_concordant_pairs_from_modules(tracker::ConcordanceTracker)::Int
     # Group complexes by their module representative
     modules = Dict{Int,Int}()  # representative -> count
-    
+
     for i in 1:length(tracker.parent)
         rep = find_set!(tracker, i)
         modules[rep] = get(modules, rep, 0) + 1
     end
-    
+
     # Count pairs in each module
     total_pairs = 0
     for (rep, size) in modules
@@ -280,7 +273,7 @@ function count_concordant_pairs_from_modules(tracker::ConcordanceTracker)::Int
             total_pairs += size * (size - 1) ÷ 2
         end
     end
-    
+
     return total_pairs
 end
 
@@ -375,7 +368,7 @@ Get a boolean flag for a specific complex. Returns false if mask is not allocate
 end
 
 # ========================================================================================
-# Memory-Efficient Sparse Data Structures
+# Memory-Efficient Sparse Data Structures  
 # ========================================================================================
 
 """
@@ -428,12 +421,216 @@ function merge_pairs!(dest::SparseConcordantPairs, src::SparseConcordantPairs)
     dest.n_pairs = SparseArrays.nnz(dest.matrix)
 end
 
-
 """
 Clear all pairs (for reuse).
 """
 function clear!(pairs::SparseConcordantPairs)
     pairs.matrix = SparseArrays.spzeros(Bool, pairs.n, pairs.n)
     pairs.n_pairs = 0
+end
+
+@enum ConcordanceType::Int begin
+    None = 0
+    Concordant = 1
+    Trivially_concordant = 2
+    Balanced = 3
+    Trivially_balanced = 4
+end
+
+mutable struct CompleteConcordanceModel
+    # === IDENTIFIER MAPPINGS (following AbstractFBCModels pattern) ===
+    complex_ids::Vector{Symbol}                # Position = index
+    complex_idx::Dict{Symbol,Int}             # Symbol -> index lookup
+
+    reaction_ids::Vector{Symbol}
+    reaction_idx::Dict{Symbol,Int}
+
+    metabolite_ids::Vector{Symbol}
+    metabolite_idx::Dict{Symbol,Int}
+
+    # === SYMMETRIC CONCORDANCE DATA ===
+    concordance_matrix::SparseArrays.SparseMatrixCSC{Int,Int}
+    lambda_dict::Dict{Tuple{Int,Int},Float64}
+
+    # === ASYMMETRIC STRUCTURAL DATA (regular sparse) ===
+    complex_reaction_matrix::SparseArrays.SparseMatrixCSC{Int,Int}      # Complexes × Reactions
+    metabolite_complex_matrix::SparseArrays.SparseMatrixCSC{Float64,Int}  # Metabolites × Complexes (Y matrix)
+    metabolite_reaction_matrix::SparseArrays.SparseMatrixCSC{Float64,Int} # Metabolites × Reactions (S matrix)
+
+    # === SPARSE ACRR DATA (simple vector for few pairs) ===
+    acrr_pairs::Vector{Tuple{Int,Int}}          # Canonical form: i < j
+
+    # === DENSE NODE PROPERTIES ===
+    activity_ranges::Vector{Tuple{Float64,Float64}}
+    concordance_modules::Vector{Int}
+    kinetic_modules::Vector{Int}                # 0 = no kinetic module
+
+    # === DENSE REACTION PROPERTIES ===
+    interface_reactions::BitVector              # true = Interface, false = Internal
+
+    # === METABOLITE PROPERTIES ===
+    acr_metabolites::BitVector                   # ACR per metabolite
+
+    # === METADATA ===
+    n_complexes::Int
+    n_reactions::Int
+    n_metabolites::Int
+    n_concordant::Int
+    n_trivially_concordant::Int
+    n_balanced::Int
+    n_trivially_balanced::Int
+    n_concordance_modules::Int
+    n_kinetic_modules::Int
+    stats::Dict{String,Any}
+end
+
+#  Constructor
+
+function CompleteConcordanceModel(
+    complex_ids::Vector{Symbol},
+    reaction_ids::Vector{Symbol},
+    metabolite_ids::Vector{Symbol};
+
+    # Efficient sparse concordance data (coordinate vectors)
+    I_concordance::Vector{Int}=Int[],
+    J_concordance::Vector{Int}=Int[],
+    V_concordance::Vector{Int}=Int[],
+    lambda_dict::Dict{Tuple{Int,Int},Float64}=Dict{Tuple{Int,Int},Float64}(),
+    acrr_pairs::Vector{Tuple{Int,Int}}=Tuple{Int,Int}[],
+
+    # Properties with defaults
+    activity_ranges=fill((NaN, NaN), length(complex_ids)),
+    concordance_modules=fill(-1, length(complex_ids)),  # -1 = singleton, 0 = balanced, >0 = concordance module
+    kinetic_modules=fill(-1, length(complex_ids)),     # -1 = not in kinetic module, >0 = kinetic module
+    interface_reactions=falses(length(reaction_ids)),
+    acr_metabolites=falses(length(metabolite_ids)),
+
+    # Structural matrices
+    complex_reaction_matrix=SparseArrays.spzeros(Int, length(complex_ids), length(reaction_ids)),
+    complex_metabolite_matrix=SparseArrays.spzeros(Float64, length(complex_ids), length(metabolite_ids)),
+    reaction_metabolite_matrix=SparseArrays.spzeros(Float64, length(reaction_ids), length(metabolite_ids))
+)
+
+    # Build index dictionaries (following AbstractFBCModels pattern)
+    complex_idx = Dict(id => idx for (idx, id) in enumerate(complex_ids))
+    reaction_idx = Dict(id => idx for (idx, id) in enumerate(reaction_ids))
+    metabolite_idx = Dict(id => idx for (idx, id) in enumerate(metabolite_ids))
+
+    n_complexes = length(complex_ids)
+    n_reactions = length(reaction_ids)
+    n_metabolites = length(metabolite_ids)
+
+    # Build concordance matrix directly from coordinate vectors (maximum efficiency)
+    if !isempty(I_concordance)
+        # Make symmetric by adding both (i,j) and (j,i) entries
+        I_symmetric = vcat(I_concordance, J_concordance)
+        J_symmetric = vcat(J_concordance, I_concordance)
+        V_symmetric = vcat(V_concordance, V_concordance)
+
+        concordance_matrix = SparseArrays.sparse(I_symmetric, J_symmetric, V_symmetric, n_complexes, n_complexes)
+    else
+        concordance_matrix = SparseArrays.spzeros(Int, n_complexes, n_complexes)
+    end
+
+    # Lambda dict is already in the correct format - no conversion needed
+
+    # Store ACRR pairs in canonical form (i < j)
+    canonical_acrr_pairs = [i < j ? (i, j) : (j, i) for (i, j) in acrr_pairs]
+    acrr_pairs = unique(canonical_acrr_pairs)
+
+    # Count modules
+    n_concordance_modules = length(unique(filter(x -> x > 0, concordance_modules)))
+    n_kinetic_modules = length(unique(filter(x -> x > 0, kinetic_modules)))
+
+    return CompleteConcordanceModel(
+        complex_ids, complex_idx,
+        reaction_ids, reaction_idx,
+        metabolite_ids, metabolite_idx,
+        concordance_matrix, lambda_dict,
+        complex_reaction_matrix, complex_metabolite_matrix, reaction_metabolite_matrix,
+        acrr_pairs,
+        activity_ranges, concordance_modules, kinetic_modules,
+        interface_reactions, acr_metabolites,
+        n_complexes, n_reactions, n_metabolites,
+        length(V_concordance),  # n_concordant
+        0,  # n_trivially_concordant (will be set elsewhere)
+        0,  # n_balanced (will be set elsewhere) 
+        0,  # n_trivially_balanced (will be set elsewhere)
+        n_concordance_modules, n_kinetic_modules,
+        Dict{String,Any}()
+    )
+end
+
+#  Query Interface
+
+# === FAST LOOKUPS (following AbstractFBCModels pattern) ===
+# Index to ID: O(1) vector access
+get_complex_id(model, idx::Int) = model.complex_ids[idx]
+get_reaction_id(model, idx::Int) = model.reaction_ids[idx]
+get_metabolite_id(model, idx::Int) = model.metabolite_ids[idx]
+
+# ID to index: O(1) dict lookup
+get_complex_idx(model, id::Symbol) = model.complex_idx[id]
+get_reaction_idx(model, id::Symbol) = model.reaction_idx[id]
+get_metabolite_idx(model, id::Symbol) = model.metabolite_idx[id]
+
+# === CONCORDANCE QUERIES ===
+function get_concordance_type(model::CompleteConcordanceModel, c1::Symbol, c2::Symbol)
+    i, j = model.complex_idx[c1], model.complex_idx[c2]
+    canonical_pair = i < j ? (i, j) : (j, i)
+    return ConcordanceType(model.concordance_matrix[i, j])  # UpperTriangular handles symmetry
+end
+
+function get_lambda_value(model::CompleteConcordanceModel, c1::Symbol, c2::Symbol)
+    i, j = model.complex_idx[c1], model.complex_idx[c2]
+    key = i < j ? (i, j) : (j, i)
+    return haskey(model.lambda_dict, key) ? model.lambda_dict[key] : NaN
+end
+
+function is_concordant(model::CompleteConcordanceModel, c1::Symbol, c2::Symbol)
+    return get_concordance_type(model, c1, c2) != None
+end
+
+# === ACRR QUERIES (efficient for sparse data) ===
+function has_acrr(model::CompleteConcordanceModel, c1::Symbol, c2::Symbol)
+    i, j = model.complex_idx[c1], model.complex_idx[c2]
+    canonical_pair = i < j ? (i, j) : (j, i)
+    return canonical_pair ∈ model.acrr_pairs
+end
+
+function get_acrr_pairs(model::CompleteConcordanceModel)
+    return [(model.complex_ids[i], model.complex_ids[j]) for (i, j) in model.acrr_pairs]
+end
+
+function add_acrr_pair!(model::CompleteConcordanceModel, c1::Symbol, c2::Symbol)
+    i, j = model.complex_idx[c1], model.complex_idx[c2]
+    canonical_pair = i < j ? (i, j) : (j, i)
+    if canonical_pair ∉ model.acrr_pairs
+        push!(model.acrr_pairs, canonical_pair)
+    end
+end
+
+# === STRUCTURAL QUERIES ===
+function get_complex_reactions(model::CompleteConcordanceModel, complex::Symbol)
+    idx = model.complex_idx[complex]
+    reaction_idxs, _ = SparseArrays.findnz(model.complex_reaction_matrix[idx, :])
+    return model.reaction_ids[reaction_idxs]
+end
+
+function get_complex_metabolites(model::CompleteConcordanceModel, complex::Symbol)
+    idx = model.complex_idx[complex]
+    met_idxs, coeffs = SparseArrays.findnz(model.complex_metabolite_matrix[idx, :])
+    return [(model.metabolite_ids[i], coeff) for (i, coeff) in zip(met_idxs, coeffs)]
+end
+
+# === ACR QUERIES ===
+function has_acr(model::CompleteConcordanceModel, metabolite::Symbol)
+    met_idx = model.metabolite_idx[metabolite]
+    return model.acr_metabolites[met_idx]
+end
+
+function get_acr_metabolites(model::CompleteConcordanceModel)
+    acr_idxs = findall(model.acr_metabolites)
+    return model.metabolite_ids[acr_idxs]
 end
 

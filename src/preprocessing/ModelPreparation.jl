@@ -88,7 +88,7 @@ end
 
 Prepare a model for concordance analysis by:
 1. Finding and removing blocked reactions using solver-specific tolerance
-2. Splitting reversible reactions into irreversible pairs
+2. Splitting reversible reactions into irreversible pairs (Deprecated - handled by concordance_constraints)
 3. Removing zero rows/columns from stoichiometry
 
 Now uses parallel FVA for better performance on large models.
@@ -211,3 +211,58 @@ function fix_objective_conversion(model::SBMLFBCModels.SBMLFBCModel)
     end
 end
 end # module
+
+
+
+"""
+Optimized version that avoids deepcopy and excessive allocations.
+"""
+function split_reversible_reactions!(model::CM.Model)
+    # Collect reversible reactions first (can't modify while iterating)
+    reversible_rxns = Tuple{String,CM.Reaction}[]
+    sizehint!(reversible_rxns, length(model.reactions) ÷ 2)  # Pre-allocate
+
+    for (rid, rxn) in model.reactions
+        if rxn.lower_bound < 0 && rxn.upper_bound > 0
+            push!(reversible_rxns, (rid, rxn))
+        end
+    end
+
+    # Process all reversible reactions
+    for (rid, rxn) in reversible_rxns
+        # Create forward reaction (reuse existing reaction object)
+        fwd_rxn = CM.Reaction(
+            name=isnothing(rxn.name) ? nothing : "$(rxn.name) (forward)",
+            lower_bound=0.0,
+            upper_bound=rxn.upper_bound,
+            stoichiometry=rxn.stoichiometry,  # Reuse dict
+            objective_coefficient=rxn.objective_coefficient,
+            gene_association_dnf=rxn.gene_association_dnf,  # Reuse
+            annotations=rxn.annotations,  # Reuse
+            notes=rxn.notes  # Reuse
+        )
+
+        # Create backward reaction with inverted stoichiometry
+        bwd_stoich = Dict{String,Float64}()
+        sizehint!(bwd_stoich, length(rxn.stoichiometry))
+        for (k, v) in rxn.stoichiometry
+            bwd_stoich[k] = -v
+        end
+
+        bwd_rxn = CM.Reaction(
+            name=isnothing(rxn.name) ? nothing : "$(rxn.name) (backward)",
+            lower_bound=0.0,
+            upper_bound=-rxn.lower_bound,
+            stoichiometry=bwd_stoich,
+            objective_coefficient=-rxn.objective_coefficient,
+            gene_association_dnf=rxn.gene_association_dnf,  # Reuse
+            annotations=rxn.annotations,  # Reuse  
+            notes=rxn.notes  # Reuse
+        )
+
+        # Replace original with forward/backward pair
+        delete!(model.reactions, rid)
+        model.reactions["$(rid)_f"] = fwd_rxn
+        model.reactions["$(rid)_r"] = bwd_rxn
+    end
+end

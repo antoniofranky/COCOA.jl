@@ -11,7 +11,7 @@ import COBREXA
 import HiGHS
 import JuMP as J
 import Distributed
-import AbstractFBCModels.CanonicalModel as CM
+# CM imported from parent ModelPreparation module
 
 """
 Find blocked reactions using COBREXA's parallel FVA infrastructure.

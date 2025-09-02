@@ -117,7 +117,7 @@ Split reactions into elementary steps based on enzyme mechanisms.
 - `model`: The metabolic model to split
 - `ordered_fraction`: Fraction of reactions to use ordered mechanism (default: 1.0)
 - `mechanism_assignment`: Optional dict specifying mechanism per reaction
-- `output_type`: Model type to return (default: CM.Model (for AbstractFBCModels.CanonicalModel.Model), also supports JSONModel, SBMLFBCModel)
+- `output_type`: Model type to return (default: CM (for AbstractFBCModels.CanonicalModel.Model), also supports JSONModel, SBMLFBCModel)
 - `max_substrates`: Maximum substrates per reaction to split (default: 4)
 - `max_products`: Maximum products per reaction to split (default: 4)
 - `max_random_orders`: Maximum binding orders to generate for random mechanism (default: 10)

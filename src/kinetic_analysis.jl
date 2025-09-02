@@ -320,240 +320,563 @@ function find_complex_for_metabolites(target_metabolites, complexes, model)
 end
 
 """
-Identify autonomous complexes based on network topology.
-Uses efficient graph analysis instead of iterative filtering.
+Phase I of Upstream Algorithm: Exclude entry complexes.
+An entry complex has incoming reactions from complexes outside the set C0.
+Iteratively removes entry complexes until none remain.
 """
-function find_autonomous_complexes(complex_indices::Vector{Int}, A_matrix::SparseArrays.SparseMatrixCSC)
-    if isempty(complex_indices)
+function phase_i_exclude_entry_complexes(C0::Vector{Int}, A_matrix::SparseArrays.SparseMatrixCSC)
+    if isempty(C0)
         return Int[]
     end
 
-    complex_set = Set(complex_indices)
-    autonomous_candidates = Int[]
+    C1 = copy(C0)
 
-    for complex_idx in complex_indices
-        is_autonomous = true
+    while true
+        C1_set = Set(C1)
+        entry_complexes = Int[]
 
-        # Check if this complex has any incoming reactions from outside the set
-        # Find reactions where this complex is a product (A[complex, reaction] > 0)
-        product_reactions = findall(A_matrix[complex_idx, :] .> 0)
+        # Identify entry complexes in current C1
+        for complex_idx in C1
+            # Find reactions where this complex is a product (A[complex, reaction] > 0)
+            product_reactions = findall(A_matrix[complex_idx, :] .> 0)
 
-        for rxn_idx in product_reactions
-            # Find substrate complexes for this reaction (A[complex, reaction] < 0)
-            substrate_complexes = findall(A_matrix[:, rxn_idx] .< 0)
+            for rxn_idx in product_reactions
+                # Find substrate complexes for this reaction (A[complex, reaction] < 0)
+                substrate_complexes = findall(A_matrix[:, rxn_idx] .< 0)
 
-            # If any substrate is outside our complex set, this complex is not autonomous
-            if !all(sub_idx in complex_set for sub_idx in substrate_complexes)
-                is_autonomous = false
-                break
+                # If any substrate is outside C1, this complex is an entry complex
+                if !all(sub_idx in C1_set for sub_idx in substrate_complexes)
+                    push!(entry_complexes, complex_idx)
+                    break  # No need to check other reactions for this complex
+                end
             end
         end
 
-        # Additional check: complex must be able to participate in reactions (not isolated)
-        if is_autonomous
-            total_reactions = sum(abs.(A_matrix[complex_idx, :]) .> 0)
-            if total_reactions > 0
-                push!(autonomous_candidates, complex_idx)
-            end
+        # If no entry complexes found, we're done
+        if isempty(entry_complexes)
+            break
+        end
+
+        # Remove entry complexes from C1
+        C1 = setdiff(C1, entry_complexes)
+
+        @debug "Phase I: Removed $(length(entry_complexes)) entry complexes, $(length(C1)) remaining"
+
+        # Safety check to prevent infinite loops
+        if isempty(C1)
+            break
         end
     end
 
-    return autonomous_candidates
+    return C1
 end
 
 """
-Identify nonterminal complexes using graph connectivity analysis.
-A complex is nonterminal if it has outgoing connections within the autonomous set.
+Phase II of Upstream Algorithm: Remove complexes with no outgoing connections.
+Removes complexes that have no outgoing reactions (degree = 0).
 """
-function find_nonterminal_complexes(autonomous_complexes::Vector{Int}, A_matrix::SparseArrays.SparseMatrixCSC)
-    if isempty(autonomous_complexes)
+function phase_ii_exclude_no_outgoing(C1::Vector{Int}, A_matrix::SparseArrays.SparseMatrixCSC)
+    if isempty(C1)
         return Int[]
     end
 
-    autonomous_set = Set(autonomous_complexes)
+    C2 = Int[]
+
+    for complex_idx in C1
+        # Check if complex has any outgoing reactions (appears as substrate)
+        outgoing_reactions = findall(A_matrix[complex_idx, :] .< 0)
+
+        # Keep complexes that have outgoing connections
+        if !isempty(outgoing_reactions)
+            push!(C2, complex_idx)
+        end
+    end
+
+    @debug "Phase II: Removed $(length(C1) - length(C2)) complexes with no outgoing connections"
+
+    return C2
+end
+
+"""
+Phase III of Upstream Algorithm: Exclude exit complexes iteratively.
+Removes complexes that have outgoing connections to complexes outside the current set.
+Returns both the remaining core and the exit complexes that were removed.
+"""
+function phase_iii_exclude_exit_complexes(C2::Vector{Int}, A_matrix::SparseArrays.SparseMatrixCSC)
+    if isempty(C2)
+        return Int[], Int[]
+    end
+
+    C3 = copy(C2)
+    exit_complexes = Int[]
+
+    while true
+        C3_set = Set(C3)
+        current_exits = Int[]
+
+        # Find exit complexes in current C3
+        for complex_idx in C3
+            # Find outgoing reactions from this complex
+            substrate_reactions = findall(A_matrix[complex_idx, :] .< 0)
+
+            is_exit = false
+            for rxn_idx in substrate_reactions
+                # Find products of this reaction
+                product_complexes = findall(A_matrix[:, rxn_idx] .> 0)
+
+                # If any product is outside C3, this is an exit complex
+                if !all(prod_idx in C3_set for prod_idx in product_complexes)
+                    is_exit = true
+                    break
+                end
+            end
+
+            if is_exit
+                push!(current_exits, complex_idx)
+            end
+        end
+
+        # Stop if no exit complexes found
+        if isempty(current_exits)
+            break
+        end
+
+        # Move exit complexes out of C3
+        append!(exit_complexes, current_exits)
+        C3 = setdiff(C3, current_exits)
+
+        @debug "Phase III: Removed $(length(current_exits)) exit complexes, $(length(C3)) remaining"
+
+        if isempty(C3)
+            break
+        end
+    end
+
+    return C3, exit_complexes
+end
+
+"""
+Phase IV of Upstream Algorithm: Exclude terminal complexes.
+Identifies and removes all terminal strong linkage classes from C_minus4.
+A terminal strong linkage class has no outgoing reactions to other complexes in the same set.
+Returns non-terminal complexes (those that remain after excluding terminal ones).
+"""
+function phase_iv_exclude_terminal_complexes(C_minus4::Vector{Int}, A_matrix::SparseArrays.SparseMatrixCSC)
+    if isempty(C_minus4)
+        return Int[]
+    end
+
+    C_minus4_set = Set(C_minus4)
+
+    # Find strongly connected components (strong linkage classes) in the subgraph induced by C_minus4
+    strong_linkage_classes = find_strong_linkage_classes(C_minus4, A_matrix)
+
+    # Identify terminal strong linkage classes
     nonterminal_complexes = Int[]
 
-    for complex_idx in autonomous_complexes
-        # Find reactions where this complex is a substrate (A[complex, reaction] < 0)
-        substrate_reactions = findall(A_matrix[complex_idx, :] .< 0)
+    for class_complexes in strong_linkage_classes
+        is_terminal = true
 
-        has_internal_outgoing = false
-        for rxn_idx in substrate_reactions
-            # Find product complexes for this reaction (A[complex, reaction] > 0)
-            product_complexes = findall(A_matrix[:, rxn_idx] .> 0)
+        # Check if this strong linkage class has outgoing reactions to OTHER classes within C_minus4
+        for complex_idx in class_complexes
+            # Find reactions where this complex is a substrate (A[complex, reaction] < 0)
+            substrate_reactions = findall(A_matrix[complex_idx, :] .< 0)
 
-            # If any product is within our autonomous set, this complex is nonterminal
-            if any(prod_idx in autonomous_set for prod_idx in product_complexes)
-                has_internal_outgoing = true
+            for rxn_idx in substrate_reactions
+                # Find product complexes for this reaction (A[complex, reaction] > 0)
+                product_complexes = findall(A_matrix[:, rxn_idx] .> 0)
+
+                # Check if any product is in C_minus4 but NOT in this same class
+                for prod_idx in product_complexes
+                    if prod_idx in C_minus4_set && prod_idx ∉ class_complexes
+                        is_terminal = false
+                        break
+                    end
+                end
+
+                if !is_terminal
+                    break
+                end
+            end
+
+            if !is_terminal
                 break
             end
         end
 
-        if has_internal_outgoing
-            push!(nonterminal_complexes, complex_idx)
+        # If NOT terminal, include in nonterminal complexes
+        if !is_terminal
+            append!(nonterminal_complexes, class_complexes)
         end
     end
 
+    @debug "Phase IV: Found $(length(strong_linkage_classes)) strong linkage classes, $(length(nonterminal_complexes)) nonterminal complexes remain"
+
     return nonterminal_complexes
+end
+
+"""
+Find strongly connected components (strong linkage classes) using Tarjan's algorithm.
+Returns vector of vectors, where each inner vector contains complexes in one strong linkage class.
+"""
+function find_strong_linkage_classes(complexes::Vector{Int}, A_matrix::SparseArrays.SparseMatrixCSC)
+    if isempty(complexes)
+        return Vector{Int}[]
+    end
+
+    n_complexes = length(complexes)
+    complex_to_local = Dict(complexes[i] => i for i in 1:n_complexes)
+
+    # Build adjacency matrix for the subgraph
+    adj_matrix = zeros(Bool, n_complexes, n_complexes)
+
+    for (local_i, global_i) in enumerate(complexes)
+        # Find reactions where this complex is a substrate
+        substrate_reactions = findall(A_matrix[global_i, :] .< 0)
+
+        for rxn_idx in substrate_reactions
+            # Find product complexes for this reaction
+            product_complexes = findall(A_matrix[:, rxn_idx] .> 0)
+
+            for prod_global in product_complexes
+                if haskey(complex_to_local, prod_global)
+                    local_j = complex_to_local[prod_global]
+                    adj_matrix[local_i, local_j] = true
+                end
+            end
+        end
+    end
+
+    # Apply Tarjan's algorithm
+    index_counter = [0]
+    stack = Int[]
+    indices = zeros(Int, n_complexes)
+    lowlinks = zeros(Int, n_complexes)
+    on_stack = falses(n_complexes)
+    components = Vector{Int}[]
+
+    function strongconnect(v)
+        indices[v] = index_counter[1]
+        lowlinks[v] = index_counter[1]
+        index_counter[1] += 1
+        push!(stack, v)
+        on_stack[v] = true
+
+        # Consider successors of v
+        for w in 1:n_complexes
+            if adj_matrix[v, w]  # Edge v -> w exists
+                if indices[w] == 0
+                    # Successor w has not been visited; recurse
+                    strongconnect(w)
+                    lowlinks[v] = min(lowlinks[v], lowlinks[w])
+                elseif on_stack[w]
+                    # Successor w is in stack and hence in current SCC
+                    lowlinks[v] = min(lowlinks[v], indices[w])
+                end
+            end
+        end
+
+        # If v is a root node, pop the stack and create SCC
+        if lowlinks[v] == indices[v]
+            component = Int[]
+            while true
+                w = pop!(stack)
+                on_stack[w] = false
+                push!(component, complexes[w])  # Convert back to global indices
+                if w == v
+                    break
+                end
+            end
+            push!(components, component)
+        end
+    end
+
+    # Run DFS for each unvisited node
+    for v in 1:n_complexes
+        if indices[v] == 0
+            strongconnect(v)
+        end
+    end
+
+    return components
+end
+
+"""
+The Upstream Algorithm W(C0): Find the largest upstream subset.
+Implements the theoretical upstream function that returns the unique maximal
+upstream subset of C0 according to Theorem S2-7.
+
+An upstream set is both autonomous (no external dependencies) and feeding
+(every complex eventually converts to complexes outside the set).
+
+# Algorithm Steps:
+1. Phase I: Exclude entry complexes iteratively
+2. Phase IV: Exclude terminal strong linkage classes
+
+# Arguments:
+- `C0::Vector{Int}`: Input complex indices (typically an extended module C_b ∪ C_m)
+- `A_matrix`: Complex-reaction incidence matrix
+
+# Returns:
+- `Vector{Int}`: Indices of complexes in the largest upstream subset
+"""
+function upstream_algorithm_W(C0::Vector{Int}, A_matrix::SparseArrays.SparseMatrixCSC)
+    if isempty(C0)
+        return Int[]
+    end
+
+    @debug "Upstream Algorithm W: Starting with $(length(C0)) complexes"
+
+    # Phase I: Exclusion of entry complexes (autonomous property)
+    C1 = phase_i_exclude_entry_complexes(C0, A_matrix)
+    @debug "Phase I: $(length(C0)) → $(length(C1)) complexes"
+
+    if isempty(C1)
+        return Int[]
+    end
+
+    # Phase II: Remove complexes with no outgoing connections from the complex itself
+    C2 = phase_ii_exclude_no_outgoing(C1, A_matrix)
+    @debug "Phase II: $(length(C1)) → $(length(C2)) complexes"
+
+    if isempty(C2)
+        return Int[]
+    end
+
+    # Phase III: Exclusion of exit complexes (complexes with outgoing connections from the module)
+    C3, phase_III_complexes = phase_iii_exclude_exit_complexes(C2, A_matrix)
+    @debug "Phase III: $(length(C2)) → $(length(C3)) core + $(length(phase_III_complexes)) exit complexes"
+
+    # Phase IV: Exclude terminal strong linkage classes from remaining complexes
+    phase_IV_complexes = Int[]
+    if !isempty(C3)
+        phase_IV_complexes = phase_iv_exclude_terminal_complexes(C3, A_matrix)
+        @debug "Phase IV: $(length(C3)) → $(length(phase_IV_complexes)) nonterminal complexes"
+    end
+
+    # Final kinetic module: nonterminal complexes that survive all phases
+    # Theory: "autonomous set of nonterminal complexes"
+    kinetic_module_complexes = phase_IV_complexes
+
+    @debug "Upstream Algorithm W: Final result $(length(kinetic_module_complexes)) kinetic module complexes"
+
+    return kinetic_module_complexes
 end
 
 """
 Apply Upstream Algorithm filtering to identify kinetic module candidates.
-Implements the theoretical W(C) operation: autonomous and feeding upstream set.
+Wrapper function that calls the complete upstream algorithm W(C0).
 """
 function apply_upstream_algorithm(complex_indices::Vector{Int}, A_matrix::SparseArrays.SparseMatrixCSC)
-    # Step 1: Find autonomous complexes (no external dependencies)
-    autonomous_complexes = find_autonomous_complexes(complex_indices, A_matrix)
+    return upstream_algorithm_W(complex_indices, A_matrix)
+end
 
-    if isempty(autonomous_complexes)
+"""
+Debug version of upstream algorithm that shows what happens at each phase.
+"""
+function debug_upstream_algorithm(complex_indices::Vector{Int}, A_matrix::SparseArrays.SparseMatrixCSC)
+    println("Starting upstream algorithm with $(length(complex_indices)) complexes")
+    
+    # Phase I: Exclusion of entry complexes (autonomous property)
+    C1 = phase_i_exclude_entry_complexes(complex_indices, A_matrix)
+    println("Phase I: $(length(complex_indices)) → $(length(C1)) complexes")
+    
+    if isempty(C1)
+        println("Phase I eliminated all complexes - stopping")
         return Int[]
     end
-
-    # Step 2: Among autonomous complexes, identify nonterminal ones
-    # These form the core of kinetic modules according to theory
-    nonterminal_complexes = find_nonterminal_complexes(autonomous_complexes, A_matrix)
-
-    # Return nonterminal autonomous complexes as kinetic module candidates
-    return nonterminal_complexes
+    
+    # Phase II: Remove complexes with no outgoing connections from the complex itself
+    C2 = phase_ii_exclude_no_outgoing(C1, A_matrix)
+    println("Phase II: $(length(C1)) → $(length(C2)) complexes")
+    
+    if isempty(C2)
+        println("Phase II eliminated all complexes - stopping")
+        return Int[]
+    end
+    
+    # Phase III: Exclusion of exit complexes (complexes with outgoing connections from the module)
+    C3, phase_III_complexes = phase_iii_exclude_exit_complexes(C2, A_matrix)
+    println("Phase III: $(length(C2)) → $(length(C3)) core + $(length(phase_III_complexes)) exit complexes")
+    
+    # Phase IV: Exclude terminal strong linkage classes from remaining complexes
+    phase_IV_complexes = Int[]
+    if !isempty(C3)
+        println("Phase IV debug: Analyzing $(length(C3)) complexes")
+        
+        # Debug strong linkage classes
+        strong_linkage_classes = find_strong_linkage_classes(C3, A_matrix)
+        println("  Found $(length(strong_linkage_classes)) strong linkage classes")
+        
+        for (i, class_complexes) in enumerate(strong_linkage_classes)
+            println("  Class $i: $(length(class_complexes)) complexes")
+            
+            # Check connections to other classes
+            connections_found = false
+            for complex_idx in class_complexes
+                substrate_reactions = findall(A_matrix[complex_idx, :] .< 0)
+                for rxn_idx in substrate_reactions
+                    product_complexes = findall(A_matrix[:, rxn_idx] .> 0)
+                    for prod_idx in product_complexes
+                        if prod_idx in C3 && prod_idx ∉ class_complexes
+                            connections_found = true
+                            break
+                        end
+                    end
+                    if connections_found break end
+                end
+                if connections_found break end
+            end
+            println("    Connections to other classes: $connections_found")
+        end
+        
+        phase_IV_complexes = phase_iv_exclude_terminal_complexes(C3, A_matrix)
+        println("Phase IV: $(length(C3)) → $(length(phase_IV_complexes)) nonterminal complexes")
+    else
+        println("Phase III eliminated all complexes - Phase IV has nothing to process")
+    end
+    
+    return phase_IV_complexes
 end
 
 """
 Kinetic module identification using the proven redesigned approach.
 """
 function identify_kinetic_modules(
-    constraints,
-    model::AbstractFBCModels.AbstractFBCModel,
-    concordance_results;
+    complete_model::CompleteConcordanceModel;
     min_module_size::Int=2,
     workers=D.workers()
 )
-    @info "Extracting network matrices from constraints"
-    network_data = extract_network_matrices_from_constraints(constraints, model)
+    @info "Identifying kinetic modules using CompleteConcordanceModel"
 
-    @info "Identifying kinetic modules using redesigned approach"
+    # Extract concordance modules from CompleteConcordanceModel
+    # Group complexes by their concordance module ID (>0 means in a module)
+    concordance_module_groups = Dict{Int,Vector{Int}}()
+    for (complex_idx, module_id) in enumerate(complete_model.concordance_modules)
+        if module_id > 0  # Skip complexes not in any concordance module
+            if !haskey(concordance_module_groups, module_id)
+                concordance_module_groups[module_id] = Int[]
+            end
+            push!(concordance_module_groups[module_id], complex_idx)
+        end
+    end
 
-    # Get concordance modules (excluding "none")
-    valid_modules = filter(row -> row.module_id != "none", concordance_results.modules)
-
-    @info "Processing concordance modules: $(DF.nrow(valid_modules))"
+    @info "Processing concordance modules: $(length(concordance_module_groups))"
 
     module_candidates = Vector{Vector{Int}}()
 
-    # Process each concordance module individually
-    for module_row in DF.eachrow(valid_modules)
-        module_id = module_row.module_id
+    # Debug: Track upstream algorithm results
+    upstream_results = []
 
-        # Get complexes in this module
-        module_complexes = filter(row -> row.module == module_id, concordance_results.complexes)
-
-        if DF.nrow(module_complexes) < min_module_size
-            continue
+    # Get balanced complexes (module_id = 0)
+    balanced_indices = Int[]
+    for (complex_idx, module_id) in enumerate(complete_model.concordance_modules)
+        if module_id == 0
+            push!(balanced_indices, complex_idx)
         end
+    end
 
-        # Convert complex names to indices
-        complex_indices = Int[]
-        for complex_row in DF.eachrow(module_complexes)
-            complex_name = String(complex_row.id)
-            if haskey(network_data.complex_to_idx, complex_name)
-                push!(complex_indices, network_data.complex_to_idx[complex_name])
-            end
-        end
+    @info "Processing extended modules (balanced + concordance)"
+    @debug "Balanced complexes: $(length(balanced_indices))"
 
-        if length(complex_indices) < min_module_size
-            continue
-        end
+    # Apply upstream algorithm to extended modules (balanced + each concordance module)
+    for (module_id, concordance_indices) in concordance_module_groups
+        @debug "Processing extended module: balanced + concordance module $module_id"
 
-        @debug "Processing module $module_id: $(length(complex_indices)) complexes"
+        # Create extended module combining balanced and concordance complexes
+        extended_module = union(balanced_indices, concordance_indices)
 
-        # Apply Upstream Algorithm to find kinetic module candidates
-        kinetic_candidates = apply_upstream_algorithm(complex_indices, network_data.A_matrix)
+        # Apply upstream algorithm to find kinetic module candidates
+        kinetic_candidates = apply_upstream_algorithm(extended_module, complete_model.complex_reaction_matrix)
 
-        if length(kinetic_candidates) >= min_module_size
+        # Track results
+        push!(upstream_results, ("extended_$module_id", length(extended_module), length(kinetic_candidates)))
+
+        # Keep all successful results
+        if length(kinetic_candidates) >= 1
             push!(module_candidates, kinetic_candidates)
-            @debug "Added kinetic module candidate: $(length(kinetic_candidates)) complexes"
+            @info "Extended module $module_id: $(length(extended_module)) → $(length(kinetic_candidates)) kinetic candidates"
         end
     end
 
-    # Special handling for balanced module (largest concordance module)
-    balanced_module = filter(row -> row.module_id == "balanced", concordance_results.modules)
-    if DF.nrow(balanced_module) > 0
-        @info "Processing balanced module combinations"
+    # Process pure balanced linkage classes as potential kinetic modules
+    if !isempty(balanced_indices)
+        @debug "Processing pure balanced linkage classes"
 
-        balanced_complexes = filter(row -> row.module == "balanced", concordance_results.complexes)
-        balanced_indices = Int[]
+        # Apply upstream algorithm to balanced complexes alone
+        balanced_kinetic_candidates = apply_upstream_algorithm(balanced_indices, complete_model.complex_reaction_matrix)
 
-        for complex_row in DF.eachrow(balanced_complexes)
-            complex_name = String(complex_row.id)
-            if haskey(network_data.complex_to_idx, complex_name)
-                push!(balanced_indices, network_data.complex_to_idx[complex_name])
-            end
-        end
+        push!(upstream_results, ("balanced_linkage", length(balanced_indices), length(balanced_kinetic_candidates)))
 
-        @debug "Balanced complexes: $(length(balanced_indices))"
-
-        # Try combining balanced with each other module
-        for i in 1:DF.nrow(valid_modules)
-            module_id = valid_modules[i, :module_id]
-            if module_id == "balanced"
-                continue
-            end
-
-            module_complexes = filter(row -> row.module == module_id, concordance_results.complexes)
-            module_indices = Int[]
-
-            for complex_row in DF.eachrow(module_complexes)
-                complex_name = String(complex_row.id)
-                if haskey(network_data.complex_to_idx, complex_name)
-                    push!(module_indices, network_data.complex_to_idx[complex_name])
-                end
-            end
-
-            # Combine balanced + this module
-            combined_indices = union(balanced_indices, module_indices)
-
-            if length(combined_indices) >= min_module_size
-                @debug "Testing balanced + $module_id: $(length(combined_indices)) complexes"
-
-                # Apply Upstream Algorithm to combined set
-                kinetic_candidates = apply_upstream_algorithm(combined_indices, network_data.A_matrix)
-
-                if length(kinetic_candidates) >= min_module_size
-                    push!(module_candidates, kinetic_candidates)
-                    @debug "Added combined kinetic module: $(length(kinetic_candidates)) complexes"
-                end
-            end
+        if length(balanced_kinetic_candidates) >= 1
+            push!(module_candidates, balanced_kinetic_candidates)
+            @debug "Added balanced linkage class: $(length(balanced_kinetic_candidates)) complexes"
         end
     end
 
-    # Merge overlapping candidates
-    @info "Merging overlapping candidates: $(length(module_candidates))"
+    # Debug: Show what the upstream algorithm found
+    @info "Upstream algorithm results:"
+    for (module_id, input_size, output_size) in upstream_results
+        @info "  Module $module_id: $input_size → $output_size"
+    end
 
-    final_modules = Vector{Vector{Int}}()
-    used_candidates = Set{Int}()
+    # Merge overlapping candidates using graph-based approach
+    @info "Merging overlapping kinetic modules: $(length(module_candidates))"
 
-    for (i, candidate) in enumerate(module_candidates)
-        if i in used_candidates
-            continue
-        end
+    if isempty(module_candidates)
+        final_modules = Vector{Vector{Int}}()
+    else
+        # Create overlap matrix between kinetic module candidates
+        n_candidates = length(module_candidates)
+        overlap_matrix = zeros(Int, n_candidates, n_candidates)
 
-        merged_module = copy(candidate)
-        used_candidates = union(used_candidates, Set([i]))
-
-        # Check for overlaps with remaining candidates
-        for (j, other_candidate) in enumerate(module_candidates)
-            if j <= i || j in used_candidates
-                continue
-            end
-
-            overlap = length(intersect(Set(merged_module), Set(other_candidate)))
-            if overlap > 0  # Any overlap means merge
-                merged_module = union(merged_module, other_candidate)
-                used_candidates = union(used_candidates, Set([j]))
-                @debug "Merged candidates $i and $j due to overlap of $overlap complexes"
+        for i in 1:(n_candidates-1)
+            for j in (i+1):n_candidates
+                overlap_size = length(intersect(Set(module_candidates[i]), Set(module_candidates[j])))
+                overlap_matrix[i, j] = overlap_size
+                overlap_matrix[j, i] = overlap_size
             end
         end
 
-        push!(final_modules, merged_module)
+        # Find connected components of overlapping modules
+        # Two modules are connected if they share any complexes
+        adjacency_matrix = (overlap_matrix .> 0)
+
+        # Use simple DFS to find connected components
+        visited = falses(n_candidates)
+        final_modules = Vector{Vector{Int}}()
+
+        for start_idx in 1:n_candidates
+            if !visited[start_idx]
+                # Find all modules connected to this one
+                component = Int[]
+                stack = [start_idx]
+
+                while !isempty(stack)
+                    current = pop!(stack)
+                    if !visited[current]
+                        visited[current] = true
+                        push!(component, current)
+
+                        # Add unvisited neighbors to stack
+                        for neighbor in 1:n_candidates
+                            if adjacency_matrix[current, neighbor] && !visited[neighbor]
+                                push!(stack, neighbor)
+                            end
+                        end
+                    end
+                end
+
+                # Merge all modules in this connected component
+                merged_module = Int[]
+                for module_idx in component
+                    merged_module = union(merged_module, module_candidates[module_idx])
+                end
+
+                push!(final_modules, merged_module)
+                @debug "Merged $(length(component)) overlapping modules into one with $(length(merged_module)) complexes"
+            end
+        end
     end
 
     # Convert to final format with names and create kinetic modules dict
@@ -564,12 +887,10 @@ function identify_kinetic_modules(
         complex_symbols = Symbol[]
 
         for complex_idx in module_complexes
-            # Find complex name from index
-            for (name, idx) in network_data.complex_to_idx
-                if idx == complex_idx
-                    push!(complex_symbols, Symbol(name))
-                    break
-                end
+            # Get complex name directly from CompleteConcordanceModel
+            if complex_idx <= length(complete_model.complex_ids)
+                complex_symbol = complete_model.complex_ids[complex_idx]
+                push!(complex_symbols, complex_symbol)
             end
         end
 
@@ -591,22 +912,36 @@ function identify_kinetic_modules(
         end
     end
 
-    # Identify interface reactions using our proven approach
-    interface_reactions = identify_interface_reactions(kinetic_modules, network_data, min_module_size)
+    # Identify interface reactions using our proven approach  
+    interface_reactions = identify_interface_reactions(kinetic_modules, complete_model, min_module_size)
+
+    # Update CompleteConcordanceModel.kinetic_modules directly
+    for (module_idx, (module_symbol, complex_symbols)) in enumerate(kinetic_modules)
+        for complex_symbol in complex_symbols
+            if haskey(complete_model.complex_idx, complex_symbol)
+                complex_idx = complete_model.complex_idx[complex_symbol]
+                complete_model.kinetic_modules[complex_idx] = module_idx
+            end
+        end
+    end
+
+    # Update kinetic module count
+    complete_model.n_kinetic_modules = length(kinetic_modules)
+
+    # Update interface reactions
+    for reaction_name in interface_reactions
+        reaction_idx = findfirst(==(Symbol(reaction_name)), complete_model.reaction_ids)
+        if reaction_idx !== nothing
+            complete_model.interface_reactions[reaction_idx] = true
+        end
+    end
 
     @info "Kinetic module identification completed: $(length(kinetic_modules)) modules, giant size: $giant_module_size"
 
+    # Return minimal result info for logging/debugging including giant module size
     return (
-        kinetic_modules=kinetic_modules,
-        giant_module_id=giant_module_id,
         interface_reactions=interface_reactions,
-        Y_matrix=network_data.Y_matrix,
-        A_matrix=network_data.A_matrix,
-        metabolite_names=network_data.metabolite_names,
-        reaction_names=network_data.reaction_names,
-        complex_to_idx=network_data.complex_to_idx,
-        metabolite_to_idx=network_data.metabolite_to_idx,
-        reaction_to_idx=network_data.reaction_to_idx
+        giant_module_size=giant_module_size
     )
 end
 
@@ -614,7 +949,7 @@ end
 Identify interface reactions based on kinetic modules using our proven approach.
 """
 function identify_interface_reactions(kinetic_modules::Dict{Symbol,Vector{Symbol}},
-    network_data, min_module_size::Int)
+    complete_model::CompleteConcordanceModel, min_module_size::Int)
 
     # Build mapping from complex to kinetic module
     complex_to_module = Dict{String,Symbol}()
@@ -627,23 +962,17 @@ function identify_interface_reactions(kinetic_modules::Dict{Symbol,Vector{Symbol
     interface_reactions = Symbol[]
     internal_reaction_count = 0
 
-    for (rxn_name, rxn_idx) in network_data.reaction_to_idx
+    for (rxn_name, rxn_idx) in complete_model.reaction_idx
         # Find all complexes involved in this reaction
-        involved_complexes = findall(abs.(network_data.A_matrix[:, rxn_idx]) .> 0)
+        involved_complexes = findall(abs.(complete_model.complex_reaction_matrix[:, rxn_idx]) .> 0)
 
         # Get modules for involved complexes
         modules_involved = Set{Symbol}()
         has_unassigned = false
 
         for complex_idx in involved_complexes
-            # Find complex name
-            complex_name = nothing
-            for (name, idx) in network_data.complex_to_idx
-                if idx == complex_idx
-                    complex_name = name
-                    break
-                end
-            end
+            # Find complex name using CompleteConcordanceModel
+            complex_name = string(complete_model.complex_ids[complex_idx])
 
             if complex_name !== nothing && haskey(complex_to_module, complex_name)
                 push!(modules_involved, complex_to_module[complex_name])
@@ -662,192 +991,9 @@ function identify_interface_reactions(kinetic_modules::Dict{Symbol,Vector{Symbol
         end
     end
 
-    @info "Interface reaction analysis: $(length(network_data.reaction_names)) total, $internal_reaction_count internal, $(length(interface_reactions)) interface"
+    @info "Interface reaction analysis: $(length(complete_model.reaction_ids)) total, $internal_reaction_count internal, $(length(interface_reactions)) interface"
 
     return interface_reactions
-end
-
-"""
-$(TYPEDSIGNATURES)
-
-Identify concentration robustness in metabolic networks through kinetic module analysis.
-
-This function uses kinetic module identification to find:
-- **Absolute concentration robustness (ACR)**: Metabolites whose concentrations remain constant
-- **Concentration ratio robustness (CRR)**: Metabolite pairs whose concentration ratios remain constant
-
-The analysis leverages the theoretical connection between kinetic modules and concentration robustness
-in mass-action kinetics systems.
-
-# Arguments
-- `constraints`: COCOA constraint tree containing network structure
-- `model::AbstractFBCModels.AbstractFBCModel`: Metabolic network model  
-- `concordance_results`: Results from activity concordance analysis
-- `min_module_size::Int=2`: Minimum size for kinetic modules (smaller modules filtered out)
-- `workers=D.workers()`: Parallel worker pool for distributed computation
-
-# Returns
-`ConcentrationRobustnessResults` containing:
-- `robust_metabolites`: Vector of metabolite names showing ACR
-- `robust_metabolite_pairs`: Vector of metabolite pairs showing CRR  
-- `n_robust_metabolites`: Count of ACR metabolites
-- `n_robust_pairs`: Count of CRR pairs
-- `kinetic_results`: Full kinetic module analysis results
-- `summary`: Analysis statistics for large-scale reporting
-
-# Implementation Notes
-
-The implementation follows established theoretical results:
-
-1. **ACR identification**: Metabolites that appear in exactly one kinetic module and satisfy
-   specific network topology conditions are candidates for ACR
-
-2. **CRR identification**: Pairs of metabolites within the same kinetic module that satisfy
-   coupling conditions are candidates for CRR
-
-3. **Giant kinetic module**: The largest kinetic module, which often contains the majority 
-   of network complexes and provides key insights into network modularity
-
-# Performance Characteristics
-
-- **Memory efficient**: Reuses kinetic analysis results, no duplication of large matrices
-- **Scalable**: Designed for networks with >50,000 complexes and reactions
-- **HPC optimized**: Leverages distributed workers for parallel processing where applicable
-
-# References
-- Shinar & Feinberg (2010): Structural sources of robustness in biochemical reaction networks
-- Anderson et al. (2020): Concentration robustness and kinetic modules in networks
-"""
-function identify_concentration_robustness(
-    constraints,
-    model::AbstractFBCModels.AbstractFBCModel,
-    concordance_results;
-    min_module_size::Int=2,
-    workers=D.workers()
-)
-    @info "Running kinetic module analysis for concentration robustness"
-
-    # First get kinetic module results
-    kinetic_results = identify_kinetic_modules(constraints, model, concordance_results; min_module_size, workers)
-
-    @info "Analyzing concentration robustness properties"
-
-    # Extract kinetic modules and network data
-    kinetic_modules = kinetic_results.kinetic_modules
-    Y_matrix = kinetic_results.Y_matrix
-    metabolite_names = kinetic_results.metabolite_names
-
-    # Initialize results containers
-    robust_metabolites = String[]
-    robust_metabolite_pairs = Tuple{String,String}[]
-
-    # Build metabolite-to-modules mapping for ACR analysis
-    metabolite_to_modules = Dict{String,Set{Symbol}}()
-    for metabolite in metabolite_names
-        metabolite_to_modules[metabolite] = Set{Symbol}()
-    end
-
-    # Map metabolites to their kinetic modules
-    for (module_id, module_complexes) in kinetic_modules
-        for complex_symbol in module_complexes
-            complex_name = string(complex_symbol)
-            if haskey(kinetic_results.complex_to_idx, complex_name)
-                complex_idx = kinetic_results.complex_to_idx[complex_name]
-
-                # Find metabolites in this complex (non-zero entries in Y matrix)
-                metabolite_indices = findall(abs.(Y_matrix[:, complex_idx]) .> 1e-10)
-                for met_idx in metabolite_indices
-                    metabolite = metabolite_names[met_idx]
-                    push!(metabolite_to_modules[metabolite], module_id)
-                end
-            end
-        end
-    end
-
-    # Identify ACR candidates: metabolites appearing in exactly one kinetic module
-    @info "Identifying absolute concentration robustness (ACR) candidates"
-    for (metabolite, modules) in metabolite_to_modules
-        if length(modules) == 1
-            # Additional checks could be added here for network topology requirements
-            push!(robust_metabolites, metabolite)
-        end
-    end
-
-    # Identify CRR candidates: metabolite pairs within same kinetic modules  
-    @info "Identifying concentration ratio robustness (CRR) candidates"
-    for (module_id, module_complexes) in kinetic_modules
-        # Get all metabolites in this module
-        module_metabolites = String[]
-        for complex_symbol in module_complexes
-            complex_name = string(complex_symbol)
-            if haskey(kinetic_results.complex_to_idx, complex_name)
-                complex_idx = kinetic_results.complex_to_idx[complex_name]
-
-                metabolite_indices = findall(abs.(Y_matrix[:, complex_idx]) .> 1e-10)
-                for met_idx in metabolite_indices
-                    metabolite = metabolite_names[met_idx]
-                    if metabolite ∉ module_metabolites
-                        push!(module_metabolites, metabolite)
-                    end
-                end
-            end
-        end
-
-        # Generate all pairs within this module
-        for i in 1:length(module_metabolites)
-            for j in (i+1):length(module_metabolites)
-                pair = (module_metabolites[i], module_metabolites[j])
-                if pair ∉ robust_metabolite_pairs
-                    push!(robust_metabolite_pairs, pair)
-                end
-            end
-        end
-    end
-
-    # Calculate statistics
-    n_robust_metabolites = length(robust_metabolites)
-    n_robust_pairs = length(robust_metabolite_pairs)
-    giant_kinetic_module_size = if kinetic_results.giant_module_id != :none
-        length(kinetic_results.kinetic_modules[kinetic_results.giant_module_id])
-    else
-        0
-    end
-
-    # Create summary for large-scale analysis
-    summary = Dict{String,Int}(
-        "n_robust_metabolites" => n_robust_metabolites,
-        "n_robust_pairs" => n_robust_pairs,
-        "giant_kinetic_module_size" => giant_kinetic_module_size,
-        "n_kinetic_modules" => length(kinetic_modules)
-    )
-
-    @info "Concentration robustness analysis completed" n_robust_metabolites n_robust_pairs giant_kinetic_module_size
-
-    # Create full results structure - reuse the kinetic results but update summary
-    kinetic_module_results = KineticModuleResults(
-        concordance_results,  # Use the original concordance results
-        kinetic_results.kinetic_modules,
-        kinetic_results.giant_module_id,
-        kinetic_results.interface_reactions,
-        kinetic_results.Y_matrix,
-        kinetic_results.A_matrix,
-        kinetic_results.metabolite_names,
-        kinetic_results.reaction_names,
-        kinetic_results.complex_to_idx,
-        kinetic_results.metabolite_to_idx,
-        kinetic_results.reaction_to_idx,
-        summary
-    )
-
-    return ConcentrationRobustnessResults(
-        kinetic_module_results,
-        robust_metabolites,
-        robust_metabolite_pairs,
-        n_robust_metabolites,
-        n_robust_pairs,
-        giant_kinetic_module_size,
-        summary
-    )
 end
 
 """
@@ -920,9 +1066,7 @@ The analysis implements established theory connecting activity concordance to ki
 - **Interface reactions**: Connect kinetic modules and determine system-level behavior
 
 # References
-- Grimbs et al. (2012): Activity concordance analysis for metabolic networks
-- Anderson et al. (2020): Kinetic modules and concentration robustness
-- Feinberg (2019): Foundations of Chemical Reaction Network Theory
+
 """
 function kinetic_concordance_analysis(
     model::AbstractFBCModels.AbstractFBCModel;
@@ -933,12 +1077,11 @@ function kinetic_concordance_analysis(
 )
     @info "Starting comprehensive kinetic concordance analysis"
 
-    # Step 1: Run activity concordance analysis
+    # Step 1: Run activity concordance analysis - now returns CompleteConcordanceModel directly
     @info "Running activity concordance analysis"
-    concordance_results = activity_concordance_analysis(model; optimizer=optimizer, kwargs...)
-
-    n_complexes = DF.nrow(concordance_results.complexes)
-    n_modules = DF.nrow(concordance_results.modules)
+    complete_model = activity_concordance_analysis(model; optimizer=optimizer, kwargs...)
+    n_complexes = complete_model.n_complexes
+    n_modules = complete_model.n_concordance_modules
 
     @info "Concordance analysis completed: $n_complexes complexes in $n_modules modules"
 
@@ -951,26 +1094,19 @@ function kinetic_concordance_analysis(
 
     constraints = concordance_constraints(model; constraints_kwargs...)
 
-    # Step 3: Run kinetic module analysis using constraints
+    # Step 3: Run kinetic module analysis using CompleteConcordanceModel directly
     @info "Running kinetic module analysis"
-    kinetic_results = identify_kinetic_modules(constraints, model, concordance_results; min_module_size, workers)
+    kinetic_results = identify_kinetic_modules(complete_model; min_module_size, workers)
 
-    # Update reaction count to reflect post-splitting count from kinetic results
-    n_reactions = length(kinetic_results.reaction_names)
-
-    # Extract kinetic module statistics
-    n_kinetic_modules = length(kinetic_results.kinetic_modules)
-    giant_kinetic_module_size = if kinetic_results.giant_module_id != :none
-        length(kinetic_results.kinetic_modules[kinetic_results.giant_module_id])
-    else
-        0
-    end
+    # Extract kinetic module statistics - now efficiently returned by the function
+    n_kinetic_modules = complete_model.n_kinetic_modules
+    giant_kinetic_module_size = kinetic_results.giant_module_size
 
     # Create comprehensive summary
     summary = Dict{String,Int}(
-        "n_reactions" => n_reactions,
-        "n_complexes" => n_complexes,
-        "n_concordance_modules" => n_modules,
+        "n_reactions" => complete_model.n_reactions,
+        "n_complexes" => complete_model.n_complexes,
+        "n_concordance_modules" => complete_model.n_concordance_modules,
         "n_kinetic_modules" => n_kinetic_modules,
         "giant_kinetic_module_size" => giant_kinetic_module_size,
         "n_interface_reactions" => length(kinetic_results.interface_reactions)
@@ -978,19 +1114,6 @@ function kinetic_concordance_analysis(
 
     @info "Kinetic concordance analysis completed: $n_kinetic_modules kinetic modules, $(length(kinetic_results.interface_reactions)) interface reactions"
 
-    # Return comprehensive results
-    return KineticModuleResults(
-        concordance_results,
-        kinetic_results.kinetic_modules,
-        kinetic_results.giant_module_id,
-        kinetic_results.interface_reactions,
-        kinetic_results.Y_matrix,
-        kinetic_results.A_matrix,
-        kinetic_results.metabolite_names,
-        kinetic_results.reaction_names,
-        kinetic_results.complex_to_idx,
-        kinetic_results.metabolite_to_idx,
-        kinetic_results.reaction_to_idx,
-        summary
-    )
+    # Return the updated CompleteConcordanceModel with kinetic analysis results
+    return complete_model
 end
