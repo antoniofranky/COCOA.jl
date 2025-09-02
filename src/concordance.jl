@@ -284,6 +284,18 @@ function initialize_processing_state(
     current_batch = Vector{PairCandidate}()
     sizehint!(current_batch, config.batch_size)
 
+    # Calculate total possible pairs for progress tracking
+    # Filter examines ALL pairs, so use total pairs as denominator for accurate progress
+    total_possible_pairs = n_complexes * (n_complexes - 1) ÷ 2
+
+    # Calculate expected candidates for information
+    n_balanced = count(concordance_tracker.balanced_mask)
+    n_unbalanced = n_complexes - n_balanced
+    n_trivial = length(streaming_filter.trivial_pairs)
+    total_possible_candidates = n_unbalanced * (n_unbalanced - 1) ÷ 2 - n_trivial
+
+    @info "Progress tracking initialized" n_complexes = n_complexes n_balanced = n_balanced n_unbalanced = n_unbalanced n_trivial = n_trivial total_possible_pairs = total_possible_pairs expected_candidates = total_possible_candidates
+
     return BatchProcessingState(
         BatchResultAccumulator(n_complexes),
         MemoryMonitor(),
@@ -291,7 +303,7 @@ function initialize_processing_state(
         0, 0, 0, 0,  # counters
         0, 0, 0,     # filter tracking
         time(),      # timing
-        streaming_filter.n_complexes * (streaming_filter.n_complexes - 1) ÷ 2
+        total_possible_pairs  # total_possible_pairs
     )
 end
 
@@ -309,12 +321,13 @@ function process_full_batch!(
     constraints::C.ConstraintTree,
     state::BatchProcessingState,
     concordance_tracker::ConcordanceTracker,
-    config::BatchProcessingConfig
+    config::BatchProcessingConfig,
+    streaming_filter::StreamingCandidateFilter
 )::Nothing
     state.batches_processed += 1
 
     # Log batch collection completion
-    log_batch_collection!(state)
+    log_batch_collection!(state, streaming_filter)
 
     # Clear module cache
     clear_module_cache!(concordance_tracker)
@@ -344,10 +357,18 @@ function process_full_batch!(
     return nothing
 end
 
-function log_batch_collection!(state::BatchProcessingState)::Nothing
+function log_batch_collection!(state::BatchProcessingState, streaming_filter::StreamingCandidateFilter)::Nothing
     collection_time = time() - state.batch_collection_start_time
     collection_time_str = Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, collection_time * 1000)), "HH:MM:SS.s")
-    @info "Batch $(state.batches_processed): $(length(state.current_batch)) candidates collected [$collection_time_str] (total candidates seen: $(state.total_candidates_seen))"
+
+    # Calculate progress percentage based on pairs actually examined by filter
+    pairs_examined = streaming_filter.pairs_tested
+    progress_pct = round(pairs_examined / max(1, state.total_possible_pairs) * 100, digits=1)
+
+    # Get filtering statistics from streaming filter
+    filter_report = get_filter_report(streaming_filter)
+
+    @info "Batch $(state.batches_processed): $(length(state.current_batch)) candidates collected [$collection_time_str] ($(pairs_examined)/$(state.total_possible_pairs) = $(progress_pct)% examined) [Candidates: $(state.total_candidates_seen), Filtered - CV: $(filter_report.breakdown.cv_threshold), Known: concordant: $(filter_report.breakdown.known_concordant) non-concordant: $(filter_report.breakdown.known_non_concordant), Trivial: $(filter_report.breakdown.trivial), Balanced: $(filter_report.breakdown.balanced)]"
     return nothing
 end
 
@@ -460,45 +481,18 @@ function process_streaming_batches(
         collect_candidate!(state, candidate)
 
         if should_process_batch(state, config)
-            process_full_batch!(constraints, state, concordance_tracker, config)
+            process_full_batch!(constraints, state, concordance_tracker, config, streaming_filter)
         end
     end
 
     # Process any remaining candidates in final batch
     if !isempty(state.current_batch)
-        process_final_batch!(constraints, state, concordance_tracker, config)
+        process_full_batch!(constraints, state, concordance_tracker, config, streaming_filter)
     end
 
     return build_final_results(state)
 end
 
-function process_final_batch!(
-    constraints::C.ConstraintTree,
-    state::BatchProcessingState,
-    concordance_tracker::ConcordanceTracker,
-    config::BatchProcessingConfig
-)::Nothing
-    state.batches_processed += 1
-
-    collection_time = time() - state.batch_collection_start_time
-    collection_time_str = Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, collection_time * 1000)), "HH:MM:SS.s")
-    @info "Batch $(state.batches_processed): $(length(state.current_batch)) candidates collected [$collection_time_str]"
-
-    batch_result = execute_batch_optimization!(constraints, state, concordance_tracker, config)
-
-    batch_counts = MutableCounts(
-        batch_result.non_concordant,
-        batch_result.timeout,
-        batch_result.transitive,
-        batch_result.skipped
-    )
-
-    accumulate_results!(state.accumulator, batch_result.concordant_pairs, batch_counts, batch_result.optimization_results)
-    state.total_batches_completed += 1
-    state.total_pairs_processed += length(state.current_batch)
-
-    return nothing
-end
 
 function build_final_results(state::BatchProcessingState)
     # Convert optimization results to Dict for compatibility
@@ -1520,7 +1514,7 @@ function activity_concordance_analysis(
         "n_concordant_inferred" => total_concordant_from_modules - length(trivial_pairs) - batch_results.concordant_pairs.n_pairs,  # Found via transitivity
         "n_concordant_total" => total_concordant_from_modules,  # All concordant pairs from modules
         "n_non_concordant_pairs" => batch_results.non_concordant_pairs,
-        "n_candidates_skipped_by_transitivity" => batch_results.skipped_by_transitivity,  # Candidates not tested due to transitivity
+        "n_candidates_skipped_by_transitivity" => streaming_filter.pairs_transitivity_concordant_filtered + streaming_filter.pairs_transitivity_non_concordant_filtered,  # Candidates not tested due to transitivity
         "n_timeout_pairs" => batch_results.timeout_pairs,
         "n_modules" => length(modules),
         "batches_completed" => batch_results.batches_completed,
