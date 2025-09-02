@@ -18,13 +18,14 @@ This module contains:
 Mutable container for batch counts with concrete types.
 """
 mutable struct MutableCounts
+    concordant::Int
     non_concordant::Int
     timeout::Int
     transitive::Int
     skipped::Int
 end
 
-MutableCounts() = MutableCounts(0, 0, 0, 0)
+MutableCounts() = MutableCounts(0, 0, 0, 0, 0)
 
 """
 Configuration for batch processing with concrete types.
@@ -80,6 +81,7 @@ function accumulate_results!(
     optimization_results::Vector{Tuple{Int,Int,Symbol,Float64}}
 )::Nothing
     # Update counts atomically
+    acc.counts.concordant += counts.concordant
     acc.counts.non_concordant += counts.non_concordant
     acc.counts.timeout += counts.timeout
     acc.counts.transitive += counts.transitive
@@ -335,8 +337,10 @@ function process_full_batch!(
     # Process the batch
     batch_result = execute_batch_optimization!(constraints, state, concordance_tracker, config)
 
-    # Create counts for accumulation
+    # Create counts for accumulation - extract concordant count from batch_result
+    concordant_count = batch_result.concordant_pairs.n_pairs  # This was set correctly in execute_batch_optimization!
     batch_counts = MutableCounts(
+        concordant_count,
         batch_result.non_concordant,
         batch_result.timeout,
         batch_result.transitive,
@@ -347,9 +351,6 @@ function process_full_batch!(
     accumulate_results!(state.accumulator, batch_result.concordant_pairs, batch_counts, batch_result.optimization_results)
     state.total_batches_completed += 1
     state.total_pairs_processed += length(state.current_batch)
-
-    # Log progress and memory stats
-    log_batch_completion!(state, batch_result, config)
 
     # Reset for next batch
     empty!(state.current_batch)
@@ -368,18 +369,10 @@ function log_batch_collection!(state::BatchProcessingState, streaming_filter::St
     # Get filtering statistics from streaming filter
     filter_report = get_filter_report(streaming_filter)
 
-    @info "Batch $(state.batches_processed): $(length(state.current_batch)) candidates collected [$collection_time_str] ($(pairs_examined)/$(state.total_possible_pairs) = $(progress_pct)% examined) [Candidates: $(state.total_candidates_seen), Filtered - CV: $(filter_report.breakdown.cv_threshold), Known: concordant: $(filter_report.breakdown.known_concordant) non-concordant: $(filter_report.breakdown.known_non_concordant), Trivial: $(filter_report.breakdown.trivial), Balanced: $(filter_report.breakdown.balanced)]"
+    @info "Batch $(state.batches_processed): $(length(state.current_batch)) candidates collected [$collection_time_str] ($(pairs_examined)/$(state.total_possible_pairs) = $(progress_pct)% examined) \n [Candidates: $(state.total_candidates_seen), Filtered - CV: $(filter_report.breakdown.cv_threshold), Known: concordant: $(filter_report.breakdown.known_concordant) non-concordant: $(filter_report.breakdown.known_non_concordant), Trivial: $(filter_report.breakdown.trivial), Balanced: $(filter_report.breakdown.balanced)]"
     return nothing
 end
 
-function log_batch_completion!(state::BatchProcessingState, batch_result::BatchOptimizationResult, config::BatchProcessingConfig)::Nothing
-    # Memory monitoring
-    if state.batches_processed % 10 == 0
-        current_mem = check_memory!(state.memory_monitor)
-        @debug "Memory status" batch = state.batches_processed memory_gb = current_mem peak_gb = state.memory_monitor.peak_memory gc_time = state.memory_monitor.gc_time
-    end
-    return nothing
-end
 
 function execute_batch_optimization!(
     constraints::C.ConstraintTree,
@@ -389,8 +382,9 @@ function execute_batch_optimization!(
 )::BatchOptimizationResult
     optimization_start_time = time()
 
-    # Run optimizations
-    opt_results = process_concordance_batch(
+    # OPTIMIZED: Run optimizations and update concordance tracker in single pass
+    # Eliminates process_batch_results! entirely
+    batch_counts = process_concordance_batch(
         constraints,
         state.current_batch,
         concordance_tracker;
@@ -400,20 +394,23 @@ function execute_batch_optimization!(
         concordance_tolerance=config.concordance_tolerance
     )
 
-    # Process results
-    concordant_pairs, counts = process_batch_results!(opt_results, concordance_tracker, length(concordance_tracker.idx_to_id))
-
     # Log timing
     optimization_time = time() - optimization_start_time
     opt_time_str = Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, optimization_time * 1000)), "HH:MM:SS.s")
-    @info "Batch $(state.batches_processed): $(length(state.current_batch)) optimized → $(concordant_pairs.n_pairs) concordant, $(counts.non_concordant) non-concordant [$opt_time_str]"
+    @info "Batch $(state.batches_processed): $(length(state.current_batch)) optimized → $(batch_counts.concordant_count) concordant, $(batch_counts.non_concordant_count) non-concordant [$opt_time_str]"
+
+    # Create concordant pairs structure with correct count for statistics
+    n_complexes = length(concordance_tracker.idx_to_id)
+    concordant_pairs = SparseConcordantPairs(n_complexes)
+    # Set the correct count for statistics reporting (pairs are already in concordance_tracker)
+    concordant_pairs.n_pairs = batch_counts.concordant_count
 
     return BatchOptimizationResult(
         concordant_pairs,
-        counts.non_concordant,
-        counts.timeout,
+        batch_counts.non_concordant_count,
+        batch_counts.timeout_count,
         0, 0,  # transitive counts handled elsewhere  
-        counts.optimization_results
+        batch_counts.optimization_results
     )
 end
 
@@ -442,6 +439,144 @@ function process_batch_results!(opt_results, concordance_tracker, n_complexes)
 
     counts = (non_concordant=non_concordant_count, timeout=timeout_count, optimization_results=opt_results_vec)
     return concordant_pairs, counts
+end
+
+"""
+Minimal state for tracking pair concordance during streaming processing.
+Optimized for zero-allocation incremental updates.
+"""
+mutable struct PairConcordanceState
+    positive_min::Float64
+    positive_max::Float64
+    negative_min::Float64  
+    negative_max::Float64
+    has_positive::Bool
+    has_negative::Bool
+    has_timeout::Bool
+    is_concordant::Bool
+    reference_lambda::Float64
+    
+    PairConcordanceState() = new(NaN, NaN, NaN, NaN, false, false, false, true, NaN)
+end
+
+"""
+Update pair concordance state with new solver result.
+Returns true if pair is still potentially concordant, false if definitely non-concordant.
+"""
+@inline function update_pair_concordance!(
+    state::PairConcordanceState,
+    direction::Symbol,
+    dir_multiplier::Int,
+    value::Float64,
+    timeout::Bool,
+    concordance_tolerance::Float64
+)::Bool
+    # Early exit if already failed or timeout
+    timeout && (state.has_timeout = true; state.is_concordant = false; return false)
+    !state.is_concordant && return false
+    
+    # Update min/max values for this direction
+    if direction == :positive
+        if dir_multiplier == -1
+            state.positive_min = value
+        else  # dir_multiplier == 1
+            state.positive_max = value
+        end
+        state.has_positive = true
+    else  # direction == :negative
+        if dir_multiplier == -1
+            state.negative_min = value
+        else  # dir_multiplier == 1
+            state.negative_max = value
+        end
+        state.has_negative = true
+    end
+    
+    # Check concordance for completed directions
+    if direction == :positive && !isnan(state.positive_min) && !isnan(state.positive_max)
+        if abs(state.positive_min - state.positive_max) > concordance_tolerance
+            state.is_concordant = false
+            return false
+        end
+        current_lambda = (state.positive_min + state.positive_max) / 2
+        if isnan(state.reference_lambda)
+            state.reference_lambda = current_lambda
+        elseif abs(current_lambda - state.reference_lambda) > concordance_tolerance
+            state.is_concordant = false
+            return false
+        end
+    elseif direction == :negative && !isnan(state.negative_min) && !isnan(state.negative_max)
+        if abs(state.negative_min - state.negative_max) > concordance_tolerance
+            state.is_concordant = false
+            return false
+        end
+        current_lambda = (state.negative_min + state.negative_max) / 2
+        if isnan(state.reference_lambda)
+            state.reference_lambda = current_lambda
+        elseif abs(current_lambda - state.reference_lambda) > concordance_tolerance
+            state.is_concordant = false
+            return false
+        end
+    end
+    
+    return state.is_concordant
+end
+
+"""
+Most efficient streaming processor for solver results.
+Eliminates all intermediate data structures and processes in single pass.
+"""
+function process_solver_results_streaming!(
+    solver_results,
+    batch_pairs::Vector{PairCandidate}, 
+    concordance_tracker,
+    concordance_tolerance::Float64
+)
+    # Pre-allocate lookup for O(1) pair finding
+    pair_lookup = Dict{Tuple{Symbol,Symbol},Int}()
+    idx_to_id = concordance_tracker.idx_to_id
+    
+    for (i, candidate) in enumerate(batch_pairs)
+        c1_id = idx_to_id[candidate.c1_idx]
+        c2_id = idx_to_id[candidate.c2_idx]
+        pair_lookup[(c1_id, c2_id)] = i
+    end
+    
+    # Minimal state tracking - O(n) memory
+    pair_states = [PairConcordanceState() for _ in 1:length(batch_pairs)]
+    
+    # Process each solver result immediately - zero intermediate storage
+    for result in solver_results
+        c1_id, c2_id, direction, dir_multiplier, value, timeout = result
+        pair_idx = get(pair_lookup, (c1_id, c2_id), 0)
+        pair_idx == 0 && continue
+        
+        # Update concordance state directly - no allocations
+        update_pair_concordance!(pair_states[pair_idx], direction, dir_multiplier, value, timeout, concordance_tolerance)
+    end
+    
+    # Final concordance decision and tracker update
+    concordant_count = 0
+    non_concordant_count = 0
+    timeout_count = 0
+    
+    for (i, state) in enumerate(pair_states)
+        candidate = batch_pairs[i]
+        
+        if state.has_timeout
+            timeout_count += 1
+        end
+        
+        if state.is_concordant
+            union_sets!(concordance_tracker, candidate.c1_idx, candidate.c2_idx)
+            concordant_count += 1
+        else
+            add_non_concordant!(concordance_tracker, candidate.c1_idx, candidate.c2_idx)
+            non_concordant_count += 1
+        end
+    end
+    
+    return concordant_count, non_concordant_count, timeout_count
 end
 
 """
@@ -505,6 +640,7 @@ function build_final_results(state::BatchProcessingState)
         batches_completed=state.total_batches_completed,
         pairs_processed=state.total_pairs_processed,
         concordant_pairs=state.accumulator.concordant_pairs,
+        concordant_count=state.accumulator.counts.concordant,  # Add total concordant count
         non_concordant_pairs=state.accumulator.counts.non_concordant,
         skipped_by_transitivity=state.accumulator.counts.skipped,
         transitive_pairs=state.accumulator.counts.transitive,
@@ -695,68 +831,76 @@ function process_concordance_batch(
         workers=workers
     )
 
-    # Process results into final format
-    batch_results = process_optimization_results(optimization_results, batch_pairs, concordance_tracker)
-
-    final_results = []
-    for (i, pair_results_by_dir) in enumerate(batch_results)
+    # OPTIMIZED: Process results directly using efficient streaming processor
+    # Eliminates all intermediate data structures and multiple processing passes
+    
+    # Pre-allocate lookup for O(1) pair finding
+    pair_lookup = Dict{Tuple{Symbol,Symbol},Int}()
+    idx_to_id = concordance_tracker.idx_to_id
+    
+    for (i, candidate) in enumerate(batch_pairs)
+        c1_id = idx_to_id[candidate.c1_idx]
+        c2_id = idx_to_id[candidate.c2_idx]
+        pair_lookup[(c1_id, c2_id)] = i
+    end
+    
+    # Minimal state tracking - O(n) memory
+    pair_states = [PairConcordanceState() for _ in 1:length(batch_pairs)]
+    
+    # Process each solver result immediately - zero intermediate storage
+    for result in optimization_results
+        c1_id, c2_id, direction, dir_multiplier, value, timeout = result
+        pair_idx = get(pair_lookup, (c1_id, c2_id), 0)
+        pair_idx == 0 && continue
+        
+        # Update concordance state directly - no allocations
+        update_pair_concordance!(pair_states[pair_idx], direction, dir_multiplier, value, timeout, concordance_tolerance)
+    end
+    
+    # OPTIMIZED: Update concordance tracker directly and return counts only
+    # Eliminates the need for process_batch_results! entirely
+    
+    concordant_count = 0
+    non_concordant_count = 0
+    timeout_count = 0
+    optimization_results_vec = Vector{Tuple{Int,Int,Symbol,Float64}}()
+    
+    for (i, state) in enumerate(pair_states)
         candidate = batch_pairs[i]
         c1_idx, c2_idx = candidate.c1_idx, candidate.c2_idx
-
-        all_concordant = false
-        final_lambda = NaN
-        concordant_directions = Set{Symbol}()
-        has_timeout = false
-
-        if !isempty(pair_results_by_dir)
-            reference_lambda = NaN
-
-            for (direction, test_results) in pair_results_by_dir
-                min_val, max_val, timeout_occurred = test_results
-
-                timeout_occurred && (has_timeout = true)
-
-                # Early exit on failure
-                if timeout_occurred || isnan(min_val) || isnan(max_val) ||
-                   abs(min_val - max_val) > concordance_tolerance
-                    @debug "Pair failed concordance test" c1_idx c2_idx direction timeout_occurred min_val max_val diff = abs(min_val - max_val) tolerance = concordance_tolerance
-                    break
+        
+        # Count timeouts
+        state.has_timeout && (timeout_count += 1)
+        
+        # Update concordance tracker directly based on results
+        if state.is_concordant
+            union_sets!(concordance_tracker, c1_idx, c2_idx)
+            concordant_count += 1
+            
+            # Store lambda result if valid
+            if !isnan(state.reference_lambda)
+                final_direction = if state.has_positive && state.has_negative
+                    :both
+                elseif state.has_positive
+                    :positive  
+                else
+                    :negative
                 end
-
-                current_lambda = (min_val + max_val) / 2
-                push!(concordant_directions, direction)
-
-                if isnan(reference_lambda)
-                    reference_lambda = current_lambda
-                    final_lambda = current_lambda
-                elseif abs(current_lambda - reference_lambda) > concordance_tolerance
-                    @info "Cross-direction lambda mismatch" c1_idx c2_idx reference_lambda current_lambda lambda_diff = abs(current_lambda - reference_lambda) tolerance = concordance_tolerance
-                    break
-                end
-            end
-
-            # Only concordant if we made it here
-            all_concordant = !isnan(reference_lambda)
-        end
-
-        final_direction = if all_concordant
-            if length(concordant_directions) == 2
-                :both
-            elseif :positive in concordant_directions
-                :positive
-            elseif :negative in concordant_directions
-                :negative
-            else
-                :both
+                push!(optimization_results_vec, (c1_idx, c2_idx, final_direction, state.reference_lambda))
             end
         else
-            :both
+            add_non_concordant!(concordance_tracker, c1_idx, c2_idx)
+            non_concordant_count += 1
         end
-
-        push!(final_results, (c1_idx, c2_idx, final_direction, all_concordant, all_concordant ? final_lambda : NaN, has_timeout))
     end
 
-    return final_results
+    # Return counts in same format as process_batch_results! expected
+    return (
+        concordant_count = concordant_count,
+        non_concordant_count = non_concordant_count, 
+        timeout_count = timeout_count,
+        optimization_results = optimization_results_vec
+    )
 end
 
 
@@ -1127,6 +1271,14 @@ function activity_concordance_analysis(
     trivial_pairs = find_trivially_concordant_pairs(Y_matrix, complex_ids, metabolite_ids)
     @info "Found trivially concordant pairs" n_trivially_concordant = length(trivial_pairs)
 
+    # Initialize concordance matrix and populate trivial relationships early
+    n_complexes = length(complex_ids)
+    complex_idx = Dict(id => idx for (idx, id) in enumerate(complex_ids))
+    concordance_matrix = SparseArrays.spzeros(Int, n_complexes, n_complexes)
+
+    @info "Populating trivial relationships in concordance matrix"
+    populate_trivial_relationships!(concordance_matrix, trivially_balanced, trivial_pairs, complex_idx)
+
     # Set up RNG early for deterministic sampling
     rng = if seed == 0
         Random.GLOBAL_RNG
@@ -1273,6 +1425,7 @@ function activity_concordance_analysis(
             union_sets!(concordance_tracker, first_balanced_idx, balanced_indices[i])
         end
     end
+
 
     # Create filtered activities constraint tree excluding balanced complexes for memory efficiency
     active_complex_ids = [
@@ -1510,8 +1663,8 @@ function activity_concordance_analysis(
         "n_trivial_pairs" => length(trivial_pairs),
         "n_candidate_pairs" => batch_results.pairs_processed,  # Total candidates processed across all chunks
         "n_concordant_found" => total_concordant_from_modules - length(trivial_pairs),  # Non-trivial concordant pairs from modules
-        "n_concordant_opt" => batch_results.concordant_pairs.n_pairs,  # Found via direct optimization testing
-        "n_concordant_inferred" => total_concordant_from_modules - length(trivial_pairs) - batch_results.concordant_pairs.n_pairs,  # Found via transitivity
+        "n_concordant_opt" => batch_results.concordant_count,  # Found via direct optimization testing
+        "n_concordant_inferred" => total_concordant_from_modules - length(trivial_pairs) - batch_results.concordant_count,  # Found via transitivity
         "n_concordant_total" => total_concordant_from_modules,  # All concordant pairs from modules
         "n_non_concordant_pairs" => batch_results.non_concordant_pairs,
         "n_candidates_skipped_by_transitivity" => streaming_filter.pairs_transitivity_concordant_filtered + streaming_filter.pairs_transitivity_non_concordant_filtered,  # Candidates not tested due to transitivity
@@ -1586,6 +1739,10 @@ function activity_concordance_analysis(
 
     @debug "Full concordance analysis statistics" stats
 
+    # Populate discovered concordant relationships in concordance matrix after streaming analysis
+    @info "Populating discovered concordant relationships in concordance matrix"
+    populate_discovered_relationships!(concordance_matrix, concordance_tracker, balanced_complexes)
+
     # Build CompleteConcordanceModel using canonical ordering established earlier
     # complex_ids already canonical from concordance_tracker
     # metabolite_ids already canonical from earlier in function
@@ -1638,83 +1795,15 @@ function activity_concordance_analysis(
     end
 
     # Build coordinate vectors for efficient concordance matrix construction
-    I_concordance = Vector{Int}()
-    J_concordance = Vector{Int}()
-    V_concordance = Vector{Int}()
+    # All concordance relationships are now populated directly in the concordance_matrix
+    # via populate_trivial_relationships! and populate_discovered_relationships!
 
-    # Add trivially concordant pairs
-    for (c1_id, c2_id) in trivial_pairs
-        if haskey(concordance_tracker.id_to_idx, c1_id) && haskey(concordance_tracker.id_to_idx, c2_id)
-            i = concordance_tracker.id_to_idx[c1_id]
-            j = concordance_tracker.id_to_idx[c2_id]
-            # Store in upper triangular form
-            if i < j
-                push!(I_concordance, i)
-                push!(J_concordance, j)
-            else
-                push!(I_concordance, j)
-                push!(J_concordance, i)
-            end
-            push!(V_concordance, Int(Trivially_concordant))
-        end
-    end
-
-    # Add balanced complex pairs
-    balanced_indices = findall(balanced_complexes)
-    for i in 1:length(balanced_indices)
-        for j in (i+1):length(balanced_indices)
-            idx1, idx2 = balanced_indices[i], balanced_indices[j]
-            c1_id = complex_ids[idx1]
-            c2_id = complex_ids[idx2]
-            # Only add if not already trivially concordant
-            if !((c1_id, c2_id) in trivial_pairs || (c2_id, c1_id) in trivial_pairs)
-                push!(I_concordance, idx1)
-                push!(J_concordance, idx2)
-                push!(V_concordance, Int(Balanced))
-            end
-        end
-    end
-
-    # Add regular concordant pairs from modules
-    for module_complexes in values(modules)
-        if length(module_complexes) > 1
-            for i in 1:length(module_complexes)
-                for j in (i+1):length(module_complexes)
-                    c1_id = module_complexes[i]
-                    c2_id = module_complexes[j]
-                    if haskey(concordance_tracker.id_to_idx, c1_id) && haskey(concordance_tracker.id_to_idx, c2_id)
-                        idx1 = concordance_tracker.id_to_idx[c1_id]
-                        idx2 = concordance_tracker.id_to_idx[c2_id]
-
-                        # Check if already classified
-                        is_balanced_pair = balanced_complexes[idx1] && balanced_complexes[idx2]
-                        is_trivially_concordant = (c1_id, c2_id) in trivial_pairs || (c2_id, c1_id) in trivial_pairs
-
-                        if !is_balanced_pair && !is_trivially_concordant
-                            # Ensure upper triangular
-                            if idx1 < idx2
-                                push!(I_concordance, idx1)
-                                push!(J_concordance, idx2)
-                            else
-                                push!(I_concordance, idx2)
-                                push!(J_concordance, idx1)
-                            end
-                            push!(V_concordance, Int(Concordant))
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    # Use the constructor with coordinate vectors - it will handle I_symmetric internally  
+    # Use the constructor with pre-built concordance matrix (more efficient than coordinate vectors)
     complete_model = CompleteConcordanceModel(
         complex_ids,
         reaction_ids,
         Symbol.(metabolite_ids);
-        I_concordance=I_concordance,
-        J_concordance=J_concordance,
-        V_concordance=V_concordance,
+        concordance_matrix=concordance_matrix,  # Pass pre-built matrix
         activity_ranges=activity_ranges,
         concordance_modules=module_mapping,
         interface_reactions=falses(length(reaction_ids)),
@@ -1726,4 +1815,66 @@ function activity_concordance_analysis(
     )
 
     return complete_model
+end
+
+"""
+Helper function to populate trivial relationships in concordance matrix.
+Maintains symmetry and respects hierarchy (trivial > regular).
+"""
+function populate_trivial_relationships!(
+    concordance_matrix::SparseArrays.SparseMatrixCSC{Int,Int},
+    trivially_balanced::Set{Symbol},
+    trivial_pairs::Set{Tuple{Symbol,Symbol}},
+    complex_idx::Dict{Symbol,Int}
+)
+    # Populate trivially balanced complexes on diagonal (value 4)
+    for complex_id in trivially_balanced
+        if haskey(complex_idx, complex_id)
+            idx = complex_idx[complex_id]
+            concordance_matrix[idx, idx] = Int(Trivially_balanced)  # 4
+        end
+    end
+
+    # Populate trivially concordant pairs (value 2, maintain symmetry)
+    for (c1_id, c2_id) in trivial_pairs
+        if haskey(complex_idx, c1_id) && haskey(complex_idx, c2_id)
+            i = complex_idx[c1_id]
+            j = complex_idx[c2_id]
+            concordance_matrix[i, j] = Int(Trivially_concordant)  # 2
+            concordance_matrix[j, i] = Int(Trivially_concordant)  # 2 (symmetry)
+        end
+    end
+end
+
+"""
+Helper function to populate discovered concordant relationships from ConcordanceTracker.
+Respects existing trivial relationships and maintains symmetry.
+"""
+function populate_discovered_relationships!(
+    concordance_matrix::SparseArrays.SparseMatrixCSC{Int,Int},
+    concordance_tracker::ConcordanceTracker,
+    balanced_complexes::BitVector
+)
+    n_complexes = length(balanced_complexes)
+
+    # Populate balanced complexes on diagonal (value 3, only if not already trivially balanced)
+    for i in 1:n_complexes
+        if balanced_complexes[i] && concordance_matrix[i, i] == 0
+            concordance_matrix[i, i] = Int(Balanced)  # 3
+        end
+    end
+
+    # Extract concordant pairs from ConcordanceTracker
+    # Use union-find structure to identify all concordant relationships
+    for i in 1:n_complexes-1
+        for j in i+1:n_complexes
+            if are_concordant(concordance_tracker, i, j)
+                # Only populate if not already set (preserves trivial relationships)
+                if concordance_matrix[i, j] == 0
+                    concordance_matrix[i, j] = Int(Concordant)  # 1
+                    concordance_matrix[j, i] = Int(Concordant)  # 1 (symmetry)
+                end
+            end
+        end
+    end
 end

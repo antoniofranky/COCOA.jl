@@ -356,3 +356,308 @@ function apply_custom_kinetic_analysis!(complete_model::CompleteConcordanceModel
 
     return kinetic_module_count
 end
+
+"""
+Comprehensive validation function for iterative testing of custom upstream algorithm phases.
+Returns detailed validation report for debugging and verification.
+"""
+function validate_custom_upstream_algorithm(complete_model::CompleteConcordanceModel; verbose::Bool=true)
+    @info "Starting comprehensive validation of custom upstream algorithm"
+    
+    validation_results = Dict{String, Any}()
+    
+    # Get test data
+    balanced_complexes = findall(==(0), complete_model.concordance_modules)
+    A_matrix = complete_model.complex_reaction_matrix
+    
+    validation_results["n_balanced"] = length(balanced_complexes)
+    validation_results["n_concordance_modules"] = complete_model.n_concordance_modules
+    validation_results["matrix_size"] = size(A_matrix)
+    
+    verbose && @info "Validation setup" n_balanced=length(balanced_complexes) n_concordance_modules=complete_model.n_concordance_modules matrix_size=size(A_matrix)
+    
+    # Test each concordance module
+    module_results = Dict{Int, Any}()
+    
+    for concordance_module_id in 1:complete_model.n_concordance_modules
+        if concordance_module_id == 0
+            continue
+        end
+        
+        concordance_complexes = findall(==(concordance_module_id), complete_model.concordance_modules)
+        
+        if isempty(concordance_complexes)
+            continue
+        end
+        
+        extended_module = union(balanced_complexes, concordance_complexes)
+        
+        verbose && @info "Testing concordance module $concordance_module_id" n_complexes=length(concordance_complexes) extended_size=length(extended_module)
+        
+        # Phase-by-phase validation
+        phase_results = validate_algorithm_phases(extended_module, A_matrix, verbose)
+        module_results[concordance_module_id] = phase_results
+        
+        # Final algorithm result
+        kinetic_complexes = custom_upstream_algorithm(extended_module, A_matrix)
+        phase_results["final_kinetic_size"] = length(kinetic_complexes)
+        phase_results["kinetic_complexes"] = kinetic_complexes
+        
+        verbose && @info "Module $concordance_module_id result" kinetic_size=length(kinetic_complexes)
+    end
+    
+    validation_results["module_results"] = module_results
+    
+    # Overall summary
+    total_kinetic_complexes = sum(result["final_kinetic_size"] for result in values(module_results))
+    modules_with_kinetic = count(result["final_kinetic_size"] > 0 for result in values(module_results))
+    
+    validation_results["summary"] = (
+        total_modules_tested = length(module_results),
+        modules_with_kinetic = modules_with_kinetic,
+        total_kinetic_complexes = total_kinetic_complexes
+    )
+    
+    @info "Validation complete" summary=validation_results["summary"]
+    
+    return validation_results
+end
+
+"""
+Debug Phase III exit complex detection logic specifically.
+"""
+function debug_exit_complex_detection(current_set::Vector{Int}, A_matrix::SparseArrays.SparseMatrixCSC{Int,Int}; verbose::Bool=true)
+    verbose && @info "Debugging exit complex detection for $(length(current_set)) complexes"
+    
+    exit_complexes_found = Int[]
+    
+    for complex_idx in current_set
+        verbose && @info "Checking complex $complex_idx for exit connections"
+        
+        # Find outgoing reactions where this complex is consumed
+        outgoing_reactions = SparseArrays.findnz(A_matrix[complex_idx, :])[1]
+        
+        exits_to_external = false
+        external_products = Int[]
+        
+        for rxn_idx in outgoing_reactions
+            if A_matrix[complex_idx, rxn_idx] < 0  # This complex is consumed
+                verbose && @info "  Complex $complex_idx is consumed in reaction $rxn_idx"
+                
+                # Check products of this reaction
+                products = SparseArrays.findnz(A_matrix[:, rxn_idx])[1]
+                
+                for product_idx in products
+                    if A_matrix[product_idx, rxn_idx] > 0  # Is a product
+                        if product_idx ∉ current_set  # Product is OUTSIDE our set
+                            verbose && @info "    → Product $product_idx is OUTSIDE current set - EXIT FOUND!"
+                            exits_to_external = true
+                            push!(external_products, product_idx)
+                        else
+                            verbose && @info "    → Product $product_idx is inside current set"
+                        end
+                    end
+                end
+            end
+        end
+        
+        if exits_to_external
+            push!(exit_complexes_found, complex_idx)
+            verbose && @info "  ✓ Complex $complex_idx is an EXIT complex (connects to external: $external_products)"
+        else
+            verbose && @info "  ✗ Complex $complex_idx has no external connections"
+        end
+    end
+    
+    verbose && @info "Phase III debug complete: found $(length(exit_complexes_found)) exit complexes: $exit_complexes_found"
+    
+    return exit_complexes_found
+end
+
+"""
+Debug the terminal component classification logic specifically.
+"""
+function debug_terminal_components(remaining_complexes::Vector{Int}, A_matrix::SparseArrays.SparseMatrixCSC{Int,Int}; verbose::Bool=true)
+    if isempty(remaining_complexes)
+        @info "No complexes to analyze"
+        return
+    end
+    
+    # Get SCCs
+    components = find_strongly_connected_components(remaining_complexes, A_matrix)
+    
+    verbose && @info "Found $(length(components)) strongly connected components"
+    
+    for (i, component) in enumerate(components)
+        verbose && @info "Analyzing component $i with $(length(component)) complexes: $component"
+        
+        # Check each complex in component for outgoing connections
+        outgoing_connections = Dict{Int, Vector{Int}}()
+        
+        for complex_idx in component
+            connections = Int[]
+            
+            # Find outgoing reactions where this complex is consumed
+            reactions = SparseArrays.findnz(A_matrix[complex_idx, :])[1]
+            
+            for rxn_idx in reactions
+                if A_matrix[complex_idx, rxn_idx] < 0  # This complex is a substrate
+                    # Find products of this reaction
+                    products = SparseArrays.findnz(A_matrix[:, rxn_idx])[1]
+                    
+                    for product_idx in products
+                        if A_matrix[product_idx, rxn_idx] > 0 &&  # Is a product
+                           product_idx ∈ remaining_complexes &&   # Is in our remaining set
+                           product_idx ∉ component               # Is NOT in same component
+                            push!(connections, product_idx)
+                        end
+                    end
+                end
+            end
+            
+            outgoing_connections[complex_idx] = connections
+        end
+        
+        # Determine if terminal
+        has_external_connections = any(!isempty(connections) for connections in values(outgoing_connections))
+        is_terminal = !has_external_connections
+        
+        verbose && @info "Component $i analysis" is_terminal=is_terminal outgoing_connections=outgoing_connections
+        
+        if !is_terminal
+            verbose && @info "Component $i is NON-TERMINAL - should be included in kinetic module!"
+        else
+            verbose && @info "Component $i is terminal - correctly excluded"
+        end
+    end
+    
+    return components
+end
+
+"""
+Validate each phase of the upstream algorithm individually.
+"""
+function validate_algorithm_phases(extended_module::Vector{Int}, A_matrix::SparseArrays.SparseMatrixCSC{Int,Int}, verbose::Bool=false)
+    phase_results = Dict{String, Any}()
+    
+    # Initial state
+    current_set = copy(extended_module)
+    phase_results["initial_size"] = length(current_set)
+    
+    # Phase I: Entry complexes validation
+    phase_i_iterations = 0
+    phase_i_total_excluded = Int[]
+    
+    while true
+        phase_i_iterations += 1
+        entry_complexes = find_entry_complexes(current_set, A_matrix)
+        
+        if isempty(entry_complexes)
+            break
+        end
+        
+        verbose && @info "Phase I iteration $phase_i_iterations" entry_found=length(entry_complexes) remaining=length(current_set)
+        
+        append!(phase_i_total_excluded, entry_complexes)
+        current_set = setdiff(current_set, entry_complexes)
+        
+        if isempty(current_set)
+            break
+        end
+    end
+    
+    phase_results["phase_i"] = (
+        iterations = phase_i_iterations,
+        excluded = phase_i_total_excluded,
+        excluded_count = length(phase_i_total_excluded),
+        remaining_after = length(current_set)
+    )
+    
+    verbose && @info "Phase I complete" iterations=phase_i_iterations excluded=length(phase_i_total_excluded) remaining=length(current_set)
+    
+    if isempty(current_set)
+        phase_results["early_termination"] = "phase_i"
+        return phase_results
+    end
+    
+    # Phase II: Non-reactant complexes validation
+    nonreactant = find_nonreactant_complexes(current_set, A_matrix)
+    current_set = setdiff(current_set, nonreactant)
+    
+    phase_results["phase_ii"] = (
+        excluded = nonreactant,
+        excluded_count = length(nonreactant),
+        remaining_after = length(current_set)
+    )
+    
+    verbose && @info "Phase II complete" excluded=length(nonreactant) remaining=length(current_set)
+    
+    if isempty(current_set)
+        phase_results["early_termination"] = "phase_ii"
+        return phase_results
+    end
+    
+    # Phase III: Exit complexes validation
+    phase_iii_iterations = 0
+    phase_iii_total_excluded = Int[]
+    
+    while true
+        phase_iii_iterations += 1
+        exit_complexes = find_exit_complexes(current_set, A_matrix)
+        
+        if isempty(exit_complexes)
+            break
+        end
+        
+        verbose && @info "Phase III iteration $phase_iii_iterations" exit_found=length(exit_complexes) remaining=length(current_set)
+        
+        append!(phase_iii_total_excluded, exit_complexes)
+        current_set = setdiff(current_set, exit_complexes)
+        
+        if isempty(current_set)
+            break
+        end
+    end
+    
+    phase_results["phase_iii"] = (
+        iterations = phase_iii_iterations,
+        excluded = phase_iii_total_excluded,
+        excluded_count = length(phase_iii_total_excluded),
+        remaining_after = length(current_set)
+    )
+    
+    verbose && @info "Phase III complete" iterations=phase_iii_iterations excluded=length(phase_iii_total_excluded) remaining=length(current_set)
+    
+    # Phase IV: Strongly connected components validation
+    phase_iv_complexes = Int[]
+    phase_iv_components = Vector{Int}[]
+    phase_iv_terminal_components = Vector{Int}[]
+    
+    if !isempty(current_set)
+        components = find_strongly_connected_components(current_set, A_matrix)
+        phase_iv_components = components
+        
+        for component in components
+            if !is_terminal_component(component, current_set, A_matrix)
+                append!(phase_iv_complexes, component)
+            else
+                push!(phase_iv_terminal_components, component)
+            end
+        end
+    end
+    
+    phase_results["phase_iv"] = (
+        total_components = length(phase_iv_components),
+        terminal_components = phase_iv_terminal_components,
+        non_terminal_complexes = phase_iv_complexes,
+        non_terminal_count = length(phase_iv_complexes)
+    )
+    
+    verbose && @info "Phase IV complete" total_components=length(phase_iv_components) terminal=length(phase_iv_terminal_components) non_terminal=length(phase_iv_complexes)
+    
+    # Final upstream set (union of Phase III and IV)
+    upstream_set = union(phase_iii_total_excluded, phase_iv_complexes)
+    phase_results["upstream_set_size"] = length(upstream_set)
+    
+    return phase_results
+end

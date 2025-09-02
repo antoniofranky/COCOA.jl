@@ -491,7 +491,10 @@ function CompleteConcordanceModel(
     reaction_ids::Vector{Symbol},
     metabolite_ids::Vector{Symbol};
 
-    # Efficient sparse concordance data (coordinate vectors)
+    # Accept pre-built concordance matrix (more efficient than coordinate vectors)
+    concordance_matrix::Union{Nothing,SparseArrays.SparseMatrixCSC{Int,Int}}=nothing,
+    
+    # Legacy coordinate vector approach (for backward compatibility)
     I_concordance::Vector{Int}=Int[],
     J_concordance::Vector{Int}=Int[],
     V_concordance::Vector{Int}=Int[],
@@ -520,16 +523,26 @@ function CompleteConcordanceModel(
     n_reactions = length(reaction_ids)
     n_metabolites = length(metabolite_ids)
 
-    # Build concordance matrix directly from coordinate vectors (maximum efficiency)
-    if !isempty(I_concordance)
-        # Make symmetric by adding both (i,j) and (j,i) entries
+    # Use pre-built concordance matrix if provided, otherwise build from coordinate vectors
+    if concordance_matrix !== nothing
+        # Pre-built matrix provided - use it directly (most efficient)
+        final_concordance_matrix = concordance_matrix
+    elseif !isempty(I_concordance)
+        # Legacy coordinate vector approach (for backward compatibility)
         I_symmetric = vcat(I_concordance, J_concordance)
         J_symmetric = vcat(J_concordance, I_concordance)
         V_symmetric = vcat(V_concordance, V_concordance)
 
-        concordance_matrix = SparseArrays.sparse(I_symmetric, J_symmetric, V_symmetric, n_complexes, n_complexes)
+        final_concordance_matrix = SparseArrays.sparse(I_symmetric, J_symmetric, V_symmetric, n_complexes, n_complexes)
+        
+        # Add balanced complexes to diagonal for legacy approach
+        balanced_indices = findall(==(0), concordance_modules)
+        for idx in balanced_indices
+            final_concordance_matrix[idx, idx] = Int(Balanced)  # 3
+        end
     else
-        concordance_matrix = SparseArrays.spzeros(Int, n_complexes, n_complexes)
+        # No matrix or coordinate vectors provided - create empty matrix
+        final_concordance_matrix = SparseArrays.spzeros(Int, n_complexes, n_complexes)
     end
 
     # Lambda dict is already in the correct format - no conversion needed
@@ -546,7 +559,7 @@ function CompleteConcordanceModel(
         complex_ids, complex_idx,
         reaction_ids, reaction_idx,
         metabolite_ids, metabolite_idx,
-        concordance_matrix, lambda_dict,
+        final_concordance_matrix, lambda_dict,
         complex_reaction_matrix, complex_metabolite_matrix, reaction_metabolite_matrix,
         acrr_pairs,
         activity_ranges, concordance_modules, kinetic_modules,

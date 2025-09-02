@@ -322,7 +322,7 @@ function process_pair(filter::StreamingCandidateFilter, i::Int, j::Int)::Union{P
             return nothing
         end
 
-        # Skip trivial pairs (optimized Set lookup)
+        # Skip trivial pairs
         if (i, j) in filter.trivial_pairs
             filter.pairs_trivial_filtered += 1
             return nothing
