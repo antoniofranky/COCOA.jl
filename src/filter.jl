@@ -313,29 +313,27 @@ Optimized version with cached data access and reduced allocations.
 function process_pair(filter::StreamingCandidateFilter, i::Int, j::Int)::Union{PairCandidate,Nothing}
     filter.pairs_tested += 1
 
-    # Early filtering checks (fast rejection) with @inbounds for performance
-    @inbounds begin
-        # Cache balanced mask access
-        balanced_mask = filter.balanced
-        if balanced_mask[i] || balanced_mask[j]
-            filter.pairs_balanced_filtered += 1
-            return nothing
-        end
-
-        # Skip trivial pairs
-        if (i, j) in filter.trivial_pairs
-            filter.pairs_trivial_filtered += 1
-            return nothing
-        end
-
-        # Skip early transitivity filtering here - it causes O(n²) overhead
-        # Transitivity filtering moved to after CV check for much better performance
-
-        # Cache complex IDs lookup
-        idx_to_id = filter.idx_to_id
-        c1_id = idx_to_id[i]
-        c2_id = idx_to_id[j]
+    # Early filtering checks (fast rejection) - removed unsafe @inbounds
+    # Cache balanced mask access
+    balanced_mask = filter.balanced
+    if balanced_mask[i] || balanced_mask[j]
+        filter.pairs_balanced_filtered += 1
+        return nothing
     end
+
+    # Skip trivial pairs
+    if (i, j) in filter.trivial_pairs
+        filter.pairs_trivial_filtered += 1
+        return nothing
+    end
+
+    # Skip early transitivity filtering here - it causes O(n²) overhead
+    # Transitivity filtering moved to after CV check for much better performance
+
+    # Cache complex IDs lookup
+    idx_to_id = filter.idx_to_id
+    c1_id = idx_to_id[i]
+    c2_id = idx_to_id[j]
 
     # Cache samples tree access
     samples_tree = filter.samples_tree
