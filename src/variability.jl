@@ -29,7 +29,6 @@ function activity_variability_analysis(
     optimizer,
     settings=[],
     workers=D.workers(),
-    solver_tolerance::Float64=1e-6,
     output=nothing,  # Allow custom output function
     output_type=nothing,  # Allow custom output type
     return_warmup_points::Bool=false  # Control whether to process warmup points

@@ -1450,7 +1450,7 @@ function activity_concordance_analysis(
     # Cache lookups for better performance
     id_to_idx = concordance_tracker.id_to_idx
 
-    @inbounds for (c1_id, c2_id) in trivial_pairs
+    for (c1_id, c2_id) in trivial_pairs
         if haskey(id_to_idx, c1_id) && haskey(id_to_idx, c2_id)
             c1_idx = id_to_idx[c1_id]
             c2_idx = id_to_idx[c2_id]
