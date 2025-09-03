@@ -1296,7 +1296,6 @@ function activity_concordance_analysis(
         optimizer=optimizer,
         settings=settings,
         workers=workers,
-        solver_tolerance=solver_tolerance,
         output=ava_output_func,
         output_type=Tuple{Float64,Vector{Float64}},
         return_warmup_points=true
