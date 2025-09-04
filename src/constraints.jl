@@ -184,11 +184,59 @@ function extract_complexes_from_constraints(
 end
 
 """
+Extract bounds from a C constraint.
+Returns (lower_bound, upper_bound) tuple.
+"""
+function extract_bound_from_constraint(constraint)
+    if hasfield(typeof(constraint), :bound)
+        bound = constraint.bound
+
+        if isa(bound, C.Between)
+            return (bound.lower, bound.upper)
+        elseif isa(bound, C.EqualTo)
+            return (bound.equal_to, bound.equal_to)
+        elseif isa(bound, C.GreaterThan)
+            return (bound.bound, Inf)
+        elseif isa(bound, C.LessThan)
+            return (-Inf, bound.bound)
+        else
+            @debug "Unknown bound type: $(typeof(bound))"
+            return (-Inf, Inf)  # Default to unbounded
+        end
+    else
+        @debug "Constraint has no bound field"
+        return (-Inf, Inf)  # Default to unbounded
+    end
+end
+
+"""
+Check if a single direction is blocked (has zero bounds).
+"""
+function is_direction_blocked(bounds::Tuple{Float64,Float64})
+    lower, upper = bounds
+    # Direction blocked if both bounds are zero (within tolerance)
+    return abs(lower) < 1e-10 && abs(upper) < 1e-10
+end
+
+"""
+Check if a reaction is completely blocked (both forward and reverse directions have zero bounds).
+"""
+function is_reaction_blocked(forward_bounds::Tuple{Float64,Float64}, reverse_bounds::Tuple{Float64,Float64})
+    # Both directions blocked if both have bounds [0,0] (within tolerance)
+    forward_blocked = is_direction_blocked(forward_bounds)
+    reverse_blocked = is_direction_blocked(reverse_bounds)
+
+    return forward_blocked && reverse_blocked
+end
+
+"""
 $(TYPEDSIGNATURES)
 
 Extract complexes from split constraint system where reactions are decomposed into 
 forward and reverse elementary steps. This respects the paper's requirement that
 reversible reactions be split into irreversible ones for kinetic analysis.
+
+Only includes reactions that have non-zero bounds (i.e., are not completely blocked).
 """
 function extract_complexes_from_split_constraints(
     model::AbstractFBCModels.AbstractFBCModel,
@@ -216,6 +264,11 @@ function extract_complexes_from_split_constraints(
         reaction_map[id] = i
     end
 
+    # Counters for debugging
+    total_reactions_checked = 0
+    excluded_reactions_count = 0
+    processed_reactions_count = 0
+
     # Pre-allocate temporary vectors
     substrate_mets = Vector{Tuple{Symbol,Float64}}()
     product_mets = Vector{Tuple{Symbol,Float64}}()
@@ -233,6 +286,21 @@ function extract_complexes_from_split_constraints(
             continue
         end
 
+        total_reactions_checked += 1
+
+        # Check if both forward and reverse directions have zero bounds (not part of the model)
+        forward_bounds = extract_bound_from_constraint(forward_flux_vars[rxn_symbol])
+        reverse_bounds = extract_bound_from_constraint(reverse_flux_vars[rxn_symbol])
+
+        if is_reaction_blocked(forward_bounds, reverse_bounds)
+            @info "Excluding reaction not in model: $rxn_id (both directions have zero bounds)"
+            excluded_reactions_count += 1
+            continue  # This reaction is not part of the model at all
+        end
+
+        processed_reactions_count += 1
+        @debug "Processing reaction: $rxn_id (forward: $forward_bounds, reverse: $reverse_bounds)"
+
         # Clear and reuse pre-allocated vectors
         empty!(substrate_mets)
         empty!(product_mets)
@@ -246,9 +314,9 @@ function extract_complexes_from_split_constraints(
             end
         end
 
-        # For split constraints, each reaction appears in both forward and reverse collections
-        # We need to track contributions to both directions using the original reaction symbol
-
+        # For split constraints, process the reaction normally
+        # The constraint system will handle directional limitations through bounds
+        
         # Process substrate side for forward reaction (consumption)
         if !isempty(substrate_mets)
             sort!(substrate_mets, by=x -> x[1])
@@ -278,10 +346,6 @@ function extract_complexes_from_split_constraints(
             # For forward direction, products are produced (positive contribution)
             reaction_contribs[rxn_symbol] = get(reaction_contribs, rxn_symbol, 0.0) + 1.0
         end
-
-        # Note: For split constraints, we only need to process each reaction once
-        # The forward and reverse flux variables in the constraint system will handle
-        # the directional contributions automatically through the optimization
     end
 
     # Build final MetabolicComplex structs
@@ -296,6 +360,13 @@ function extract_complexes_from_split_constraints(
         complex_id = generate_complex_id(canonical_mets)
         complexes[complex_id] = MetabolicComplex(complex_id, canonical_mets, reaction_contribs)
     end
+
+    @info "Complex extraction complete" (
+        total_reactions_checked=total_reactions_checked,
+        excluded_reactions_not_in_model=excluded_reactions_count,  
+        reactions_processed=processed_reactions_count,
+        complexes_created=length(complexes)
+    )
 
     return complexes
 end

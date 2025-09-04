@@ -82,11 +82,11 @@ function extract_network_matrices_from_constraints(constraints, model::AbstractF
     reaction_names = get_reaction_names_from_constraints(constraints)
     reaction_to_idx = Dict(rxn => i for (i, rxn) in enumerate(reaction_names))
 
-    # Build S matrix from flux_stoichiometry constraints using universal mapping
-    S_matrix, metabolite_names = build_S_matrix_from_constraints(constraints)
+    # Build A matrix from complexes using universal mapping approach first to get feasible reactions
+    A_matrix, complexes_vec, complex_to_idx, feasible_reaction_names = build_A_matrix_from_complexes(complexes_dict, constraints)
 
-    # Build A matrix from complexes using universal mapping approach  
-    A_matrix, complexes_vec, complex_to_idx = build_A_matrix_from_complexes(complexes_dict, constraints)
+    # Build S matrix using the same feasible reaction names for consistency
+    S_matrix, metabolite_names = build_S_matrix_from_constraints(constraints, feasible_reaction_names)
 
     # Build Y matrix (metabolites × complexes) from complex metabolite data
     n_metabolites = length(metabolite_names)
@@ -107,30 +107,34 @@ function extract_network_matrices_from_constraints(constraints, model::AbstractF
         end
     end
 
+    # Create reaction_to_idx for feasible reactions only
+    feasible_reaction_to_idx = Dict(rxn => i for (i, rxn) in enumerate(feasible_reaction_names))
+    
     return (
         Y_matrix=Y_matrix,
         A_matrix=A_matrix,
         metabolite_names=metabolite_names,
-        reaction_names=reaction_names,
+        reaction_names=feasible_reaction_names,
         complex_to_idx=complex_to_idx,
         metabolite_to_idx=metabolite_to_idx,
-        reaction_to_idx=reaction_to_idx
+        reaction_to_idx=feasible_reaction_to_idx
     )
 end
 
 """
 Build S matrix (metabolites × reactions) from flux_stoichiometry constraints.
 Uses universal mapping for consistency with A matrix construction.
+Optionally accepts feasible_reaction_names to filter out infeasible reactions.
 """
-function build_S_matrix_from_constraints(constraints)
+function build_S_matrix_from_constraints(constraints, feasible_reaction_names=nothing)
     # Get the balance constraints
     balance_constraints = haskey(constraints, :balance) ? constraints.balance : constraints
 
     # Extract metabolite names from flux_stoichiometry keys
     metabolite_names = collect(string.(keys(balance_constraints.flux_stoichiometry)))
 
-    # Use universal mapping to get reaction names
-    reaction_names = get_reaction_names_from_constraints(constraints)
+    # Use feasible reaction names if provided, otherwise use all reactions
+    reaction_names = feasible_reaction_names !== nothing ? feasible_reaction_names : get_reaction_names_from_constraints(constraints)
     reaction_to_idx = Dict(rxn => i for (i, rxn) in enumerate(reaction_names))
 
     # Create temporary storage for reactions and coefficients
@@ -201,8 +205,85 @@ function findfirst_reaction_for_variable(var_idx, constraints, reaction_names, r
 end
 
 """
+Extract bounds from a ConstraintTrees constraint.
+Returns (lower_bound, upper_bound) tuple.
+"""
+function extract_bound_from_constraint_kinetic(constraint)
+    if hasfield(typeof(constraint), :bound)
+        bound = constraint.bound
+
+        if isa(bound, C.Between)
+            return (bound.lower, bound.upper)
+        elseif isa(bound, C.EqualTo)
+            return (bound.equal_to, bound.equal_to)
+        elseif isa(bound, C.GreaterThan)
+            return (bound.bound, Inf)
+        elseif isa(bound, C.LessThan)
+            return (-Inf, bound.bound)
+        else
+            @debug "Unknown bound type: $(typeof(bound))"
+            return (-Inf, Inf)  # Default to unbounded
+        end
+    else
+        @debug "Constraint has no bound field"
+        return (-Inf, Inf)  # Default to unbounded
+    end
+end
+
+"""
+Check if a direction is blocked (has zero bounds).
+"""
+function is_direction_blocked_kinetic(bounds::Tuple{Float64,Float64})
+    lower, upper = bounds
+    # Direction blocked if both bounds are zero (within tolerance)
+    return abs(lower) < 1e-10 && abs(upper) < 1e-10
+end
+
+"""
+Check if a specific reaction direction is feasible (has non-zero bounds).
+"""
+function is_reaction_direction_feasible(constraint_rxn_name::String, constraints)
+    # Extract base reaction name and direction
+    if endswith(constraint_rxn_name, "_forward")
+        base_rxn_name = constraint_rxn_name[1:end-8]  # Remove "_forward"
+        direction = :forward
+    elseif endswith(constraint_rxn_name, "_reverse")
+        base_rxn_name = constraint_rxn_name[1:end-8]  # Remove "_reverse"
+        direction = :reverse
+    else
+        # Non-split reaction - assume feasible
+        return true
+    end
+
+    base_rxn_symbol = Symbol(base_rxn_name)
+
+    # Check the appropriate constraint direction
+    try
+        if direction == :forward && haskey(constraints, :balance) && haskey(constraints.balance, :fluxes_forward)
+            if haskey(constraints.balance.fluxes_forward, base_rxn_symbol)
+                bounds = extract_bound_from_constraint_kinetic(constraints.balance.fluxes_forward[base_rxn_symbol])
+                return !is_direction_blocked_kinetic(bounds)
+            end
+        elseif direction == :reverse && haskey(constraints, :balance) && haskey(constraints.balance, :fluxes_reverse)
+            if haskey(constraints.balance.fluxes_reverse, base_rxn_symbol)
+                bounds = extract_bound_from_constraint_kinetic(constraints.balance.fluxes_reverse[base_rxn_symbol])
+                return !is_direction_blocked_kinetic(bounds)
+            end
+        end
+
+        # If we can't find the constraint, assume it's feasible
+        return true
+
+    catch e
+        @debug "Error checking bounds for $constraint_rxn_name: $e"
+        return true  # Default to feasible if we can't check
+    end
+end
+
+"""
 Build A matrix (complexes × reactions) using universal reaction mapping.
 Uses the constraint-based mapping system for consistency.
+Now excludes reaction directions with zero bounds from the network structure.
 """
 function build_A_matrix_from_complexes(complexes_dict, constraints)
     complexes_vec = collect(Base.values(complexes_dict))
@@ -210,7 +291,6 @@ function build_A_matrix_from_complexes(complexes_dict, constraints)
 
     # Get reaction names from constraints using universal mapping
     reaction_names = get_reaction_names_from_constraints(constraints)
-    n_reactions = length(reaction_names)
     reaction_to_idx = Dict(rxn => i for (i, rxn) in enumerate(reaction_names))
 
     # Get the reaction name mapping for base → constraint name conversion
@@ -224,10 +304,23 @@ function build_A_matrix_from_complexes(complexes_dict, constraints)
         end
     end
 
-    # Storage for sparse matrix construction
+    # Create feasibility lookup for efficient checking
+    feasible_reaction_set = Set{String}()
+    excluded_count = 0
+    for reaction_name in reaction_names
+        if is_reaction_direction_feasible(reaction_name, constraints)
+            push!(feasible_reaction_set, reaction_name)
+        else
+            excluded_count += 1
+        end
+    end
+
+    # Storage for sparse matrix construction and feasible reaction tracking
     complex_indices = Int[]
     reaction_indices = Int[]
     coefficients = Int8[]
+    feasible_reactions = String[]  # Build this list as we process
+    feasible_reaction_to_idx = Dict{String,Int}()
 
     # Process each complex's reaction contributions
     for (complex_idx, complex) in enumerate(complexes_vec)
@@ -240,11 +333,18 @@ function build_A_matrix_from_complexes(complexes_dict, constraints)
                     constraint_rxn_names = mapping.base_to_constraint[base_rxn_name]
 
                     for constraint_rxn_name in constraint_rxn_names
-                        rxn_idx = get(reaction_to_idx, constraint_rxn_name, nothing)
-
-                        if rxn_idx !== nothing
+                        # Only process if this reaction is feasible
+                        if constraint_rxn_name in feasible_reaction_set
+                            # Add to feasible reaction list if not already present
+                            if !haskey(feasible_reaction_to_idx, constraint_rxn_name)
+                                push!(feasible_reactions, constraint_rxn_name)
+                                feasible_reaction_to_idx[constraint_rxn_name] = length(feasible_reactions)
+                            end
+                            
+                            feasible_rxn_idx = feasible_reaction_to_idx[constraint_rxn_name]
+                            
                             push!(complex_indices, complex_idx)
-                            push!(reaction_indices, rxn_idx)
+                            push!(reaction_indices, feasible_rxn_idx)
 
                             # Handle split reaction sign logic
                             if endswith(constraint_rxn_name, "_forward")
@@ -266,10 +366,12 @@ function build_A_matrix_from_complexes(complexes_dict, constraints)
         end
     end
 
-    # Build sparse A matrix
-    A_matrix = SparseArrays.sparse(complex_indices, reaction_indices, coefficients, n_complexes, n_reactions)
+    # Build sparse A matrix with correct dimensions (only feasible reactions)
+    n_feasible_reactions = length(feasible_reactions)
+    A_matrix = SparseArrays.sparse(complex_indices, reaction_indices, coefficients, n_complexes, n_feasible_reactions)
 
-    return A_matrix, complexes_vec, complex_to_idx_map
+    # Return feasible reaction names instead of all reaction names
+    return A_matrix, complexes_vec, complex_to_idx_map, feasible_reactions
 end
 
 """
@@ -676,41 +778,41 @@ Debug version of upstream algorithm that shows what happens at each phase.
 """
 function debug_upstream_algorithm(complex_indices::Vector{Int}, A_matrix::SparseArrays.SparseMatrixCSC)
     println("Starting upstream algorithm with $(length(complex_indices)) complexes")
-    
+
     # Phase I: Exclusion of entry complexes (autonomous property)
     C1 = phase_i_exclude_entry_complexes(complex_indices, A_matrix)
     println("Phase I: $(length(complex_indices)) → $(length(C1)) complexes")
-    
+
     if isempty(C1)
         println("Phase I eliminated all complexes - stopping")
         return Int[]
     end
-    
+
     # Phase II: Remove complexes with no outgoing connections from the complex itself
     C2 = phase_ii_exclude_no_outgoing(C1, A_matrix)
     println("Phase II: $(length(C1)) → $(length(C2)) complexes")
-    
+
     if isempty(C2)
         println("Phase II eliminated all complexes - stopping")
         return Int[]
     end
-    
+
     # Phase III: Exclusion of exit complexes (complexes with outgoing connections from the module)
     C3, phase_III_complexes = phase_iii_exclude_exit_complexes(C2, A_matrix)
     println("Phase III: $(length(C2)) → $(length(C3)) core + $(length(phase_III_complexes)) exit complexes")
-    
+
     # Phase IV: Exclude terminal strong linkage classes from remaining complexes
     phase_IV_complexes = Int[]
     if !isempty(C3)
         println("Phase IV debug: Analyzing $(length(C3)) complexes")
-        
+
         # Debug strong linkage classes
         strong_linkage_classes = find_strong_linkage_classes(C3, A_matrix)
         println("  Found $(length(strong_linkage_classes)) strong linkage classes")
-        
+
         for (i, class_complexes) in enumerate(strong_linkage_classes)
             println("  Class $i: $(length(class_complexes)) complexes")
-            
+
             # Check connections to other classes
             connections_found = false
             for complex_idx in class_complexes
@@ -723,19 +825,23 @@ function debug_upstream_algorithm(complex_indices::Vector{Int}, A_matrix::Sparse
                             break
                         end
                     end
-                    if connections_found break end
+                    if connections_found
+                        break
+                    end
                 end
-                if connections_found break end
+                if connections_found
+                    break
+                end
             end
             println("    Connections to other classes: $connections_found")
         end
-        
+
         phase_IV_complexes = phase_iv_exclude_terminal_complexes(C3, A_matrix)
         println("Phase IV: $(length(C3)) → $(length(phase_IV_complexes)) nonterminal complexes")
     else
         println("Phase III eliminated all complexes - Phase IV has nothing to process")
     end
-    
+
     return phase_IV_complexes
 end
 

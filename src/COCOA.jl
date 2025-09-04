@@ -63,6 +63,7 @@ import Distributed as D
 import JLD2
 import HiGHS
 import Graphs
+import LinearAlgebra
 
 using DocStringExtensions
 

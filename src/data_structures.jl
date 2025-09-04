@@ -449,7 +449,7 @@ mutable struct CompleteConcordanceModel
     metabolite_idx::Dict{Symbol,Int}
 
     # === SYMMETRIC CONCORDANCE DATA ===
-    concordance_matrix::SparseArrays.SparseMatrixCSC{Int,Int}
+    concordance_matrix::LinearAlgebra.UpperTriangular{Int,SparseArrays.SparseMatrixCSC{Int,Int}}
     lambda_dict::Dict{Tuple{Int,Int},Float64}
 
     # === ASYMMETRIC STRUCTURAL DATA (regular sparse) ===
@@ -492,8 +492,8 @@ function CompleteConcordanceModel(
     metabolite_ids::Vector{Symbol};
 
     # Accept pre-built concordance matrix (more efficient than coordinate vectors)
-    concordance_matrix::Union{Nothing,SparseArrays.SparseMatrixCSC{Int,Int}}=nothing,
-    
+    concordance_matrix::Union{Nothing,SparseArrays.SparseMatrixCSC{Int,Int},LinearAlgebra.UpperTriangular{Int,SparseArrays.SparseMatrixCSC{Int,Int}}}=nothing,
+
     # Legacy coordinate vector approach (for backward compatibility)
     I_concordance::Vector{Int}=Int[],
     J_concordance::Vector{Int}=Int[],
@@ -511,7 +511,10 @@ function CompleteConcordanceModel(
     # Structural matrices
     complex_reaction_matrix=SparseArrays.spzeros(Int, length(complex_ids), length(reaction_ids)),
     complex_metabolite_matrix=SparseArrays.spzeros(Float64, length(complex_ids), length(metabolite_ids)),
-    reaction_metabolite_matrix=SparseArrays.spzeros(Float64, length(reaction_ids), length(metabolite_ids))
+    reaction_metabolite_matrix=SparseArrays.spzeros(Float64, length(reaction_ids), length(metabolite_ids)),
+
+    # Statistics dictionary
+    stats=Dict{String,Any}()
 )
 
     # Build index dictionaries (following AbstractFBCModels pattern)
@@ -525,24 +528,31 @@ function CompleteConcordanceModel(
 
     # Use pre-built concordance matrix if provided, otherwise build from coordinate vectors
     if concordance_matrix !== nothing
-        # Pre-built matrix provided - use it directly (most efficient)
-        final_concordance_matrix = concordance_matrix
+        # Pre-built matrix provided - ensure it's UpperTriangular
+        if concordance_matrix isa LinearAlgebra.UpperTriangular
+            final_concordance_matrix = concordance_matrix
+        else
+            final_concordance_matrix = LinearAlgebra.UpperTriangular(concordance_matrix)
+        end
     elseif !isempty(I_concordance)
         # Legacy coordinate vector approach (for backward compatibility)
         I_symmetric = vcat(I_concordance, J_concordance)
         J_symmetric = vcat(J_concordance, I_concordance)
         V_symmetric = vcat(V_concordance, V_concordance)
 
-        final_concordance_matrix = SparseArrays.sparse(I_symmetric, J_symmetric, V_symmetric, n_complexes, n_complexes)
-        
+        sparse_matrix = SparseArrays.sparse(I_symmetric, J_symmetric, V_symmetric, n_complexes, n_complexes)
+
         # Add balanced complexes to diagonal for legacy approach
         balanced_indices = findall(==(0), concordance_modules)
         for idx in balanced_indices
-            final_concordance_matrix[idx, idx] = Int(Balanced)  # 3
+            sparse_matrix[idx, idx] = Int(Balanced)  # 3
         end
+
+        final_concordance_matrix = LinearAlgebra.UpperTriangular(sparse_matrix)
     else
-        # No matrix or coordinate vectors provided - create empty matrix
-        final_concordance_matrix = SparseArrays.spzeros(Int, n_complexes, n_complexes)
+        # No matrix or coordinate vectors provided - create empty UpperTriangular matrix
+        sparse_matrix = SparseArrays.spzeros(Int, n_complexes, n_complexes)
+        final_concordance_matrix = LinearAlgebra.UpperTriangular(sparse_matrix)
     end
 
     # Lambda dict is already in the correct format - no conversion needed
@@ -552,7 +562,7 @@ function CompleteConcordanceModel(
     acrr_pairs = unique(canonical_acrr_pairs)
 
     # Count modules
-    n_concordance_modules = length(unique(filter(x -> x > 0, concordance_modules)))
+    n_concordance_modules = length(unique(filter(x -> x >= 0, concordance_modules)))
     n_kinetic_modules = length(unique(filter(x -> x > 0, kinetic_modules)))
 
     return CompleteConcordanceModel(
@@ -570,7 +580,7 @@ function CompleteConcordanceModel(
         0,  # n_balanced (will be set elsewhere) 
         0,  # n_trivially_balanced (will be set elsewhere)
         n_concordance_modules, n_kinetic_modules,
-        Dict{String,Any}()
+        stats
     )
 end
 

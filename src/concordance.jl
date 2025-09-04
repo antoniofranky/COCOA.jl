@@ -16,16 +16,24 @@ This module contains:
 
 """
 Mutable container for batch counts with concrete types.
+Tracks all optimization termination status categories.
 """
 mutable struct MutableCounts
     concordant::Int
     non_concordant::Int
     timeout::Int
+    infeasible::Int           # INFEASIBLE, LOCALLY_INFEASIBLE, ALMOST_INFEASIBLE
+    unbounded::Int           # DUAL_INFEASIBLE, NORM_LIMIT, ALMOST_DUAL_INFEASIBLE  
+    infeasible_or_unbounded::Int  # INFEASIBLE_OR_UNBOUNDED
+    resource_limit::Int      # ITERATION_LIMIT, MEMORY_LIMIT, NODE_LIMIT, etc.
+    numerical_error::Int     # NUMERICAL_ERROR, INVALID_MODEL, INVALID_OPTION
+    other_error::Int         # OTHER_ERROR, INTERRUPTED, etc.
     transitive::Int
     skipped::Int
+    total_optimizations::Int  # Total number of optimization attempts
 end
 
-MutableCounts() = MutableCounts(0, 0, 0, 0, 0)
+MutableCounts() = MutableCounts(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 
 """
 Configuration for batch processing with concrete types.
@@ -43,8 +51,15 @@ struct BatchOptimizationResult
     concordant_pairs::SparseConcordantPairs
     non_concordant::Int
     timeout::Int
+    infeasible::Int
+    unbounded::Int
+    infeasible_or_unbounded::Int
+    resource_limit::Int
+    numerical_error::Int
+    other_error::Int
     transitive::Int
     skipped::Int
+    total_optimizations::Int
     optimization_results::Vector{Tuple{Int,Int,Symbol,Float64}}
 end
 
@@ -59,6 +74,7 @@ struct BatchResultAccumulator
     optimization_results::Vector{Tuple{Int,Int,Symbol,Float64}}
     temp_pairs::Vector{Tuple{Int,Int}}
     temp_values::Vector{Float64}
+    total_optimizations::Int
 end
 
 function BatchResultAccumulator(n_complexes::Int)
@@ -67,7 +83,8 @@ function BatchResultAccumulator(n_complexes::Int)
         MutableCounts(),
         Vector{Tuple{Int,Int,Symbol,Float64}}(),
         Vector{Tuple{Int,Int}}(),
-        Vector{Float64}()
+        Vector{Float64}(),
+        0
     )
 end
 
@@ -84,6 +101,12 @@ function accumulate_results!(
     acc.counts.concordant += counts.concordant
     acc.counts.non_concordant += counts.non_concordant
     acc.counts.timeout += counts.timeout
+    acc.counts.infeasible += counts.infeasible
+    acc.counts.unbounded += counts.unbounded
+    acc.counts.infeasible_or_unbounded += counts.infeasible_or_unbounded
+    acc.counts.resource_limit += counts.resource_limit
+    acc.counts.numerical_error += counts.numerical_error
+    acc.counts.other_error += counts.other_error
     acc.counts.transitive += counts.transitive
     acc.counts.skipped += counts.skipped
 
@@ -100,10 +123,18 @@ Reset accumulator for reuse with efficient buffer clearing.
 """
 function reset!(acc::BatchResultAccumulator)::Nothing
     clear!(acc.concordant_pairs)
+    acc.counts.concordant = 0
     acc.counts.non_concordant = 0
     acc.counts.timeout = 0
+    acc.counts.infeasible = 0
+    acc.counts.unbounded = 0
+    acc.counts.infeasible_or_unbounded = 0
+    acc.counts.resource_limit = 0
+    acc.counts.numerical_error = 0
+    acc.counts.other_error = 0
     acc.counts.transitive = 0
     acc.counts.skipped = 0
+    acc.counts.total_optimizations = 0
     empty!(acc.optimization_results)
     empty!(acc.temp_pairs)
     empty!(acc.temp_values)
@@ -248,6 +279,31 @@ function get_tolerance_attribute(model, attr::String)::Float64
     end
 end
 
+"""
+Categorize JuMP termination status into failure mode categories.
+Returns symbol indicating the category of termination status.
+"""
+@inline function categorize_termination_status(status)::Symbol
+    if status in (J.OPTIMAL, J.LOCALLY_SOLVED, J.ALMOST_OPTIMAL)
+        return :success
+    elseif status == J.TIME_LIMIT
+        return :timeout
+    elseif status in (J.INFEASIBLE, J.LOCALLY_INFEASIBLE, J.ALMOST_INFEASIBLE)
+        return :infeasible
+    elseif status in (J.DUAL_INFEASIBLE, J.NORM_LIMIT, J.ALMOST_DUAL_INFEASIBLE)
+        return :unbounded
+    elseif status == J.INFEASIBLE_OR_UNBOUNDED
+        return :infeasible_or_unbounded
+    elseif status in (J.ITERATION_LIMIT, J.MEMORY_LIMIT, J.NODE_LIMIT, J.SOLUTION_LIMIT, J.OBJECTIVE_LIMIT, J.OTHER_LIMIT)
+        return :resource_limit
+    elseif status in (J.NUMERICAL_ERROR, J.INVALID_MODEL, J.INVALID_OPTION)
+        return :numerical_error
+    else  # J.OTHER_ERROR, J.INTERRUPTED, J.OPTIMIZE_NOT_CALLED, J.SLOW_PROGRESS
+        @debug "Other error encountered" status = status
+        return :other_error
+    end
+end
+
 # ========================================================================================
 # Batch Processing State Management  
 # ========================================================================================
@@ -343,8 +399,15 @@ function process_full_batch!(
         concordant_count,
         batch_result.non_concordant,
         batch_result.timeout,
+        batch_result.infeasible,
+        batch_result.unbounded,
+        batch_result.infeasible_or_unbounded,
+        batch_result.resource_limit,
+        batch_result.numerical_error,
+        batch_result.other_error,
         batch_result.transitive,
-        batch_result.skipped
+        batch_result.skipped,
+        batch_result.total_optimizations
     )
 
     # Accumulate results
@@ -409,7 +472,14 @@ function execute_batch_optimization!(
         concordant_pairs,
         batch_counts.non_concordant_count,
         batch_counts.timeout_count,
+        batch_counts.infeasible_count,
+        batch_counts.unbounded_count,
+        batch_counts.infeasible_or_unbounded_count,
+        batch_counts.resource_limit_count,
+        batch_counts.numerical_error_count,
+        batch_counts.other_error_count,
         0, 0,  # transitive counts handled elsewhere  
+        batch_counts.total_optimizations,
         batch_counts.optimization_results
     )
 end
@@ -448,14 +518,14 @@ Optimized for zero-allocation incremental updates.
 mutable struct PairConcordanceState
     positive_min::Float64
     positive_max::Float64
-    negative_min::Float64  
+    negative_min::Float64
     negative_max::Float64
     has_positive::Bool
     has_negative::Bool
     has_timeout::Bool
     is_concordant::Bool
     reference_lambda::Float64
-    
+
     PairConcordanceState() = new(NaN, NaN, NaN, NaN, false, false, false, true, NaN)
 end
 
@@ -474,7 +544,7 @@ Returns true if pair is still potentially concordant, false if definitely non-co
     # Early exit if already failed or timeout
     timeout && (state.has_timeout = true; state.is_concordant = false; return false)
     !state.is_concordant && return false
-    
+
     # Update min/max values for this direction
     if direction == :positive
         if dir_multiplier == -1
@@ -491,7 +561,7 @@ Returns true if pair is still potentially concordant, false if definitely non-co
         end
         state.has_negative = true
     end
-    
+
     # Check concordance for completed directions
     if direction == :positive && !isnan(state.positive_min) && !isnan(state.positive_max)
         if abs(state.positive_min - state.positive_max) > concordance_tolerance
@@ -518,7 +588,7 @@ Returns true if pair is still potentially concordant, false if definitely non-co
             return false
         end
     end
-    
+
     return state.is_concordant
 end
 
@@ -528,45 +598,45 @@ Eliminates all intermediate data structures and processes in single pass.
 """
 function process_solver_results_streaming!(
     solver_results,
-    batch_pairs::Vector{PairCandidate}, 
+    batch_pairs::Vector{PairCandidate},
     concordance_tracker,
     concordance_tolerance::Float64
 )
     # Pre-allocate lookup for O(1) pair finding
     pair_lookup = Dict{Tuple{Symbol,Symbol},Int}()
     idx_to_id = concordance_tracker.idx_to_id
-    
+
     for (i, candidate) in enumerate(batch_pairs)
         c1_id = idx_to_id[candidate.c1_idx]
         c2_id = idx_to_id[candidate.c2_idx]
         pair_lookup[(c1_id, c2_id)] = i
     end
-    
+
     # Minimal state tracking - O(n) memory
     pair_states = [PairConcordanceState() for _ in 1:length(batch_pairs)]
-    
+
     # Process each solver result immediately - zero intermediate storage
     for result in solver_results
         c1_id, c2_id, direction, dir_multiplier, value, timeout = result
         pair_idx = get(pair_lookup, (c1_id, c2_id), 0)
         pair_idx == 0 && continue
-        
+
         # Update concordance state directly - no allocations
         update_pair_concordance!(pair_states[pair_idx], direction, dir_multiplier, value, timeout, concordance_tolerance)
     end
-    
+
     # Final concordance decision and tracker update
     concordant_count = 0
     non_concordant_count = 0
     timeout_count = 0
-    
+
     for (i, state) in enumerate(pair_states)
         candidate = batch_pairs[i]
-        
+
         if state.has_timeout
             timeout_count += 1
         end
-        
+
         if state.is_concordant
             union_sets!(concordance_tracker, candidate.c1_idx, candidate.c2_idx)
             concordant_count += 1
@@ -575,7 +645,7 @@ function process_solver_results_streaming!(
             non_concordant_count += 1
         end
     end
-    
+
     return concordant_count, non_concordant_count, timeout_count
 end
 
@@ -645,7 +715,14 @@ function build_final_results(state::BatchProcessingState)
         skipped_by_transitivity=state.accumulator.counts.skipped,
         transitive_pairs=state.accumulator.counts.transitive,
         timeout_pairs=state.accumulator.counts.timeout,
-        optimization_results=opt_results_dict
+        infeasible_pairs=state.accumulator.counts.infeasible,
+        unbounded_pairs=state.accumulator.counts.unbounded,
+        infeasible_or_unbounded_pairs=state.accumulator.counts.infeasible_or_unbounded,
+        resource_limit_pairs=state.accumulator.counts.resource_limit,
+        numerical_error_pairs=state.accumulator.counts.numerical_error,
+        other_error_pairs=state.accumulator.counts.other_error,
+        optimization_results=opt_results_dict,
+        total_optimizations=state.accumulator.total_optimizations
     )
 end
 
@@ -795,14 +872,34 @@ function process_concordance_batch(
             om = direction == :positive ? models_cache.positive : models_cache.negative
 
             try
+                # Debug: Check if activities exist for both complexes
+                if !haskey(constraints.activities, c1_id)
+                    @debug "Missing c1_id in constraints.activities" c1_id
+                    return (c1_id, c2_id, direction, dir_multiplier, NaN, J.OPTIMIZE_NOT_CALLED)
+                end
+                if !haskey(constraints.activities, c2_id)
+                    @debug "Missing c2_id in constraints.activities" c2_id
+                    return (c1_id, c2_id, direction, dir_multiplier, NaN, J.OPTIMIZE_NOT_CALLED)
+                end
+
                 # Set c2 constraint to 1.0 and optimize c1
+                @debug "About to set constraint for" c2_id
                 c2_constraint = J.@constraint(om, c2_constraint,
                     C.substitute(constraints.activities[c2_id].value, om[:x]) == 1.0)
+                @debug "Constraint set successfully"
 
+                @debug "About to set objective for" c1_id dir_multiplier
                 J.@objective(om, J.MAX_SENSE,
                     C.substitute(dir_multiplier * constraints.activities[c1_id].value, om[:x]))
+                @debug "Objective set successfully"
 
+                @debug "About to optimize"
                 J.optimize!(om)
+                @debug "Optimization completed"
+
+                # Check termination status immediately after optimization
+                immediate_status = J.termination_status(om)
+                @debug "Termination status after optimize!" status = immediate_status
 
                 # Get result (use NaN for invalid/missing values)
                 raw_value = if J.termination_status(om) in (J.OPTIMAL, J.LOCALLY_SOLVED) && J.is_solved_and_feasible(om)
@@ -818,10 +915,10 @@ function process_concordance_batch(
                 J.delete(om, c2_constraint)
                 J.unregister(om, :c2_constraint)
 
-                return (c1_id, c2_id, direction, dir_multiplier, actual_value, J.termination_status(om) == J.TIME_LIMIT)
+                return (c1_id, c2_id, direction, dir_multiplier, actual_value, J.termination_status(om))
             catch e
                 @warn "Optimization error" c1_id c2_id direction error = string(e)
-                return (c1_id, c2_id, direction, dir_multiplier, NaN, false)
+                return (c1_id, c2_id, direction, dir_multiplier, NaN, J.OTHER_ERROR)
             end
         end,
         constraints,
@@ -833,56 +930,97 @@ function process_concordance_batch(
 
     # OPTIMIZED: Process results directly using efficient streaming processor
     # Eliminates all intermediate data structures and multiple processing passes
-    
+
     # Pre-allocate lookup for O(1) pair finding
     pair_lookup = Dict{Tuple{Symbol,Symbol},Int}()
     idx_to_id = concordance_tracker.idx_to_id
-    
+
     for (i, candidate) in enumerate(batch_pairs)
         c1_id = idx_to_id[candidate.c1_idx]
         c2_id = idx_to_id[candidate.c2_idx]
         pair_lookup[(c1_id, c2_id)] = i
     end
-    
+
     # Minimal state tracking - O(n) memory
     pair_states = [PairConcordanceState() for _ in 1:length(batch_pairs)]
-    
+
+    # Track failure statistics by pair for counting
+    pair_failure_counts = Dict{Int,Dict{Symbol,Int}}()
+    for i in 1:length(batch_pairs)
+        pair_failure_counts[i] = Dict(:timeout => 0, :infeasible => 0, :unbounded => 0,
+            :infeasible_or_unbounded => 0, :resource_limit => 0,
+            :numerical_error => 0, :other_error => 0, :success => 0)
+    end
+
+    # Debug: Track actual termination status frequencies and total optimizations
+    status_frequency = Dict{Any,Int}()
+    total_optimizations_attempted = 0
+
     # Process each solver result immediately - zero intermediate storage
     for result in optimization_results
-        c1_id, c2_id, direction, dir_multiplier, value, timeout = result
+        total_optimizations_attempted += 1
+        c1_id, c2_id, direction, dir_multiplier, value, termination_status = result
         pair_idx = get(pair_lookup, (c1_id, c2_id), 0)
         pair_idx == 0 && continue
-        
+
+        # Categorize the termination status
+        status_category = categorize_termination_status(termination_status)
+        timeout = (status_category == :timeout)
+
+        # Debug: Track termination status frequency
+        status_frequency[termination_status] = get(status_frequency, termination_status, 0) + 1
+
+        # Debug: Log OPTIMIZE_NOT_CALLED cases specifically
+        if termination_status == J.OPTIMIZE_NOT_CALLED
+            @debug "Found OPTIMIZE_NOT_CALLED in results" c1_id c2_id direction dir_multiplier
+        end
+
+        # Track failure statistics per pair
+        pair_failure_counts[pair_idx][status_category] += 1
+
         # Update concordance state directly - no allocations
         update_pair_concordance!(pair_states[pair_idx], direction, dir_multiplier, value, timeout, concordance_tolerance)
     end
-    
+
     # OPTIMIZED: Update concordance tracker directly and return counts only
     # Eliminates the need for process_batch_results! entirely
-    
+
     concordant_count = 0
     non_concordant_count = 0
     timeout_count = 0
+    infeasible_count = 0
+    unbounded_count = 0
+    infeasible_or_unbounded_count = 0
+    resource_limit_count = 0
+    numerical_error_count = 0
+    other_error_count = 0
     optimization_results_vec = Vector{Tuple{Int,Int,Symbol,Float64}}()
-    
+
     for (i, state) in enumerate(pair_states)
         candidate = batch_pairs[i]
         c1_idx, c2_idx = candidate.c1_idx, candidate.c2_idx
-        
-        # Count timeouts
-        state.has_timeout && (timeout_count += 1)
-        
+
+        # Count different failure types for this pair
+        failure_stats = pair_failure_counts[i]
+        failure_stats[:timeout] > 0 && (timeout_count += 1)
+        failure_stats[:infeasible] > 0 && (infeasible_count += 1)
+        failure_stats[:unbounded] > 0 && (unbounded_count += 1)
+        failure_stats[:infeasible_or_unbounded] > 0 && (infeasible_or_unbounded_count += 1)
+        failure_stats[:resource_limit] > 0 && (resource_limit_count += 1)
+        failure_stats[:numerical_error] > 0 && (numerical_error_count += 1)
+        failure_stats[:other_error] > 0 && (other_error_count += 1)
+
         # Update concordance tracker directly based on results
         if state.is_concordant
             union_sets!(concordance_tracker, c1_idx, c2_idx)
             concordant_count += 1
-            
+
             # Store lambda result if valid
             if !isnan(state.reference_lambda)
                 final_direction = if state.has_positive && state.has_negative
                     :both
                 elseif state.has_positive
-                    :positive  
+                    :positive
                 else
                     :negative
                 end
@@ -894,12 +1032,22 @@ function process_concordance_batch(
         end
     end
 
+    # Debug: Log termination status frequency and total optimizations for troubleshooting
+    @info "Optimization statistics" total_optimizations_attempted status_frequency
+
     # Return counts in same format as process_batch_results! expected
     return (
-        concordant_count = concordant_count,
-        non_concordant_count = non_concordant_count, 
-        timeout_count = timeout_count,
-        optimization_results = optimization_results_vec
+        concordant_count=concordant_count,
+        non_concordant_count=non_concordant_count,
+        timeout_count=timeout_count,
+        infeasible_count=infeasible_count,
+        unbounded_count=unbounded_count,
+        infeasible_or_unbounded_count=infeasible_or_unbounded_count,
+        resource_limit_count=resource_limit_count,
+        numerical_error_count=numerical_error_count,
+        other_error_count=other_error_count,
+        total_optimizations=total_optimizations_attempted,
+        optimization_results=optimization_results_vec
     )
 end
 
@@ -929,14 +1077,23 @@ function screen_directions_optimization_model(
 
     worker_cache = COBREXA.worker_local_data(
         constraints_tuple -> begin
-            pos_const, neg_const = constraints_tuple
-            pos_model = COBREXA.optimization_model(pos_const; optimizer=optimizer)
-            neg_model = COBREXA.optimization_model(neg_const; optimizer=optimizer)
-            for s in [COBREXA.configuration.default_solver_settings; settings]
-                s(pos_model)
-                s(neg_model)
+            try
+                pos_const, neg_const = constraints_tuple
+                @debug "Creating positive optimization model"
+                pos_model = COBREXA.optimization_model(pos_const; optimizer=optimizer)
+                @debug "Creating negative optimization model"
+                neg_model = COBREXA.optimization_model(neg_const; optimizer=optimizer)
+                @debug "Applying solver settings"
+                for s in [COBREXA.configuration.default_solver_settings; settings]
+                    s(pos_model)
+                    s(neg_model)
+                end
+                @debug "Models created successfully"
+                return (positive=pos_model, negative=neg_model)
+            catch e
+                @error "Failed to create optimization models" exception = e
+                rethrow(e)
             end
-            return (positive=pos_model, negative=neg_model)
         end,
         (pos_constraints, neg_constraints)
     )
@@ -1274,7 +1431,8 @@ function activity_concordance_analysis(
     # Initialize concordance matrix and populate trivial relationships early
     n_complexes = length(complex_ids)
     complex_idx = Dict(id => idx for (idx, id) in enumerate(complex_ids))
-    concordance_matrix = SparseArrays.spzeros(Int, n_complexes, n_complexes)
+    sparse_concordance_matrix = SparseArrays.spzeros(Int, n_complexes, n_complexes)
+    concordance_matrix = LinearAlgebra.UpperTriangular(sparse_concordance_matrix)
 
     @info "Populating trivial relationships in concordance matrix"
     populate_trivial_relationships!(concordance_matrix, trivially_balanced, trivial_pairs, complex_idx)
@@ -1668,7 +1826,14 @@ function activity_concordance_analysis(
         "n_non_concordant_pairs" => batch_results.non_concordant_pairs,
         "n_candidates_skipped_by_transitivity" => streaming_filter.pairs_transitivity_concordant_filtered + streaming_filter.pairs_transitivity_non_concordant_filtered,  # Candidates not tested due to transitivity
         "n_timeout_pairs" => batch_results.timeout_pairs,
-        "n_modules" => length(modules),
+        "n_infeasible_pairs" => batch_results.infeasible_pairs,
+        "n_unbounded_pairs" => batch_results.unbounded_pairs,
+        "n_infeasible_or_unbounded_pairs" => batch_results.infeasible_or_unbounded_pairs,
+        "n_resource_limit_pairs" => batch_results.resource_limit_pairs,
+        "n_numerical_error_pairs" => batch_results.numerical_error_pairs,
+        "n_other_error_pairs" => batch_results.other_error_pairs,
+        "n_total_optimizations" => batch_results.total_optimizations,
+        "n_modules" => length(filter(p -> length(p[2]) > 1, modules)) + 1,  # Multi-complex modules + balanced module
         "batches_completed" => batch_results.batches_completed,
         "elapsed_time" => elapsed,
 
@@ -1750,8 +1915,11 @@ function activity_concordance_analysis(
     reaction_ids = Symbol.(sort!(reaction_names; by=string))
 
     # Build all matrices upfront
-    A_matrix, complexes_vec, complex_to_idx_map = build_A_matrix_from_complexes(complexes, constraints)
-    S_matrix = build_S_matrix_from_constraints(constraints)[1]
+    A_matrix, complexes_vec, complex_to_idx_map, feasible_reaction_names = build_A_matrix_from_complexes(complexes, constraints)
+    S_matrix = build_S_matrix_from_constraints(constraints, feasible_reaction_names)[1]
+    
+    # Update reaction IDs to use only feasible reactions
+    reaction_ids = Symbol.(sort!(feasible_reaction_names; by=string))
 
     # Create module mapping with balanced complexes as 0 and consecutive module IDs
     module_mapping = fill(-1, length(complex_ids))  # Default: -1 for singleton complexes
@@ -1810,7 +1978,8 @@ function activity_concordance_analysis(
         complex_reaction_matrix=A_matrix,
         complex_metabolite_matrix=Y_matrix,
         reaction_metabolite_matrix=S_matrix,
-        lambda_dict=lambda_dict
+        lambda_dict=lambda_dict,
+        stats=stats
     )
 
     return complete_model
@@ -1821,7 +1990,7 @@ Helper function to populate trivial relationships in concordance matrix.
 Maintains symmetry and respects hierarchy (trivial > regular).
 """
 function populate_trivial_relationships!(
-    concordance_matrix::SparseArrays.SparseMatrixCSC{Int,Int},
+    concordance_matrix::LinearAlgebra.UpperTriangular{Int,SparseArrays.SparseMatrixCSC{Int,Int}},
     trivially_balanced::Set{Symbol},
     trivial_pairs::Set{Tuple{Symbol,Symbol}},
     complex_idx::Dict{Symbol,Int}
@@ -1834,13 +2003,14 @@ function populate_trivial_relationships!(
         end
     end
 
-    # Populate trivially concordant pairs (value 2, maintain symmetry)
+    # Populate trivially concordant pairs (value 2, UpperTriangular handles symmetry)
     for (c1_id, c2_id) in trivial_pairs
         if haskey(complex_idx, c1_id) && haskey(complex_idx, c2_id)
             i = complex_idx[c1_id]
             j = complex_idx[c2_id]
-            concordance_matrix[i, j] = Int(Trivially_concordant)  # 2
-            concordance_matrix[j, i] = Int(Trivially_concordant)  # 2 (symmetry)
+            # Ensure we always set the upper triangle
+            upper_i, upper_j = i <= j ? (i, j) : (j, i)
+            concordance_matrix[upper_i, upper_j] = Int(Trivially_concordant)  # 2
         end
     end
 end
@@ -1850,7 +2020,7 @@ Helper function to populate discovered concordant relationships from Concordance
 Respects existing trivial relationships and maintains symmetry.
 """
 function populate_discovered_relationships!(
-    concordance_matrix::SparseArrays.SparseMatrixCSC{Int,Int},
+    concordance_matrix::LinearAlgebra.UpperTriangular{Int,SparseArrays.SparseMatrixCSC{Int,Int}},
     concordance_tracker::ConcordanceTracker,
     balanced_complexes::BitVector
 )
@@ -1865,13 +2035,13 @@ function populate_discovered_relationships!(
 
     # Extract concordant pairs from ConcordanceTracker
     # Use union-find structure to identify all concordant relationships
+    # Only iterate over upper triangle since UpperTriangular handles symmetry
     for i in 1:n_complexes-1
         for j in i+1:n_complexes
             if are_concordant(concordance_tracker, i, j)
                 # Only populate if not already set (preserves trivial relationships)
                 if concordance_matrix[i, j] == 0
-                    concordance_matrix[i, j] = Int(Concordant)  # 1
-                    concordance_matrix[j, i] = Int(Concordant)  # 1 (symmetry)
+                    concordance_matrix[i, j] = Int(Concordant)  # 1 (UpperTriangular handles symmetry)
                 end
             end
         end
