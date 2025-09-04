@@ -548,6 +548,10 @@ function apply_kinetic_analysis!(complete_model::CompleteConcordanceModel; min_m
         # Detect ACRR metabolite pairs  
         acrr_pairs = detect_acrr_metabolite_pairs(kinetic_groups_dict, Y_matrix)
 
+        # Step 7.1: Detect interface reactions (following R reference logic)
+        @info "Detecting interface reactions"
+        detect_interface_reactions!(complete_model, kinetic_modules)
+
         # Convert indices to metabolite IDs for storage
         acr_metabolite_ids = Vector{Symbol}()
         if !isempty(acr_metabolites)
@@ -577,11 +581,16 @@ function apply_kinetic_analysis!(complete_model::CompleteConcordanceModel; min_m
             end
         end
 
-        # Store results in stats
+        # Store results in stats  
+        n_interface_reactions = count(complete_model.interface_reactions)
+        n_intra_module_reactions = complete_model.n_reactions - n_interface_reactions
+        
         complete_model.stats["n_acr_metabolites"] = length(acr_metabolites)
         complete_model.stats["n_acrr_metabolite_pairs"] = length(acrr_pairs)
         complete_model.stats["acr_metabolite_ids"] = acr_metabolite_ids
         complete_model.stats["acrr_metabolite_id_pairs"] = acrr_metabolite_id_pairs
+        complete_model.stats["n_interface_reactions"] = n_interface_reactions
+        complete_model.stats["n_intra_module_reactions"] = n_intra_module_reactions
 
         @info " Concentration robustness analysis complete" (
             acr_metabolites=length(acr_metabolites),
@@ -747,6 +756,85 @@ function detect_acrr_metabolite_pairs(kinetic_groups::Dict{Int,Vector{Int}}, Y_m
     @info "ACRR detection complete: found $(length(acrr_result)) metabolite pairs with ACRR"
 
     return acrr_result
+end
+
+"""
+Detect interface reactions based on kinetic modules.
+
+Interface reactions connect complexes from different kinetic modules.
+Intra-module reactions connect complexes within the same kinetic module.
+
+This follows the R reference logic:
+- Get all edges (reactions) in the network
+- Identify which reactions have both source and target in the same kinetic module (intra-module)
+- All other reactions are interface reactions
+
+Updates the interface_reactions BitVector in the model.
+"""
+function detect_interface_reactions!(complete_model::CompleteConcordanceModel, kinetic_modules::Vector{Vector{Int}})
+    @info "Detecting interface reactions following R reference logic"
+    
+    # Reset interface reactions (assume all are interface initially)
+    fill!(complete_model.interface_reactions, true)
+    
+    A_matrix = complete_model.complex_reaction_matrix
+    
+    # Create mapping from complex to its kinetic module
+    complex_to_module = Dict{Int,Int}()
+    for (module_id, complexes) in enumerate(kinetic_modules)
+        for complex_idx in complexes
+            complex_to_module[complex_idx] = module_id
+        end
+    end
+    
+    @info "Built complex-to-module mapping" n_complexes_in_modules = length(complex_to_module)
+    
+    intra_module_reactions = Set{Int}()
+    
+    # Check each kinetic module for intra-module reactions  
+    for (module_id, module_complexes) in enumerate(kinetic_modules)
+        if length(module_complexes) < 2
+            continue  # Need at least 2 complexes to have intra-module reactions
+        end
+        
+        # Find reactions where both source and target are in this module
+        # Following R logic: c1 <- which(eg[,1] %in% final_lres[[j]]) and c2 <- which(eg[,2] %in% final_lres[[j]])
+        module_set = Set(module_complexes)
+        
+        # Check each reaction to see if both substrate and product are in this module
+        for reaction_idx in 1:complete_model.n_reactions
+            reaction_column = A_matrix[:, reaction_idx]
+            
+            # Find substrate complexes (negative entries)
+            substrate_complexes = findall(x -> x < 0, reaction_column)
+            # Find product complexes (positive entries)  
+            product_complexes = findall(x -> x > 0, reaction_column)
+            
+            # Check if all substrates and products are in this kinetic module
+            substrates_in_module = all(c -> c ∈ module_set, substrate_complexes)
+            products_in_module = all(c -> c ∈ module_set, product_complexes)
+            
+            if substrates_in_module && products_in_module && !isempty(substrate_complexes) && !isempty(product_complexes)
+                push!(intra_module_reactions, reaction_idx)
+            end
+        end
+    end
+    
+    # Mark intra-module reactions as false (not interface)
+    for reaction_idx in intra_module_reactions
+        complete_model.interface_reactions[reaction_idx] = false
+    end
+    
+    n_interface = count(complete_model.interface_reactions)  
+    n_intra_module = length(intra_module_reactions)
+    
+    @info "Interface reaction detection complete" (
+        total_reactions=complete_model.n_reactions,
+        intra_module_reactions=n_intra_module,
+        interface_reactions=n_interface
+    )
+    
+    return nothing
 end
 
 """
