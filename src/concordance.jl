@@ -1126,157 +1126,78 @@ end
 
 
 
-"""
-$(TYPEDSIGNATURES)
-
-Build Y_matrix (species-complex stoichiometric matrix) from constraints and complexes.
-Uses canonical ordering provided by caller or generates sorted ordering.
-Returns (Y_matrix, complex_ids, metabolite_ids) where:
-- Y_matrix[i,j] = stoichiometric coefficient of metabolite i in complex j
-- complex_ids[j] = Symbol ID of complex j
-- metabolite_ids[i] = Symbol ID of metabolite i
-"""
-function build_Y_matrix_from_constraints(
-    constraints,
-    complexes::Dict{Symbol,MetabolicComplex},
-    complex_ids::Union{Vector{Symbol},Nothing}=nothing,
-    metabolite_ids::Union{Vector{Symbol},Nothing}=nothing
-)
-    # Use provided ordering or create canonical ordering
-    if complex_ids === nothing
-        complex_ids = sort!(collect(keys(complexes)); by=string)
-    end
-
-    if metabolite_ids === nothing
-        # Get all unique metabolites
-        all_metabolites = Set{Symbol}()
-        for complex in values(complexes)
-            for (met_id, _) in complex.metabolites
-                push!(all_metabolites, met_id)
-            end
-        end
-        metabolite_ids = sort!(collect(all_metabolites); by=string)
-    end
-
-    n_metabolites = length(metabolite_ids)
-    n_complexes = length(complex_ids)
-
-    # Build index mappings
-    metabolite_to_idx = Dict(met => i for (i, met) in enumerate(metabolite_ids))
-    complex_to_idx = Dict(comp => i for (i, comp) in enumerate(complex_ids))
-
-    # Build Y_matrix
-    Y_matrix = SparseArrays.spzeros(Float64, n_metabolites, n_complexes)
-
-    for (complex_id, complex) in complexes
-        if haskey(complex_to_idx, complex_id)  # Only process complexes in our ordering
-            complex_idx = complex_to_idx[complex_id]
-            for (metabolite_id, stoich) in complex.metabolites
-                if haskey(metabolite_to_idx, metabolite_id)
-                    met_idx = metabolite_to_idx[metabolite_id]
-                    Y_matrix[met_idx, complex_idx] = Float64(stoich)
-                end
-            end
-        end
-    end
-
-    return Y_matrix, complex_ids, metabolite_ids
-end
 
 """
 $(TYPEDSIGNATURES)
 
-Find trivially balanced complexes using Y_matrix.
+Find trivially balanced complexes directly from complex compositions.
 A complex is trivially balanced if all its metabolites appear in only this complex.
 """
 function find_trivially_balanced_complexes(
-    Y_matrix::SparseArrays.SparseMatrixCSC{Float64,Int},
-    complex_ids::Vector{Symbol},
-    metabolite_ids::Vector{Symbol}
+    complexes::Dict{Symbol,Vector{Tuple{Symbol,Float64}}}
 )::Set{Symbol}
-    n_metabolites, n_complexes = size(Y_matrix)
+    # Build metabolite participation map
     metabolite_participation = Dict{Symbol,Vector{Symbol}}()
-
-    # Build metabolite participation map from Y_matrix
-    for complex_idx in 1:n_complexes
-        complex_id = complex_ids[complex_idx]
-        metabolite_idxs, _ = SparseArrays.findnz(Y_matrix[:, complex_idx])
-
-        for met_idx in metabolite_idxs
-            met_id = metabolite_ids[met_idx]
+    
+    for (complex_id, metabolite_composition) in complexes
+        for (met_id, _) in metabolite_composition
             if !haskey(metabolite_participation, met_id)
                 metabolite_participation[met_id] = Symbol[]
             end
             push!(metabolite_participation[met_id], complex_id)
         end
     end
-
+    
+    # Find complexes that have at least one metabolite unique to that complex
     balanced_complexes = Set{Symbol}()
-    for (met_id, complex_ids_list) in metabolite_participation
-        if length(complex_ids_list) == 1
-            push!(balanced_complexes, complex_ids_list[1])
+    for (complex_id, metabolite_composition) in complexes
+        for (met_id, _) in metabolite_composition
+            if length(metabolite_participation[met_id]) == 1
+                push!(balanced_complexes, complex_id)
+                break  # Found at least one unique metabolite, complex is balanced
+            end
         end
     end
-
+    
     return balanced_complexes
 end
 
 """
 $(TYPEDSIGNATURES)
 
-Find trivially concordant pairs using Y_matrix.
-Pairs are trivially concordant if they share exactly the same metabolites.
+Find trivially concordant pairs directly from complex compositions.
+Pairs are trivially concordant if they share exactly the same metabolite composition.
 """
 function find_trivially_concordant_pairs(
-    Y_matrix::SparseArrays.SparseMatrixCSC{Float64,Int},
-    complex_ids::Vector{Symbol},
-    metabolite_ids::Vector{Symbol}
+    complexes::Dict{Symbol,Vector{Tuple{Symbol,Float64}}}
 )::Set{Tuple{Symbol,Symbol}}
-    n_metabolites, n_complexes = size(Y_matrix)
+    # Build metabolite participation map
     metabolite_participation = Dict{Symbol,Vector{Symbol}}()
-
-    # Build metabolite participation map from Y_matrix
-    for complex_idx in 1:n_complexes
-        complex_id = complex_ids[complex_idx]
-        metabolite_idxs, _ = SparseArrays.SparseArrays.findnz(Y_matrix[:, complex_idx])
-
-        for met_idx in metabolite_idxs
-            met_id = metabolite_ids[met_idx]
+    
+    for (complex_id, metabolite_composition) in complexes
+        for (met_id, _) in metabolite_composition
             if !haskey(metabolite_participation, met_id)
                 metabolite_participation[met_id] = Symbol[]
             end
             push!(metabolite_participation[met_id], complex_id)
         end
     end
-
+    
+    # Find pairs that share a metabolite that only participates in those two complexes
     concordant_pairs = Set{Tuple{Symbol,Symbol}}()
-    for (met_id, complex_ids_list) in metabolite_participation
-        if length(complex_ids_list) == 2
-            c1, c2 = complex_ids_list
-            pair = c1 < c2 ? (c1, c2) : (c2, c1)
+    
+    for (met_id, participating_complexes) in metabolite_participation
+        if length(participating_complexes) == 2
+            # This metabolite only participates in exactly two complexes
+            complex1, complex2 = participating_complexes[1], participating_complexes[2]
+            pair = complex1 < complex2 ? (complex1, complex2) : (complex2, complex1)
             push!(concordant_pairs, pair)
         end
     end
-
+    
     return concordant_pairs
 end
 
-function find_trivially_balanced_complexes(
-    complexes::Dict{Symbol,MetabolicComplex}
-)::Set{Symbol}
-    Y_matrix, complex_ids, metabolite_ids = build_Y_matrix_from_constraints(nothing, complexes)
-    return find_trivially_balanced_complexes(Y_matrix, complex_ids, metabolite_ids)
-end
-
-"""
-$(TYPEDSIGNATURES)
-
-Find trivially concordant pairs (complexes that share the same metabolite composition).
-"""
-function find_trivially_concordant_pairs(complexes::Dict{Symbol,MetabolicComplex})::Set{Tuple{Symbol,Symbol}}
-    Y_matrix, complex_ids, metabolite_ids = build_Y_matrix_from_constraints(nothing, complexes)
-    return find_trivially_concordant_pairs(Y_matrix, complex_ids, metabolite_ids)
-end
 
 """
 $(TYPEDSIGNATURES)
@@ -1339,6 +1260,7 @@ function activity_concordance_analysis(
     use_transitivity::Bool=true,
     n_burnin::Int=50,
     n_chains::Int=1,
+    kinetic_analysis::Bool=false,
 )
     start_time = time()
 
@@ -1410,22 +1332,18 @@ function activity_concordance_analysis(
     # Get canonical metabolite ordering
     all_metabolites = Set{Symbol}()
     for complex in values(complexes)
-        for (met_id, _) in complex.metabolites
+        for (met_id, _) in complex
             push!(all_metabolites, met_id)
         end
     end
     metabolite_ids = sort!(collect(all_metabolites); by=string)
 
-    # Build Y_matrix for efficient trivial analysis using canonical ordering
-    @info "Building Y_matrix for trivial analysis"
-    Y_matrix, _, _ = build_Y_matrix_from_constraints(constraints, complexes, complex_ids, metabolite_ids)
-
     @info "Finding trivially balanced complexes"
-    trivially_balanced = find_trivially_balanced_complexes(Y_matrix, complex_ids, metabolite_ids)
+    trivially_balanced = find_trivially_balanced_complexes(complexes)
     @info "Found trivially balanced complexes" n_trivivally_balanced = length(trivially_balanced)
 
     @info "Finding trivially concordant pairs"
-    trivial_pairs = find_trivially_concordant_pairs(Y_matrix, complex_ids, metabolite_ids)
+    trivial_pairs = find_trivially_concordant_pairs(complexes)
     @info "Found trivially concordant pairs" n_trivially_concordant = length(trivial_pairs)
 
     # Initialize concordance matrix and populate trivial relationships early
@@ -1910,15 +1828,8 @@ function activity_concordance_analysis(
     # Build CompleteConcordanceModel using canonical ordering established earlier
     # complex_ids already canonical from concordance_tracker
     # metabolite_ids already canonical from earlier in function
-    # reaction_ids need to be sorted for canonical order
-    reaction_names = get_reaction_names_from_constraints(constraints.balance)
-    reaction_ids = Symbol.(sort!(reaction_names; by=string))
-
-    # Build all matrices upfront
-    A_matrix, complexes_vec, complex_to_idx_map, feasible_reaction_names = build_A_matrix_from_complexes(complexes, constraints)
-    S_matrix = build_S_matrix_from_constraints(constraints, feasible_reaction_names)[1]
-    
-    # Update reaction IDs to use only feasible reactions
+    # Get reaction names directly from constraints
+    feasible_reaction_names = get_reaction_names_from_constraints(constraints.balance)
     reaction_ids = Symbol.(sort!(feasible_reaction_names; by=string))
 
     # Create module mapping with balanced complexes as 0 and consecutive module IDs
@@ -1975,12 +1886,14 @@ function activity_concordance_analysis(
         concordance_modules=module_mapping,
         interface_reactions=falses(length(reaction_ids)),
         acr_metabolites=falses(length(metabolite_ids)),
-        complex_reaction_matrix=A_matrix,
-        complex_metabolite_matrix=Y_matrix,
-        reaction_metabolite_matrix=S_matrix,
         lambda_dict=lambda_dict,
         stats=stats
     )
+
+    # Apply kinetic analysis if requested
+    if kinetic_analysis
+        apply_kinetic_analysis!(complete_model, constraints)
+    end
 
     return complete_model
 end
@@ -1995,23 +1908,35 @@ function populate_trivial_relationships!(
     trivial_pairs::Set{Tuple{Symbol,Symbol}},
     complex_idx::Dict{Symbol,Int}
 )
-    # Populate trivially balanced complexes on diagonal (value 4)
+    # Batch process trivially balanced complexes - pre-filter valid indices
+    balanced_indices = Int[]
     for complex_id in trivially_balanced
-        if haskey(complex_idx, complex_id)
-            idx = complex_idx[complex_id]
-            concordance_matrix[idx, idx] = Int(Trivially_balanced)  # 4
+        idx = get(complex_idx, complex_id, 0)
+        if idx > 0
+            push!(balanced_indices, idx)
         end
     end
+    
+    # Vectorized diagonal assignment for balanced complexes
+    for idx in balanced_indices
+        concordance_matrix[idx, idx] = Int(Trivially_balanced)  # 4
+    end
 
-    # Populate trivially concordant pairs (value 2, UpperTriangular handles symmetry)
+    # Batch process trivially concordant pairs - pre-compute and sort indices
+    pair_indices = Tuple{Int,Int}[]
     for (c1_id, c2_id) in trivial_pairs
-        if haskey(complex_idx, c1_id) && haskey(complex_idx, c2_id)
-            i = complex_idx[c1_id]
-            j = complex_idx[c2_id]
-            # Ensure we always set the upper triangle
+        i = get(complex_idx, c1_id, 0)
+        j = get(complex_idx, c2_id, 0)
+        if i > 0 && j > 0
+            # Pre-sort to ensure upper triangle ordering
             upper_i, upper_j = i <= j ? (i, j) : (j, i)
-            concordance_matrix[upper_i, upper_j] = Int(Trivially_concordant)  # 2
+            push!(pair_indices, (upper_i, upper_j))
         end
+    end
+    
+    # Batch assignment for concordant pairs
+    for (i, j) in pair_indices
+        concordance_matrix[i, j] = Int(Trivially_concordant)  # 2
     end
 end
 
@@ -2026,24 +1951,58 @@ function populate_discovered_relationships!(
 )
     n_complexes = length(balanced_complexes)
 
-    # Populate balanced complexes on diagonal (value 3, only if not already trivially balanced)
+    # Batch process balanced complexes on diagonal - collect indices first
+    balanced_indices = Int[]
     for i in 1:n_complexes
         if balanced_complexes[i] && concordance_matrix[i, i] == 0
-            concordance_matrix[i, i] = Int(Balanced)  # 3
+            push!(balanced_indices, i)
         end
     end
+    
+    # Vectorized assignment for balanced complexes
+    for idx in balanced_indices
+        concordance_matrix[idx, idx] = Int(Balanced)  # 3
+    end
 
-    # Extract concordant pairs from ConcordanceTracker
-    # Use union-find structure to identify all concordant relationships
-    # Only iterate over upper triangle since UpperTriangular handles symmetry
-    for i in 1:n_complexes-1
-        for j in i+1:n_complexes
-            if are_concordant(concordance_tracker, i, j)
-                # Only populate if not already set (preserves trivial relationships)
-                if concordance_matrix[i, j] == 0
-                    concordance_matrix[i, j] = Int(Concordant)  # 1 (UpperTriangular handles symmetry)
+    # Extract concordant pairs efficiently with pre-sized dictionary
+    # Estimate capacity based on typical concordance patterns (most complexes are in small groups)
+    root_to_complexes = Dict{Int, Vector{Int}}()
+    sizehint!(root_to_complexes, n_complexes ÷ 4)  # Heuristic: assume average group size of 4
+    
+    for i in 1:n_complexes
+        root = find_set!(concordance_tracker, i)
+        group = get!(root_to_complexes, root) do
+            Vector{Int}()
+        end
+        push!(group, i)
+    end
+    
+    # Pre-collect all concordant pairs to minimize conditional checks during assignment
+    concordant_pairs = Tuple{Int,Int}[]
+    # Estimate total pairs: for groups of size g, we get g*(g-1)/2 pairs
+    estimated_pairs = sum(max(0, length(group) * (length(group) - 1) ÷ 2) 
+                         for group in values(root_to_complexes) if length(group) > 1)
+    sizehint!(concordant_pairs, estimated_pairs)
+    
+    # Generate all concordant pairs efficiently
+    for complex_group in values(root_to_complexes)
+        group_size = length(complex_group)
+        if group_size > 1
+            for i in 1:group_size-1
+                for j in i+1:group_size
+                    idx1, idx2 = complex_group[i], complex_group[j]
+                    # Pre-sort to ensure upper triangle ordering
+                    upper_i, upper_j = idx1 <= idx2 ? (idx1, idx2) : (idx2, idx1)
+                    push!(concordant_pairs, (upper_i, upper_j))
                 end
             end
+        end
+    end
+    
+    # Batch assignment with minimal conditional checking
+    for (i, j) in concordant_pairs
+        if concordance_matrix[i, j] == 0  # Only populate if not already set
+            concordance_matrix[i, j] = Int(Concordant)  # 1
         end
     end
 end

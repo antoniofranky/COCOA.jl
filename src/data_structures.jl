@@ -448,17 +448,10 @@ mutable struct CompleteConcordanceModel
     metabolite_ids::Vector{Symbol}
     metabolite_idx::Dict{Symbol,Int}
 
-    # === SYMMETRIC CONCORDANCE DATA ===
+    # === CONCORDANCE MATRIX ===
     concordance_matrix::LinearAlgebra.UpperTriangular{Int,SparseArrays.SparseMatrixCSC{Int,Int}}
     lambda_dict::Dict{Tuple{Int,Int},Float64}
 
-    # === ASYMMETRIC STRUCTURAL DATA (regular sparse) ===
-    complex_reaction_matrix::SparseArrays.SparseMatrixCSC{Int,Int}      # Complexes × Reactions
-    metabolite_complex_matrix::SparseArrays.SparseMatrixCSC{Float64,Int}  # Metabolites × Complexes (Y matrix)
-    metabolite_reaction_matrix::SparseArrays.SparseMatrixCSC{Float64,Int} # Metabolites × Reactions (S matrix)
-
-    # === SPARSE ACRR DATA (simple vector for few pairs) ===
-    acrr_pairs::Vector{Tuple{Int,Int}}          # Canonical form: i < j
 
     # === DENSE NODE PROPERTIES ===
     activity_ranges::Vector{Tuple{Float64,Float64}}
@@ -470,17 +463,9 @@ mutable struct CompleteConcordanceModel
 
     # === METABOLITE PROPERTIES ===
     acr_metabolites::BitVector                   # ACR per metabolite
+    acrr_pairs::Vector{Tuple{Int,Int}}          # Canonical form: i < j
 
-    # === METADATA ===
-    n_complexes::Int
-    n_reactions::Int
-    n_metabolites::Int
-    n_concordant::Int
-    n_trivially_concordant::Int
-    n_balanced::Int
-    n_trivially_balanced::Int
-    n_concordance_modules::Int
-    n_kinetic_modules::Int
+    # === STATISTICS ===
     stats::Dict{String,Any}
 end
 
@@ -508,10 +493,6 @@ function CompleteConcordanceModel(
     interface_reactions=falses(length(reaction_ids)),
     acr_metabolites=falses(length(metabolite_ids)),
 
-    # Structural matrices
-    complex_reaction_matrix=SparseArrays.spzeros(Int, length(complex_ids), length(reaction_ids)),
-    complex_metabolite_matrix=SparseArrays.spzeros(Float64, length(complex_ids), length(metabolite_ids)),
-    reaction_metabolite_matrix=SparseArrays.spzeros(Float64, length(reaction_ids), length(metabolite_ids)),
 
     # Statistics dictionary
     stats=Dict{String,Any}()
@@ -565,21 +546,24 @@ function CompleteConcordanceModel(
     n_concordance_modules = length(unique(filter(x -> x >= 0, concordance_modules)))
     n_kinetic_modules = length(unique(filter(x -> x > 0, kinetic_modules)))
 
+    # Populate stats dictionary with metadata
+    stats["n_complexes"] = n_complexes
+    stats["n_reactions"] = n_reactions
+    stats["n_metabolites"] = n_metabolites
+    stats["n_concordant"] = length(V_concordance)
+    stats["n_trivially_concordant"] = 0  # Will be set elsewhere
+    stats["n_balanced"] = 0  # Will be set elsewhere
+    stats["n_trivially_balanced"] = 0  # Will be set elsewhere
+    stats["n_concordance_modules"] = n_concordance_modules
+    stats["n_kinetic_modules"] = n_kinetic_modules
+
     return CompleteConcordanceModel(
         complex_ids, complex_idx,
         reaction_ids, reaction_idx,
         metabolite_ids, metabolite_idx,
         final_concordance_matrix, lambda_dict,
-        complex_reaction_matrix, complex_metabolite_matrix, reaction_metabolite_matrix,
-        acrr_pairs,
         activity_ranges, concordance_modules, kinetic_modules,
-        interface_reactions, acr_metabolites,
-        n_complexes, n_reactions, n_metabolites,
-        length(V_concordance),  # n_concordant
-        0,  # n_trivially_concordant (will be set elsewhere)
-        0,  # n_balanced (will be set elsewhere) 
-        0,  # n_trivially_balanced (will be set elsewhere)
-        n_concordance_modules, n_kinetic_modules,
+        interface_reactions, acr_metabolites, acrr_pairs,
         stats
     )
 end
@@ -640,11 +624,6 @@ function get_complex_reactions(model::CompleteConcordanceModel, complex::Symbol)
     return model.reaction_ids[reaction_idxs]
 end
 
-function get_complex_metabolites(model::CompleteConcordanceModel, complex::Symbol)
-    idx = model.complex_idx[complex]
-    met_idxs, coeffs = SparseArrays.findnz(model.complex_metabolite_matrix[idx, :])
-    return [(model.metabolite_ids[i], coeff) for (i, coeff) in zip(met_idxs, coeffs)]
-end
 
 # === ACR QUERIES ===
 function has_acr(model::CompleteConcordanceModel, metabolite::Symbol)
