@@ -44,7 +44,7 @@ println()
 start_time = time()
 
 try
-    result = kinetic_concordance_analysis(
+    result = activity_concordance_analysis(
         model;
         optimizer=HiGHS.Optimizer,
         sample_size=SAMPLE_SIZE,

@@ -78,10 +78,10 @@ try
 
     # Run kinetic concordance analysis
     println("\nStarting kinetic concordance analysis...")
-    
+
     # Run analysis with timing
     analysis_timing = @timed begin
-        results = COCOA.kinetic_concordance_analysis(
+        results = COCOA.activity_concordance_analysis(
             model;
             optimizer=HiGHS.Optimizer,
             settings=highs_settings,
@@ -89,22 +89,23 @@ try
             seed=seed,
             cv_threshold=cv_threshold,
             batch_size=batch_size,
-            use_transitivity=use_transitivity
+            use_transitivity=use_transitivity,
+            kinetic_analysis=true
         )
     end
-    
+
     # Extract timing information
     analysis_duration = analysis_timing.time
     gc_time = analysis_timing.gctime
     memory_allocated = analysis_timing.bytes
-    
+
     println("Analysis completed in $(round(analysis_duration, digits=2)) seconds")
     println("Memory allocated: $(round(memory_allocated / 1e9, digits=2)) GB")
     println("GC time: $(round(gc_time, digits=2)) seconds")
 
     # Save results
     println("\nSaving results to: $output_path")
-    
+
     JLD2.save(output_path,
         "results", results,
         "model_name", model_name,
@@ -132,13 +133,13 @@ try
     println("Duration: $(round(analysis_duration/60, digits=2)) minutes")
     println("Memory allocated: $(round(memory_allocated / 1e9, digits=2)) GB")
     println("GC time: $(round(gc_time, digits=2))s ($(round(gc_time/analysis_duration*100, digits=1))%)")
-    
+
     # Display kinetic and robustness results
     println("\nRobustness Results:")
     println("  Robust metabolites: $(results.n_robust_metabolites)")
     println("  Robust metabolite pairs: $(results.n_robust_pairs)")
     println("  Largest robust module size: $(results.largest_robust_module_size)")
-    
+
     # Print general statistics from summary if available
     if results.summary !== nothing
         stats = results.summary

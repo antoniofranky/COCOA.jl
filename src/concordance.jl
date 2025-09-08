@@ -955,7 +955,7 @@ function process_concordance_batch(
     status_frequency = Dict{Any,Int}()
     total_optimizations_attempted = 0
 
-    # Process each solver result immediately - zero intermediate storage
+    # Process each solver result
     for result in optimization_results
         total_optimizations_attempted += 1
         c1_id, c2_id, direction, dir_multiplier, value, termination_status = result
@@ -1325,8 +1325,9 @@ function activity_concordance_analysis(
 
     # Get correct reaction count from constraints (accounts for reaction splitting)
     n_reactions = C.var_count(constraints.balance)
+    n_metabolites = length(constraints.balance.flux_stoichiometry)
 
-    @info "Model statistics" n_complexes n_reactions
+    @info "Model statistics" n_complexes n_reactions n_metabolites
 
     # Get canonical metabolite ordering
     all_metabolites = Set{Symbol}()
@@ -1345,14 +1346,9 @@ function activity_concordance_analysis(
     trivial_pairs = find_trivially_concordant_pairs(complexes)
     @info "Found trivially concordant pairs" n_trivially_concordant = length(trivial_pairs)
 
-    # Initialize concordance matrix and populate trivial relationships early
+    # Initialize basic matrix structure - we'll build the complete matrix later
     n_complexes = length(complex_ids)
     complex_idx = Dict(id => idx for (idx, id) in enumerate(complex_ids))
-    sparse_concordance_matrix = SparseArrays.spzeros(Int, n_complexes, n_complexes)
-    concordance_matrix = LinearAlgebra.UpperTriangular(sparse_concordance_matrix)
-
-    @info "Populating trivial relationships in concordance matrix"
-    populate_trivial_relationships!(concordance_matrix, trivially_balanced, trivial_pairs, complex_idx)
 
 
     # Set up RNG early for deterministic sampling
@@ -1748,6 +1744,8 @@ function activity_concordance_analysis(
 
     stats = Dict(
         # Analysis results
+        "n_reactions" => n_reactions,
+        "n_metabolites" => n_metabolites,
         "n_complexes" => n_complexes,
         "n_balanced" => n_balanced_complexes,
         "n_trivially_balanced" => n_trivially_balanced_complexes,
@@ -1767,7 +1765,7 @@ function activity_concordance_analysis(
         "n_numerical_error_pairs" => batch_results.numerical_error_pairs,
         "n_other_error_pairs" => batch_results.other_error_pairs,
         "n_total_optimizations" => batch_results.total_optimizations,
-        "n_modules" => length(filter(p -> length(p[2]) > 1, modules)) + 1,  # Multi-complex modules + balanced module
+        "n_concordance_modules" => length(filter(p -> length(p[2]) > 1, modules)) + 1,  # Multi-complex modules + balanced module
         "batches_completed" => batch_results.batches_completed,
         "elapsed_time" => elapsed,
 
@@ -1837,9 +1835,12 @@ function activity_concordance_analysis(
 
     @debug "Full concordance analysis statistics" stats
 
-    # Populate discovered concordant relationships in concordance matrix after streaming analysis
-    @info "Populating discovered concordant relationships in concordance matrix"
-    populate_discovered_relationships!(concordance_matrix, concordance_tracker, balanced_complexes)
+    # Build complete concordance matrix in one efficient step with all relationships
+    @info "Building complete concordance matrix with all relationships"
+    concordance_matrix = build_complete_concordance_matrix(
+        n_complexes, complex_idx, trivially_balanced, trivial_pairs,
+        concordance_tracker, balanced_complexes
+    )
 
     # Build CompleteConcordanceModel using canonical ordering established earlier
     # complex_ids already canonical from concordance_tracker
@@ -1915,75 +1916,88 @@ function activity_concordance_analysis(
 end
 
 """
-Helper function to populate trivial relationships in concordance matrix.
-Maintains symmetry and respects hierarchy (trivial > regular).
+Build complete concordance matrix in one efficient step with all relationships.
+This is the most efficient approach - single sparse matrix construction with all data.
 """
-function populate_trivial_relationships!(
-    concordance_matrix::LinearAlgebra.UpperTriangular{Int,SparseArrays.SparseMatrixCSC{Int,Int}},
+function build_complete_concordance_matrix(
+    n_complexes::Int,
+    complex_idx::Dict{Symbol,Int},
     trivially_balanced::Set{Symbol},
     trivial_pairs::Set{Tuple{Symbol,Symbol}},
-    complex_idx::Dict{Symbol,Int}
-)
-    # Batch process trivially balanced complexes - pre-filter valid indices
-    balanced_indices = Int[]
-    for complex_id in trivially_balanced
-        idx = get(complex_idx, complex_id, 0)
-        if idx > 0
-            push!(balanced_indices, idx)
-        end
-    end
-
-    # Vectorized diagonal assignment for balanced complexes
-    for idx in balanced_indices
-        concordance_matrix[idx, idx] = Int(Trivially_balanced)  # 4
-    end
-
-    # Batch process trivially concordant pairs - pre-compute and sort indices
-    pair_indices = Tuple{Int,Int}[]
-    for (c1_id, c2_id) in trivial_pairs
-        i = get(complex_idx, c1_id, 0)
-        j = get(complex_idx, c2_id, 0)
-        if i > 0 && j > 0
-            # Pre-sort to ensure upper triangle ordering
-            upper_i, upper_j = i <= j ? (i, j) : (j, i)
-            push!(pair_indices, (upper_i, upper_j))
-        end
-    end
-
-    # Batch assignment for concordant pairs
-    for (i, j) in pair_indices
-        concordance_matrix[i, j] = Int(Trivially_concordant)  # 2
-    end
-end
-
-"""
-Helper function to populate discovered concordant relationships from ConcordanceTracker.
-Respects existing trivial relationships and maintains symmetry.
-"""
-function populate_discovered_relationships!(
-    concordance_matrix::LinearAlgebra.UpperTriangular{Int,SparseArrays.SparseMatrixCSC{Int,Int}},
     concordance_tracker::ConcordanceTracker,
     balanced_complexes::BitVector
 )
-    n_complexes = length(balanced_complexes)
+    # Collect all matrix entries for single batch construction
+    I_vals = Int[]
+    J_vals = Int[]
+    V_vals = Int[]
 
-    # Batch process balanced complexes on diagonal - collect indices first
-    balanced_indices = Int[]
-    for i in 1:n_complexes
-        if balanced_complexes[i] && concordance_matrix[i, i] == 0
-            push!(balanced_indices, i)
+    # Pre-allocate with generous estimate to avoid repeated allocations
+    estimated_balanced = length(trivially_balanced) + count(balanced_complexes)
+    estimated_pairs = length(trivial_pairs) + n_complexes ÷ 4  # Conservative estimate
+    total_estimate = estimated_balanced + estimated_pairs
+    sizehint!(I_vals, total_estimate)
+    sizehint!(J_vals, total_estimate)
+    sizehint!(V_vals, total_estimate)
+
+    # 1. Add trivially balanced complexes to diagonal (Trivially_balanced = 4)
+    # These have highest priority and shouldn't be overwritten
+    for complex_id in trivially_balanced
+        idx = get(complex_idx, complex_id, 0)
+        if idx > 0
+            push!(I_vals, idx)
+            push!(J_vals, idx)
+            push!(V_vals, Int(Trivially_balanced))  # 4
         end
     end
 
-    # Vectorized assignment for balanced complexes
-    for idx in balanced_indices
-        concordance_matrix[idx, idx] = Int(Balanced)  # 3
+    # Track which diagonal positions are already taken
+    trivially_balanced_indices = Set{Int}()
+    for complex_id in trivially_balanced
+        idx = get(complex_idx, complex_id, 0)
+        if idx > 0
+            push!(trivially_balanced_indices, idx)
+        end
     end
 
-    # Extract concordant pairs efficiently with pre-sized dictionary
-    # Estimate capacity based on typical concordance patterns (most complexes are in small groups)
+    # 2. Add other balanced complexes to diagonal (Balanced = 3)
+    # Only if not already trivially balanced
+    for i in 1:n_complexes
+        if balanced_complexes[i] && i ∉ trivially_balanced_indices
+            push!(I_vals, i)
+            push!(J_vals, i)
+            push!(V_vals, Int(Balanced))  # 3
+        end
+    end
+
+    # 3. Add trivial pairs (Trivially_concordant = 2)
+    for (id1, id2) in trivial_pairs
+        i = get(complex_idx, id1, 0)
+        j = get(complex_idx, id2, 0)
+        if i > 0 && j > 0 && i != j
+            # Ensure upper triangular ordering
+            upper_i, upper_j = i <= j ? (i, j) : (j, i)
+            push!(I_vals, upper_i)
+            push!(J_vals, upper_j)
+            push!(V_vals, Int(Trivially_concordant))  # 2
+        end
+    end
+
+    # Track which pairs are already set to avoid overwriting
+    existing_pairs = Set{Tuple{Int,Int}}()
+    for (id1, id2) in trivial_pairs
+        i = get(complex_idx, id1, 0)
+        j = get(complex_idx, id2, 0)
+        if i > 0 && j > 0 && i != j
+            upper_i, upper_j = i <= j ? (i, j) : (j, i)
+            push!(existing_pairs, (upper_i, upper_j))
+        end
+    end
+
+    # 4. Add discovered concordant pairs (Concordant = 1)
+    # Extract modules from concordance tracker
     root_to_complexes = Dict{Int,Vector{Int}}()
-    sizehint!(root_to_complexes, n_complexes ÷ 4)  # Heuristic: assume average group size of 4
+    sizehint!(root_to_complexes, n_complexes ÷ 4)
 
     for i in 1:n_complexes
         root = find_set!(concordance_tracker, i)
@@ -1993,32 +2007,31 @@ function populate_discovered_relationships!(
         push!(group, i)
     end
 
-    # Pre-collect all concordant pairs to minimize conditional checks during assignment
-    concordant_pairs = Tuple{Int,Int}[]
-    # Estimate total pairs: for groups of size g, we get g*(g-1)/2 pairs
-    estimated_pairs = sum(max(0, length(group) * (length(group) - 1) ÷ 2)
-                          for group in values(root_to_complexes) if length(group) > 1)
-    sizehint!(concordant_pairs, estimated_pairs)
-
-    # Generate all concordant pairs efficiently
+    # Add concordant pairs from modules
     for complex_group in values(root_to_complexes)
         group_size = length(complex_group)
         if group_size > 1
             for i in 1:group_size-1
                 for j in i+1:group_size
                     idx1, idx2 = complex_group[i], complex_group[j]
-                    # Pre-sort to ensure upper triangle ordering
+                    # Ensure upper triangular ordering
                     upper_i, upper_j = idx1 <= idx2 ? (idx1, idx2) : (idx2, idx1)
-                    push!(concordant_pairs, (upper_i, upper_j))
+                    # Only add if not already set (trivial pairs have priority)
+                    if (upper_i, upper_j) ∉ existing_pairs
+                        push!(I_vals, upper_i)
+                        push!(J_vals, upper_j)
+                        push!(V_vals, Int(Concordant))  # 1
+                    end
                 end
             end
         end
     end
 
-    # Batch assignment with minimal conditional checking
-    for (i, j) in concordant_pairs
-        if concordance_matrix[i, j] == 0  # Only populate if not already set
-            concordance_matrix[i, j] = Int(Concordant)  # 1
-        end
-    end
+    # Build complete sparse matrix in one efficient operation
+    sparse_matrix = SparseArrays.sparse(I_vals, J_vals, V_vals, n_complexes, n_complexes)
+    concordance_matrix = LinearAlgebra.UpperTriangular(sparse_matrix)
+
+    return concordance_matrix
 end
+
+
