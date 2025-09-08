@@ -13,7 +13,7 @@
 #SBATCH --array=1-ARRAY_SIZE%15  # Process up to 15 jobs concurrently
 
 # Parameters to modify
-MODELS_DIR="/work/schaffran1/toolbox/prpd_models/ordered"  # Directory containing models
+MODELS_DIR="/work/schaffran1/toolbox/prpd_models/random_0"  # Directory containing models
 RESULTS_BASE_DIR="/work/schaffran1/jobresults"       # Base directory for results
 
 # Use single results directory
