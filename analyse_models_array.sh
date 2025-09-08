@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=cocoa_array
-#SBATCH --chdir=/work/schaffran1/results_testjobs
-#SBATCH --output=/cocoa_model_%A_%a.out
+#SBATCH --chdir=/work/schaffran1/jobresults
+#SBATCH --output=/work/schaffran1/jobresults/cocoa_model_%A_%a.out
 #SBATCH --time=24:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -14,7 +14,7 @@
 
 # Parameters to modify
 MODELS_DIR="/work/schaffran1/toolbox/prpd_models/ordered"  # Directory containing models
-RESULTS_BASE_DIR="/work/schaffran1/results_testjobs"       # Base directory for results
+RESULTS_BASE_DIR="/work/schaffran1/jobresults"       # Base directory for results
 
 # Use single results directory
 RESULTS_DIR="$RESULTS_BASE_DIR"
