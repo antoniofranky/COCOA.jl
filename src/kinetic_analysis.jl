@@ -268,57 +268,57 @@ Optimized implementation for large metabolic networks with sparse operations.
 """
 function upstream_algorithm(extended_module::Vector{Int}, A_matrix::SparseArrays.SparseMatrixCSC{Int,Int}; verbose::Bool=true)
     if isempty(extended_module)
-        verbose && @info "Empty extended module provided"
+        verbose && @debug "Empty extended module provided"
         return Int[]
     end
 
-    verbose && @info "Starting upstream algorithm" initial_size = length(extended_module)
+    verbose && @debug "Starting upstream algorithm" initial_size = length(extended_module)
 
     # Phase I: Iteratively exclude entry complexes (autonomous property)
     current_set = copy(extended_module)
     phase_i_excluded = Int[]
     phase_i_iterations = 0
 
-    verbose && @info " Phase I: Removing entry complexes (autonomous property)"
+    verbose && @debug " Phase I: Removing entry complexes (autonomous property)"
 
     while true
         phase_i_iterations += 1
         entry_complexes = find_entry_complexes(current_set, A_matrix)
 
         if isempty(entry_complexes)
-            verbose && @info "Phase I complete" iterations = phase_i_iterations excluded_total = length(phase_i_excluded) remaining = length(current_set)
+            verbose && @debug "Phase I complete" iterations = phase_i_iterations excluded_total = length(phase_i_excluded) remaining = length(current_set)
             break  # Achieved autonomous property
         end
 
-        verbose && @info "Iteration $phase_i_iterations" entry_found = length(entry_complexes) entry_complexes = entry_complexes
+        verbose && @debug "Iteration $phase_i_iterations" entry_found = length(entry_complexes) entry_complexes = entry_complexes
 
         append!(phase_i_excluded, entry_complexes)
         current_set = setdiff(current_set, entry_complexes)
 
         if isempty(current_set)
-            verbose && @info "  All complexes excluded in Phase I - no autonomous subset exists"
+            verbose && @debug "  All complexes excluded in Phase I - no autonomous subset exists"
             return Int[]  # All complexes excluded
         end
 
-        verbose && @info "  After removing entries" remaining = length(current_set)
+        verbose && @debug "  After removing entries" remaining = length(current_set)
     end
 
     # Phase II: Exclude non-reactant complexes (feeding property)
-    verbose && @info "Phase II: Removing non-reactant complexes (feeding property)"
+    verbose && @debug "Phase II: Removing non-reactant complexes (feeding property)"
 
     nonreactant = find_nonreactant_complexes(current_set, A_matrix)
     phase_ii_excluded = nonreactant
     current_set = setdiff(current_set, nonreactant)
 
-    verbose && @info "Phase II result" excluded = length(nonreactant) excluded_complexes = nonreactant remaining = length(current_set)
+    verbose && @debug "Phase II result" excluded = length(nonreactant) excluded_complexes = nonreactant remaining = length(current_set)
 
     if isempty(current_set)
-        verbose && @info "All remaining complexes excluded in Phase II - no feeding subset exists"
+        verbose && @debug "All remaining complexes excluded in Phase II - no feeding subset exists"
         return Int[]
     end
 
     # Phase III: Iteratively exclude exit complexes (feeding property) 
-    verbose && @info "Phase III: Removing exit complexes (feeding property)"
+    verbose && @debug "Phase III: Removing exit complexes (feeding property)"
 
     phase_iii_complexes = Int[]
     phase_iii_iterations = 0
@@ -328,53 +328,53 @@ function upstream_algorithm(extended_module::Vector{Int}, A_matrix::SparseArrays
         exit_complexes = find_exit_complexes(current_set, A_matrix)
 
         if isempty(exit_complexes)
-            verbose && @info "   Phase III complete" iterations = phase_iii_iterations excluded_total = length(phase_iii_complexes) remaining = length(current_set)
+            verbose && @debug "   Phase III complete" iterations = phase_iii_iterations excluded_total = length(phase_iii_complexes) remaining = length(current_set)
             break  # No more exit complexes
         end
 
-        verbose && @info "Iteration $phase_iii_iterations" exit_found = length(exit_complexes) exit_complexes = exit_complexes
+        verbose && @debug "Iteration $phase_iii_iterations" exit_found = length(exit_complexes) exit_complexes = exit_complexes
 
         append!(phase_iii_complexes, exit_complexes)
         current_set = setdiff(current_set, exit_complexes)
 
         if isempty(current_set)
-            verbose && @info "  All remaining complexes are exit complexes"
+            verbose && @debug "  All remaining complexes are exit complexes"
             break
         end
 
-        verbose && @info "  After removing exits" remaining = length(current_set)
+        verbose && @debug "  After removing exits" remaining = length(current_set)
     end
 
     # Phase IV: Exclude terminal strongly connected components (feeding property)
-    verbose && @info "Phase IV: Processing strongly connected components"
+    verbose && @debug "Phase IV: Processing strongly connected components"
 
     phase_iv_complexes = Int[]
 
     if !isempty(current_set)
         components = find_strongly_connected_components(A_matrix, current_set)
-        verbose && @info "  Found $(length(components)) strongly connected components"
+        verbose && @debug "  Found $(length(components)) strongly connected components"
 
         for (comp_idx, component) in enumerate(components)
             is_terminal = is_terminal_component(component, current_set, A_matrix)
 
             if !is_terminal
                 # Non-terminal component - these are part of kinetic module
-                verbose && @info "  Component $comp_idx is NON-TERMINAL" size = length(component) complexes = component
+                verbose && @debug "  Component $comp_idx is NON-TERMINAL" size = length(component) complexes = component
                 append!(phase_iv_complexes, component)
             else
                 # Terminal components are excluded (not added to phase_iv_complexes)
-                verbose && @info "  Component $comp_idx is TERMINAL (excluded)" size = length(component) complexes = component
+                verbose && @debug "  Component $comp_idx is TERMINAL (excluded)" size = length(component) complexes = component
             end
         end
     else
-        verbose && @info "  No complexes remaining for SCC analysis"
+        verbose && @debug "  No complexes remaining for SCC analysis"
     end
 
     # Return union of Phase III and Phase IV complexes (the upstream set)
     # This matches the theoretical specification and R implementation
     upstream_set = union(phase_iii_complexes, phase_iv_complexes)
 
-    verbose && @info " Upstream algorithm complete" (
+    verbose && @debug " Upstream algorithm complete" (
         initial_complexes=length(extended_module),
         phase_i_excluded=length(phase_i_excluded),
         phase_ii_excluded=length(phase_ii_excluded),
@@ -424,22 +424,26 @@ function apply_kinetic_analysis!(
     min_module_size::Int=1,
     verbose::Bool=true
 )
-    verbose && @info "Applying upstream algorithm with coupling detection for kinetic module identification"
+    verbose && @debug "Applying upstream algorithm with coupling detection for kinetic module identification"
 
-    # Reset kinetic modules
-    fill!(complete_model.kinetic_modules, 0)
+    # Initialize kinetic analysis fields
+    complete_model.kinetic_modules = fill(0, length(complete_model.complex_ids))
+    complete_model.interface_reactions = falses(complete_model.stats["n_reactions"])
+    complete_model.acr_metabolites = Symbol[]
+    complete_model.acrr_pairs = Tuple{Symbol,Symbol}[]
+    complete_model.giant_id = 0
 
     # Get balanced complexes (concordance module 0) 
     balanced_complexes = findall(==(0), complete_model.concordance_modules)
 
     # Build A matrix on-demand from constraints
     A_matrix, _, _ = build_A_matrix_from_constraints(constraints)
-    verbose && @info "Built A matrix on-demand" size = size(A_matrix) nnz = length(A_matrix.nzval)
+    verbose && @debug "Built A matrix on-demand" size = size(A_matrix) nnz = length(A_matrix.nzval)
 
     # Extract linkage classes for coupling detection
     linkage_classes = extract_linkage_classes(A_matrix)
 
-    @info "Setup for coupling detection" n_balanced = length(balanced_complexes) n_linkage_classes = length(linkage_classes)
+    @debug "Setup for coupling detection" n_balanced = length(balanced_complexes) n_linkage_classes = length(linkage_classes)
 
     # Step 1: Apply upstream algorithm to each extended module to get upstream sets
     upstream_sets = Vector{Int}[]  # Store upstream sets from each concordance module
@@ -468,7 +472,7 @@ function apply_kinetic_analysis!(
         if !isempty(upstream_set)
             push!(upstream_sets, upstream_set)
             module_to_upstream[concordance_module_id] = upstream_set
-            @info "Upstream set found" concordance_module = concordance_module_id upstream_size = length(upstream_set)
+            @debug "Upstream set found" concordance_module = concordance_module_id upstream_size = length(upstream_set)
         end
     end
 
@@ -484,7 +488,7 @@ function apply_kinetic_analysis!(
         return 0
     end
 
-    @info "Applying R-style module merging" n_upstream_sets = length(upstream_sets)
+    @info "Merging modules" n_upstream_sets = length(upstream_sets)
 
     # Step 1: Create intersection matrix (like R code mdiff matrix)
     n_sets = length(upstream_sets)
@@ -496,7 +500,7 @@ function apply_kinetic_analysis!(
                 intersection_count = length(intersect(upstream_sets[i], upstream_sets[j]))
                 intersection_matrix[i, j] = intersection_count
                 if intersection_count > 0
-                    @info "Intersection found between upstream sets $i and $j" shared_complexes = intersection_count
+                    @debug "Intersection found between upstream sets $i and $j" shared_complexes = intersection_count
                 end
             end
         end
@@ -537,7 +541,7 @@ function apply_kinetic_analysis!(
         end
     end
 
-    @info "Found $(length(components)) connected components for merging" component_sizes = [length(c) for c in components]
+    @debug "Found $(length(components)) connected components for merging" component_sizes = [length(c) for c in components]
 
     # Step 4: Merge modules in same connected component 
     # (like R code: final_lres[[length(final_lres) + 1]] <- union(lres[[p[1]]], lres[[p[j]]]))
@@ -551,7 +555,7 @@ function apply_kinetic_analysis!(
             for j in 2:length(component)
                 merged_module = union(merged_module, upstream_sets[component[j]])
             end
-            @info "Merged component $comp_id" original_modules = component merged_size = length(merged_module)
+            @debug "Merged component $comp_id" original_modules = component merged_size = length(merged_module)
         end
 
         # Add merged module to final kinetic modules
@@ -560,7 +564,7 @@ function apply_kinetic_analysis!(
         end
     end
 
-    # Step 5: Add remaining singleton complexes (like R code)
+    # Step 5: Add remaining singleton complexes
     # Find all complexes that participated in extended modules but aren't in any upstream set
     all_upstream_complexes = Set{Int}()
     for kinetic_module in kinetic_modules
@@ -597,12 +601,26 @@ function apply_kinetic_analysis!(
                 complete_model.kinetic_modules[complex_idx] = kinetic_module_count
             end
 
-            @info "Kinetic module $kinetic_module_count created" size = length(kinetic_complexes)
+            @debug "Kinetic module $kinetic_module_count created" size = length(kinetic_complexes)
         end
     end
 
     # Update model statistics
     complete_model.stats["n_kinetic_modules"] = kinetic_module_count
+
+    # Find and store the ID of the largest kinetic module (giant component)
+    if kinetic_module_count > 0
+        module_sizes = [length(km) for (i, km) in enumerate(kinetic_modules) if length(km) >= min_module_size]
+        if !isempty(module_sizes)
+            largest_module_idx = argmax(module_sizes)
+            complete_model.giant_id = largest_module_idx
+            @info "Giant kinetic module identified" giant_id = largest_module_idx giant_size = module_sizes[largest_module_idx]
+        else
+            complete_model.giant_id = 0
+        end
+    else
+        complete_model.giant_id = 0
+    end
 
     # Step 7: Detect ACR and ACRR properties from kinetic modules
     if kinetic_module_count > 0
@@ -628,32 +646,22 @@ function apply_kinetic_analysis!(
         @info "Detecting interface reactions"
         detect_interface_reactions!(complete_model, kinetic_modules, constraints)
 
-        # Convert indices to metabolite IDs for storage
-        acr_metabolite_ids = Vector{Symbol}()
+        # Convert indices to metabolite IDs and store directly in model
         if !isempty(acr_metabolites)
             for met_idx in acr_metabolites
                 if met_idx <= length(complete_model.metabolite_ids)
-                    push!(acr_metabolite_ids, complete_model.metabolite_ids[met_idx])
+                    push!(complete_model.acr_metabolites, complete_model.metabolite_ids[met_idx])
                 end
             end
         end
 
-        acrr_metabolite_id_pairs = Vector{Tuple{Symbol,Symbol}}()
         if !isempty(acrr_pairs)
             for (met1_idx, met2_idx) in acrr_pairs
                 if met1_idx <= length(complete_model.metabolite_ids) && met2_idx <= length(complete_model.metabolite_ids)
                     met1_id = complete_model.metabolite_ids[met1_idx]
                     met2_id = complete_model.metabolite_ids[met2_idx]
-                    push!(acrr_metabolite_id_pairs, (met1_id, met2_id))
+                    push!(complete_model.acrr_pairs, (met1_id, met2_id))
                 end
-            end
-        end
-
-        # Update model's ACR metabolites BitVector
-        fill!(complete_model.acr_metabolites, false)  # Reset
-        for met_idx in acr_metabolites
-            if met_idx <= length(complete_model.acr_metabolites)
-                complete_model.acr_metabolites[met_idx] = true
             end
         end
 
@@ -661,10 +669,8 @@ function apply_kinetic_analysis!(
         n_interface_reactions = count(complete_model.interface_reactions)
         n_intra_module_reactions = complete_model.stats["n_reactions"] - n_interface_reactions
 
-        complete_model.stats["n_acr_metabolites"] = length(acr_metabolites)
-        complete_model.stats["n_acrr_metabolite_pairs"] = length(acrr_pairs)
-        complete_model.stats["acr_metabolite_ids"] = acr_metabolite_ids
-        complete_model.stats["acrr_metabolite_id_pairs"] = acrr_metabolite_id_pairs
+        complete_model.stats["n_acr_metabolites"] = length(complete_model.acr_metabolites)
+        complete_model.stats["n_acrr_metabolite_pairs"] = length(complete_model.acrr_pairs)
         complete_model.stats["n_interface_reactions"] = n_interface_reactions
         complete_model.stats["n_intra_module_reactions"] = n_intra_module_reactions
 
@@ -676,15 +682,16 @@ function apply_kinetic_analysis!(
         @info "  No kinetic modules found - skipping ACR/ACRR analysis"
         complete_model.stats["n_acr_metabolites"] = 0
         complete_model.stats["n_acrr_metabolite_pairs"] = 0
-        complete_model.stats["acr_metabolite_ids"] = Symbol[]
-        complete_model.stats["acrr_metabolite_id_pairs"] = Tuple{Symbol,Symbol}[]
+        complete_model.stats["n_interface_reactions"] = 0
+        complete_model.stats["n_intra_module_reactions"] = complete_model.stats["n_reactions"]
     end
 
     @info "Kinetic analysis with coupling detection and robustness analysis completed" (
         kinetic_modules=kinetic_module_count,
         total_complexes=total_kinetic_complexes,
-        acr_metabolites=get(complete_model.stats, "n_acr_metabolites", 0),
-        acrr_pairs=get(complete_model.stats, "n_acrr_metabolite_pairs", 0)
+        acr_metabolites=length(complete_model.acr_metabolites),
+        acrr_pairs=length(complete_model.acrr_pairs),
+        interface_reactions=count(complete_model.interface_reactions)
     )
 
     return kinetic_module_count
@@ -850,7 +857,7 @@ Updates the interface_reactions BitVector in the model.
 function detect_interface_reactions!(complete_model::CompleteConcordanceModel, kinetic_modules::Vector{Vector{Int}}, constraints::C.ConstraintTree)
     @info "Detecting interface reactions following R reference logic"
 
-    # Reset interface reactions (assume all are interface initially)
+    # Reset interface reactions BitVector (assume all are interface initially)
     fill!(complete_model.interface_reactions, true)
 
     # Build A matrix on-demand from constraints
@@ -905,7 +912,7 @@ function detect_interface_reactions!(complete_model::CompleteConcordanceModel, k
     n_interface = count(complete_model.interface_reactions)
     n_intra_module = length(intra_module_reactions)
 
-    @info "Interface reaction detection complete" (
+    @debug "Interface reaction detection complete" (
         total_reactions=complete_model.stats["n_reactions"],
         intra_module_reactions=n_intra_module,
         interface_reactions=n_interface
@@ -914,331 +921,3 @@ function detect_interface_reactions!(complete_model::CompleteConcordanceModel, k
     return nothing
 end
 
-"""
-Comprehensive validation function for iterative testing of upstream algorithm phases.
-Returns detailed validation report for debugging and verification.
-"""
-function validate_upstream_algorithm(complete_model::CompleteConcordanceModel; verbose::Bool=true)
-    @info "Starting comprehensive validation of upstream algorithm"
-
-    validation_results = Dict{String,Any}()
-
-    # Get test data
-    balanced_complexes = findall(==(0), complete_model.concordance_modules)
-    A_matrix = complete_model.complex_reaction_matrix
-
-    validation_results["n_balanced"] = length(balanced_complexes)
-    validation_results["n_concordance_modules"] = complete_model.stats["n_concordance_modules"]
-    validation_results["matrix_size"] = size(A_matrix)
-
-    verbose && @info "Validation setup" n_balanced = length(balanced_complexes) n_concordance_modules = complete_model.stats["n_concordance_modules"] matrix_size = size(A_matrix)
-
-    # Test each concordance module
-    module_results = Dict{Int,Any}()
-
-    for concordance_module_id in 1:complete_model.stats["n_concordance_modules"]
-        if concordance_module_id == 0
-            continue
-        end
-
-        concordance_complexes = findall(==(concordance_module_id), complete_model.concordance_modules)
-
-        if isempty(concordance_complexes)
-            continue
-        end
-
-        extended_module = union(balanced_complexes, concordance_complexes)
-
-        verbose && @info "Testing concordance module $concordance_module_id" n_complexes = length(concordance_complexes) extended_size = length(extended_module)
-
-        # Phase-by-phase validation
-        phase_results = validate_algorithm_phases(extended_module, A_matrix, verbose)
-        module_results[concordance_module_id] = phase_results
-
-        # Final algorithm result
-        kinetic_complexes = upstream_algorithm(extended_module, A_matrix)
-        phase_results["final_kinetic_size"] = length(kinetic_complexes)
-        phase_results["kinetic_complexes"] = kinetic_complexes
-
-        verbose && @info "Module $concordance_module_id result" kinetic_size = length(kinetic_complexes)
-    end
-
-    validation_results["module_results"] = module_results
-
-    # Overall summary
-    total_kinetic_complexes = sum(result["final_kinetic_size"] for result in values(module_results))
-    modules_with_kinetic = count(result["final_kinetic_size"] > 0 for result in values(module_results))
-
-    validation_results["summary"] = (
-        total_modules_tested=length(module_results),
-        modules_with_kinetic=modules_with_kinetic,
-        total_kinetic_complexes=total_kinetic_complexes
-    )
-
-    @info "Validation complete" summary = validation_results["summary"]
-
-    return validation_results
-end
-
-"""
-Debug Phase III exit complex detection logic specifically.
-"""
-function debug_exit_complex_detection(current_set::Vector{Int}, A_matrix::SparseArrays.SparseMatrixCSC{Int,Int}; verbose::Bool=true)
-    verbose && @info "Debugging exit complex detection for $(length(current_set)) complexes"
-
-    exit_complexes_found = Int[]
-
-    for complex_idx in current_set
-        verbose && @info "Checking complex $complex_idx for exit connections"
-
-        # Find outgoing reactions where this complex is consumed
-        outgoing_reactions = SparseArrays.findnz(A_matrix[complex_idx, :])[1]
-
-        exits_to_external = false
-        external_products = Int[]
-
-        for rxn_idx in outgoing_reactions
-            if A_matrix[complex_idx, rxn_idx] < 0  # This complex is consumed
-                verbose && @info "  Complex $complex_idx is consumed in reaction $rxn_idx"
-
-                # Check products of this reaction
-                products = SparseArrays.findnz(A_matrix[:, rxn_idx])[1]
-
-                for product_idx in products
-                    if A_matrix[product_idx, rxn_idx] > 0  # Is a product
-                        if product_idx ∉ current_set  # Product is OUTSIDE our set
-                            verbose && @info "    → Product $product_idx is OUTSIDE current set - EXIT FOUND!"
-                            exits_to_external = true
-                            push!(external_products, product_idx)
-                        else
-                            verbose && @info "    → Product $product_idx is inside current set"
-                        end
-                    end
-                end
-            end
-        end
-
-        if exits_to_external
-            push!(exit_complexes_found, complex_idx)
-            verbose && @info "   Complex $complex_idx is an EXIT complex (connects to external: $external_products)"
-        else
-            verbose && @info "  ✗ Complex $complex_idx has no external connections"
-        end
-    end
-
-    verbose && @info "Phase III debug complete: found $(length(exit_complexes_found)) exit complexes: $exit_complexes_found"
-
-    return exit_complexes_found
-end
-
-"""
-Debug the terminal component classification logic specifically.
-"""
-function debug_terminal_components(remaining_complexes::Vector{Int}, A_matrix::SparseArrays.SparseMatrixCSC{Int,Int}; verbose::Bool=true)
-    if isempty(remaining_complexes)
-        @info "No complexes to analyze"
-        return
-    end
-
-    # Get SCCs
-    components = find_strongly_connected_components(A_matrix, remaining_complexes)
-
-    verbose && @info "Found $(length(components)) strongly connected components"
-
-    for (i, component) in enumerate(components)
-        verbose && @info "Analyzing component $i with $(length(component)) complexes: $component"
-
-        # Check each complex in component for outgoing connections
-        outgoing_connections = Dict{Int,Vector{Int}}()
-
-        for complex_idx in component
-            connections = Int[]
-
-            # Find outgoing reactions where this complex is consumed
-            reactions = SparseArrays.findnz(A_matrix[complex_idx, :])[1]
-
-            for rxn_idx in reactions
-                if A_matrix[complex_idx, rxn_idx] < 0  # This complex is a substrate
-                    # Find products of this reaction
-                    products = SparseArrays.findnz(A_matrix[:, rxn_idx])[1]
-
-                    for product_idx in products
-                        if A_matrix[product_idx, rxn_idx] > 0 &&  # Is a product
-                           product_idx ∈ remaining_complexes &&   # Is in our remaining set
-                           product_idx ∉ component               # Is NOT in same component
-                            push!(connections, product_idx)
-                        end
-                    end
-                end
-            end
-
-            outgoing_connections[complex_idx] = connections
-        end
-
-        # Determine if terminal
-        has_external_connections = any(!isempty(connections) for connections in values(outgoing_connections))
-        is_terminal = !has_external_connections
-
-        verbose && @info "Component $i analysis" is_terminal = is_terminal outgoing_connections = outgoing_connections
-
-        if !is_terminal
-            verbose && @info "Component $i is NON-TERMINAL - should be included in kinetic module!"
-        else
-            verbose && @info "Component $i is terminal - correctly excluded"
-        end
-    end
-
-    return components
-end
-
-"""
-Validate each phase of the upstream algorithm individually.
-"""
-function validate_algorithm_phases(extended_module::Vector{Int}, A_matrix::SparseArrays.SparseMatrixCSC{Int,Int}, verbose::Bool=false)
-    phase_results = Dict{String,Any}()
-
-    # Initial state
-    current_set = copy(extended_module)
-    phase_results["initial_size"] = length(current_set)
-
-    # Phase I: Entry complexes validation
-    phase_i_iterations = 0
-    phase_i_total_excluded = Int[]
-
-    while true
-        phase_i_iterations += 1
-        entry_complexes = find_entry_complexes(current_set, A_matrix)
-
-        if isempty(entry_complexes)
-            break
-        end
-
-        verbose && @info "Phase I iteration $phase_i_iterations" entry_found = length(entry_complexes) remaining = length(current_set)
-
-        append!(phase_i_total_excluded, entry_complexes)
-        current_set = setdiff(current_set, entry_complexes)
-
-        if isempty(current_set)
-            break
-        end
-    end
-
-    phase_results["phase_i"] = (
-        iterations=phase_i_iterations,
-        excluded=phase_i_total_excluded,
-        excluded_count=length(phase_i_total_excluded),
-        remaining_after=length(current_set)
-    )
-
-    verbose && @info "Phase I complete" iterations = phase_i_iterations excluded = length(phase_i_total_excluded) remaining = length(current_set)
-
-    if isempty(current_set)
-        phase_results["early_termination"] = "phase_i"
-        return phase_results
-    end
-
-    # Phase II: Non-reactant complexes validation
-    nonreactant = find_nonreactant_complexes(current_set, A_matrix)
-    current_set = setdiff(current_set, nonreactant)
-
-    phase_results["phase_ii"] = (
-        excluded=nonreactant,
-        excluded_count=length(nonreactant),
-        remaining_after=length(current_set)
-    )
-
-    verbose && @info "Phase II complete" excluded = length(nonreactant) remaining = length(current_set)
-
-    if isempty(current_set)
-        phase_results["early_termination"] = "phase_ii"
-        return phase_results
-    end
-
-    # Phase III: Exit complexes validation
-    phase_iii_iterations = 0
-    phase_iii_total_excluded = Int[]
-
-    while true
-        phase_iii_iterations += 1
-        exit_complexes = find_exit_complexes(current_set, A_matrix)
-
-        if isempty(exit_complexes)
-            break
-        end
-
-        verbose && @info "Phase III iteration $phase_iii_iterations" exit_found = length(exit_complexes) remaining = length(current_set)
-
-        append!(phase_iii_total_excluded, exit_complexes)
-        current_set = setdiff(current_set, exit_complexes)
-
-        if isempty(current_set)
-            break
-        end
-    end
-
-    phase_results["phase_iii"] = (
-        iterations=phase_iii_iterations,
-        excluded=phase_iii_total_excluded,
-        excluded_count=length(phase_iii_total_excluded),
-        remaining_after=length(current_set)
-    )
-
-    verbose && @info "Phase III complete" iterations = phase_iii_iterations excluded = length(phase_iii_total_excluded) remaining = length(current_set)
-
-    # Phase IV: Strongly connected components validation
-    phase_iv_complexes = Int[]
-    phase_iv_components = Vector{Int}[]
-    phase_iv_terminal_components = Vector{Int}[]
-
-    if !isempty(current_set)
-        components = find_strongly_connected_components(A_matrix, current_set)
-        phase_iv_components = components
-
-        for component in components
-            if !is_terminal_component(component, current_set, A_matrix)
-                append!(phase_iv_complexes, component)
-            else
-                push!(phase_iv_terminal_components, component)
-            end
-        end
-    end
-
-    phase_results["phase_iv"] = (
-        total_components=length(phase_iv_components),
-        terminal_components=phase_iv_terminal_components,
-        non_terminal_complexes=phase_iv_complexes,
-        non_terminal_count=length(phase_iv_complexes)
-    )
-
-    verbose && @info "Phase IV complete" total_components = length(phase_iv_components) terminal = length(phase_iv_terminal_components) non_terminal = length(phase_iv_complexes)
-
-    # Final upstream set (union of Phase III and IV)
-    upstream_set = union(phase_iii_total_excluded, phase_iv_complexes)
-    phase_results["upstream_set_size"] = length(upstream_set)
-
-    return phase_results
-end
-
-"""
-$(TYPEDSIGNATURES)
-
-Complete kinetic analysis pipeline following COBREXA-style simplicity.
-
-Performs activity concordance analysis followed by kinetic module identification
-using the upstream algorithm. This is the main entry point for kinetic analysis.
-
-Efficiently builds constraints once and reuses them for both analyses.
-
-# Arguments
-- `model`: Metabolic model (any AbstractFBCModel)
-- `kwargs`: All arguments passed through to concordance_constraints and activity_concordance_analysis
-
-# Returns
-- `CompleteConcordanceModel` with kinetic modules identified
-
-# Example
-```julia
-result = kinetic_analysis(model; solver=HiGHS.Optimizer, use_unidirectional_constraints=true)
-println("Found \$(result.stats["n_kinetic_modules"]) kinetic modules")
-```
-"""

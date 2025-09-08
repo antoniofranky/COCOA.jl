@@ -456,14 +456,13 @@ mutable struct CompleteConcordanceModel
     # === DENSE NODE PROPERTIES ===
     activity_ranges::Vector{Tuple{Float64,Float64}}
     concordance_modules::Vector{Int}
-    kinetic_modules::Vector{Int}                # 0 = no kinetic module
 
-    # === DENSE REACTION PROPERTIES ===
-    interface_reactions::BitVector              # true = Interface, false = Internal
-
-    # === METABOLITE PROPERTIES ===
-    acr_metabolites::BitVector                   # ACR per metabolite
-    acrr_pairs::Vector{Tuple{Int,Int}}          # Canonical form: i < j
+    # === KINETIC ANALYSIS FIELDS (Optional - only initialized when kinetic analysis is performed) ===
+    kinetic_modules::Union{Vector{Int},Nothing}                # 0 = no kinetic module, nothing = not analyzed
+    interface_reactions::Union{BitVector,Nothing}              # BitVector: true = interface, false = intra-module, nothing = not analyzed
+    acr_metabolites::Union{Vector{Symbol},Nothing}             # Vector of ACR metabolite IDs, nothing = not analyzed
+    acrr_pairs::Union{Vector{Tuple{Symbol,Symbol}},Nothing}    # Vector of ACRR metabolite ID pairs, nothing = not analyzed
+    giant_id::Union{Int,Nothing}                               # ID of the largest kinetic module, nothing = not analyzed
 
     # === STATISTICS ===
     stats::Dict{String,Any}
@@ -484,14 +483,17 @@ function CompleteConcordanceModel(
     J_concordance::Vector{Int}=Int[],
     V_concordance::Vector{Int}=Int[],
     lambda_dict::Dict{Tuple{Int,Int},Float64}=Dict{Tuple{Int,Int},Float64}(),
-    acrr_pairs::Vector{Tuple{Int,Int}}=Tuple{Int,Int}[],
 
     # Properties with defaults
     activity_ranges=fill((NaN, NaN), length(complex_ids)),
     concordance_modules=fill(-1, length(complex_ids)),  # -1 = singleton, 0 = balanced, >0 = concordance module
-    kinetic_modules=fill(-1, length(complex_ids)),     # -1 = not in kinetic module, >0 = kinetic module
-    interface_reactions=falses(length(reaction_ids)),
-    acr_metabolites=falses(length(metabolite_ids)),
+
+    # Kinetic analysis fields (optional - nothing means not performed)
+    kinetic_modules=nothing,
+    interface_reactions=nothing,
+    acr_metabolites=nothing,
+    acrr_pairs=nothing,
+    giant_id=nothing,
 
 
     # Statistics dictionary
@@ -538,32 +540,23 @@ function CompleteConcordanceModel(
 
     # Lambda dict is already in the correct format - no conversion needed
 
-    # Store ACRR pairs in canonical form (i < j)
-    canonical_acrr_pairs = [i < j ? (i, j) : (j, i) for (i, j) in acrr_pairs]
-    acrr_pairs = unique(canonical_acrr_pairs)
+    # Store ACRR pairs in canonical form (i < j) - handle Nothing case
+    if acrr_pairs !== nothing
+        canonical_acrr_pairs = [i < j ? (i, j) : (j, i) for (i, j) in acrr_pairs]
+        acrr_pairs = unique(canonical_acrr_pairs)
+    end
 
     # Count modules
     n_concordance_modules = length(unique(filter(x -> x >= 0, concordance_modules)))
-    n_kinetic_modules = length(unique(filter(x -> x > 0, kinetic_modules)))
-
-    # Populate stats dictionary with metadata
-    stats["n_complexes"] = n_complexes
-    stats["n_reactions"] = n_reactions
-    stats["n_metabolites"] = n_metabolites
-    stats["n_concordant"] = length(V_concordance)
-    stats["n_trivially_concordant"] = 0  # Will be set elsewhere
-    stats["n_balanced"] = 0  # Will be set elsewhere
-    stats["n_trivially_balanced"] = 0  # Will be set elsewhere
-    stats["n_concordance_modules"] = n_concordance_modules
-    stats["n_kinetic_modules"] = n_kinetic_modules
+    n_kinetic_modules = kinetic_modules !== nothing ? length(unique(filter(x -> x > 0, kinetic_modules))) : 0
 
     return CompleteConcordanceModel(
         complex_ids, complex_idx,
         reaction_ids, reaction_idx,
         metabolite_ids, metabolite_idx,
         final_concordance_matrix, lambda_dict,
-        activity_ranges, concordance_modules, kinetic_modules,
-        interface_reactions, acr_metabolites, acrr_pairs,
+        activity_ranges, concordance_modules,
+        kinetic_modules, interface_reactions, acr_metabolites, acrr_pairs, giant_id,
         stats
     )
 end
@@ -600,18 +593,25 @@ end
 
 # === ACRR QUERIES (efficient for sparse data) ===
 function has_acrr(model::CompleteConcordanceModel, c1::Symbol, c2::Symbol)
-    i, j = model.complex_idx[c1], model.complex_idx[c2]
-    canonical_pair = i < j ? (i, j) : (j, i)
+    if model.acrr_pairs === nothing
+        return false  # ACRR analysis not performed
+    end
+    canonical_pair = c1 < c2 ? (c1, c2) : (c2, c1)
     return canonical_pair ∈ model.acrr_pairs
 end
 
 function get_acrr_pairs(model::CompleteConcordanceModel)
-    return [(model.complex_ids[i], model.complex_ids[j]) for (i, j) in model.acrr_pairs]
+    if model.acrr_pairs === nothing
+        return Tuple{Symbol,Symbol}[]  # ACRR analysis not performed
+    end
+    return model.acrr_pairs
 end
 
 function add_acrr_pair!(model::CompleteConcordanceModel, c1::Symbol, c2::Symbol)
-    i, j = model.complex_idx[c1], model.complex_idx[c2]
-    canonical_pair = i < j ? (i, j) : (j, i)
+    if model.acrr_pairs === nothing
+        model.acrr_pairs = Tuple{Symbol,Symbol}[]  # Initialize if needed
+    end
+    canonical_pair = c1 < c2 ? (c1, c2) : (c2, c1)
     if canonical_pair ∉ model.acrr_pairs
         push!(model.acrr_pairs, canonical_pair)
     end
@@ -627,12 +627,16 @@ end
 
 # === ACR QUERIES ===
 function has_acr(model::CompleteConcordanceModel, metabolite::Symbol)
-    met_idx = model.metabolite_idx[metabolite]
-    return model.acr_metabolites[met_idx]
+    if model.acr_metabolites === nothing
+        return false  # ACR analysis not performed
+    end
+    return metabolite ∈ model.acr_metabolites
 end
 
 function get_acr_metabolites(model::CompleteConcordanceModel)
-    acr_idxs = findall(model.acr_metabolites)
-    return model.metabolite_ids[acr_idxs]
+    if model.acr_metabolites === nothing
+        return Symbol[]  # ACR analysis not performed
+    end
+    return model.acr_metabolites
 end
 

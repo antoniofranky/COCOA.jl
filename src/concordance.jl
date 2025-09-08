@@ -74,7 +74,6 @@ struct BatchResultAccumulator
     optimization_results::Vector{Tuple{Int,Int,Symbol,Float64}}
     temp_pairs::Vector{Tuple{Int,Int}}
     temp_values::Vector{Float64}
-    total_optimizations::Int
 end
 
 function BatchResultAccumulator(n_complexes::Int)
@@ -83,8 +82,7 @@ function BatchResultAccumulator(n_complexes::Int)
         MutableCounts(),
         Vector{Tuple{Int,Int,Symbol,Float64}}(),
         Vector{Tuple{Int,Int}}(),
-        Vector{Float64}(),
-        0
+        Vector{Float64}()
     )
 end
 
@@ -109,6 +107,7 @@ function accumulate_results!(
     acc.counts.other_error += counts.other_error
     acc.counts.transitive += counts.transitive
     acc.counts.skipped += counts.skipped
+    acc.counts.total_optimizations += counts.total_optimizations
 
     # Merge concordant pairs efficiently
     merge_pairs!(acc.concordant_pairs, concordant_pairs)
@@ -722,7 +721,7 @@ function build_final_results(state::BatchProcessingState)
         numerical_error_pairs=state.accumulator.counts.numerical_error,
         other_error_pairs=state.accumulator.counts.other_error,
         optimization_results=opt_results_dict,
-        total_optimizations=state.accumulator.total_optimizations
+        total_optimizations=state.accumulator.counts.total_optimizations
     )
 end
 
@@ -731,7 +730,7 @@ end
 """
 $(TYPEDSIGNATURES)
 
-Helper function to process optimization results into the expected format.
+Helper function   2. Change build_final_results to use acc.counts.total_optimizationsto process optimization results into the expected format.
 """
 # Define concrete types for better type stability
 # Use NaN as sentinel value instead of Nothing for better performance
@@ -1138,7 +1137,7 @@ function find_trivially_balanced_complexes(
 )::Set{Symbol}
     # Build metabolite participation map
     metabolite_participation = Dict{Symbol,Vector{Symbol}}()
-    
+
     for (complex_id, metabolite_composition) in complexes
         for (met_id, _) in metabolite_composition
             if !haskey(metabolite_participation, met_id)
@@ -1147,7 +1146,7 @@ function find_trivially_balanced_complexes(
             push!(metabolite_participation[met_id], complex_id)
         end
     end
-    
+
     # Find complexes that have at least one metabolite unique to that complex
     balanced_complexes = Set{Symbol}()
     for (complex_id, metabolite_composition) in complexes
@@ -1158,7 +1157,7 @@ function find_trivially_balanced_complexes(
             end
         end
     end
-    
+
     return balanced_complexes
 end
 
@@ -1173,7 +1172,7 @@ function find_trivially_concordant_pairs(
 )::Set{Tuple{Symbol,Symbol}}
     # Build metabolite participation map
     metabolite_participation = Dict{Symbol,Vector{Symbol}}()
-    
+
     for (complex_id, metabolite_composition) in complexes
         for (met_id, _) in metabolite_composition
             if !haskey(metabolite_participation, met_id)
@@ -1182,10 +1181,10 @@ function find_trivially_concordant_pairs(
             push!(metabolite_participation[met_id], complex_id)
         end
     end
-    
+
     # Find pairs that share a metabolite that only participates in those two complexes
     concordant_pairs = Set{Tuple{Symbol,Symbol}}()
-    
+
     for (met_id, participating_complexes) in metabolite_participation
         if length(participating_complexes) == 2
             # This metabolite only participates in exactly two complexes
@@ -1194,7 +1193,7 @@ function find_trivially_concordant_pairs(
             push!(concordant_pairs, pair)
         end
     end
-    
+
     return concordant_pairs
 end
 
@@ -1355,6 +1354,7 @@ function activity_concordance_analysis(
     @info "Populating trivial relationships in concordance matrix"
     populate_trivial_relationships!(concordance_matrix, trivially_balanced, trivial_pairs, complex_idx)
 
+
     # Set up RNG early for deterministic sampling
     rng = if seed == 0
         Random.GLOBAL_RNG
@@ -1483,6 +1483,9 @@ function activity_concordance_analysis(
 
     @info "Complex classification" balanced = count(balanced_complexes) trivially_balanced = length(trivially_balanced) positive = count(positive_complexes) negative = count(negative_complexes) unrestricted = count(unrestricted_complexes)
 
+    # Capture counts for statistics before any potential variable changes
+    n_balanced_complexes = count(balanced_complexes)
+    n_trivially_balanced_complexes = length(trivially_balanced)
 
     for (c1_id, c2_id) in trivial_pairs
         union_sets!(concordance_tracker, concordance_tracker.id_to_idx[c1_id], concordance_tracker.id_to_idx[c2_id])
@@ -1730,17 +1733,30 @@ function activity_concordance_analysis(
 
     elapsed = time() - start_time
 
+    # Calculate concordant pairs differently based on transitivity setting
+    if use_transitivity
+        # With transitivity: count all pairs in modules
+        concordant_found = total_concordant_from_modules - length(trivial_pairs)  # Non-trivial concordant pairs from modules
+        concordant_inferred = total_concordant_from_modules - length(trivial_pairs) - batch_results.concordant_count  # Found via transitivity
+        concordant_total = total_concordant_from_modules  # All concordant pairs from modules
+    else
+        # Without transitivity: only count directly optimized pairs + trivial pairs
+        concordant_found = batch_results.concordant_count  # Only pairs found through direct optimization
+        concordant_inferred = 0  # No inference when transitivity is disabled
+        concordant_total = batch_results.concordant_count + length(trivial_pairs)  # Only direct + trivial
+    end
+
     stats = Dict(
         # Analysis results
         "n_complexes" => n_complexes,
-        "n_balanced" => count(balanced_complexes),
-        "n_trivially_balanced" => length(trivially_balanced),
+        "n_balanced" => n_balanced_complexes,
+        "n_trivially_balanced" => n_trivially_balanced_complexes,
         "n_trivial_pairs" => length(trivial_pairs),
         "n_candidate_pairs" => batch_results.pairs_processed,  # Total candidates processed across all chunks
-        "n_concordant_found" => total_concordant_from_modules - length(trivial_pairs),  # Non-trivial concordant pairs from modules
+        "n_concordant_found" => concordant_found,  # Non-trivial concordant pairs 
         "n_concordant_opt" => batch_results.concordant_count,  # Found via direct optimization testing
-        "n_concordant_inferred" => total_concordant_from_modules - length(trivial_pairs) - batch_results.concordant_count,  # Found via transitivity
-        "n_concordant_total" => total_concordant_from_modules,  # All concordant pairs from modules
+        "n_concordant_inferred" => concordant_inferred,  # Found via transitivity (0 when transitivity disabled)
+        "n_concordant_total" => concordant_total,  # Total concordant pairs
         "n_non_concordant_pairs" => batch_results.non_concordant_pairs,
         "n_candidates_skipped_by_transitivity" => streaming_filter.pairs_transitivity_concordant_filtered + streaming_filter.pairs_transitivity_non_concordant_filtered,  # Candidates not tested due to transitivity
         "n_timeout_pairs" => batch_results.timeout_pairs,
@@ -1885,7 +1901,7 @@ function activity_concordance_analysis(
         activity_ranges=activity_ranges,
         concordance_modules=module_mapping,
         interface_reactions=falses(length(reaction_ids)),
-        acr_metabolites=falses(length(metabolite_ids)),
+        acr_metabolites=Symbol[],
         lambda_dict=lambda_dict,
         stats=stats
     )
@@ -1916,7 +1932,7 @@ function populate_trivial_relationships!(
             push!(balanced_indices, idx)
         end
     end
-    
+
     # Vectorized diagonal assignment for balanced complexes
     for idx in balanced_indices
         concordance_matrix[idx, idx] = Int(Trivially_balanced)  # 4
@@ -1933,7 +1949,7 @@ function populate_trivial_relationships!(
             push!(pair_indices, (upper_i, upper_j))
         end
     end
-    
+
     # Batch assignment for concordant pairs
     for (i, j) in pair_indices
         concordance_matrix[i, j] = Int(Trivially_concordant)  # 2
@@ -1958,7 +1974,7 @@ function populate_discovered_relationships!(
             push!(balanced_indices, i)
         end
     end
-    
+
     # Vectorized assignment for balanced complexes
     for idx in balanced_indices
         concordance_matrix[idx, idx] = Int(Balanced)  # 3
@@ -1966,9 +1982,9 @@ function populate_discovered_relationships!(
 
     # Extract concordant pairs efficiently with pre-sized dictionary
     # Estimate capacity based on typical concordance patterns (most complexes are in small groups)
-    root_to_complexes = Dict{Int, Vector{Int}}()
+    root_to_complexes = Dict{Int,Vector{Int}}()
     sizehint!(root_to_complexes, n_complexes ÷ 4)  # Heuristic: assume average group size of 4
-    
+
     for i in 1:n_complexes
         root = find_set!(concordance_tracker, i)
         group = get!(root_to_complexes, root) do
@@ -1976,14 +1992,14 @@ function populate_discovered_relationships!(
         end
         push!(group, i)
     end
-    
+
     # Pre-collect all concordant pairs to minimize conditional checks during assignment
     concordant_pairs = Tuple{Int,Int}[]
     # Estimate total pairs: for groups of size g, we get g*(g-1)/2 pairs
-    estimated_pairs = sum(max(0, length(group) * (length(group) - 1) ÷ 2) 
-                         for group in values(root_to_complexes) if length(group) > 1)
+    estimated_pairs = sum(max(0, length(group) * (length(group) - 1) ÷ 2)
+                          for group in values(root_to_complexes) if length(group) > 1)
     sizehint!(concordant_pairs, estimated_pairs)
-    
+
     # Generate all concordant pairs efficiently
     for complex_group in values(root_to_complexes)
         group_size = length(complex_group)
@@ -1998,7 +2014,7 @@ function populate_discovered_relationships!(
             end
         end
     end
-    
+
     # Batch assignment with minimal conditional checking
     for (i, j) in concordant_pairs
         if concordance_matrix[i, j] == 0  # Only populate if not already set
