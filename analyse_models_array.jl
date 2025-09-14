@@ -126,7 +126,31 @@ try
         ),
         "timestamp", Dates.now())
 
-    # Print summary - handle ConcentrationRobustnessResults
+    # Print robustness results if available
+    println("\nRobustness Results:")
+    try
+        if results.acr_metabolites !== nothing
+            println("  ACR metabolites: $(length(results.acr_metabolites))")
+        else
+            println("  ACR metabolites: 0 (not analyzed)")
+        end
+
+        if results.acrr_pairs !== nothing
+            println("  ACRR pairs: $(length(results.acrr_pairs))")
+        else
+            println("  ACRR pairs: 0 (not analyzed)")
+        end
+
+        if results.interface_reactions !== nothing
+            println("  Interface reactions: $(count(results.interface_reactions))")
+        else
+            println("  Interface reactions: 0 (not analyzed)")
+        end
+    catch e
+        println("  Robustness analysis data not accessible")
+    end
+
+    # Print summary - handle CompleteConcordanceModel
     println("\nKinetic Concordance Analysis Summary:")
     println("="^60)
     println("Analysis completed successfully!")
@@ -134,35 +158,43 @@ try
     println("Memory allocated: $(round(memory_allocated / 1e9, digits=2)) GB")
     println("GC time: $(round(gc_time, digits=2))s ($(round(gc_time/analysis_duration*100, digits=1))%)")
 
-    # Display kinetic and robustness results
-    println("\nRobustness Results:")
-    println("  Robust metabolites: $(results.n_robust_metabolites)")
-    println("  Robust metabolite pairs: $(results.n_robust_pairs)")
-    println("  Largest robust module size: $(results.largest_robust_module_size)")
-
-    # Print general statistics from summary if available
-    if results.summary !== nothing
-        stats = results.summary
-        if haskey(stats, "n_complexes")
+    # Print general statistics from CompleteConcordanceModel.stats
+    try
+        if hasfield(typeof(results), :stats) && results.stats !== nothing && !isempty(results.stats)
+            stats = results.stats
             println("\nModel Statistics:")
-            println("  Complexes: $(stats["n_complexes"])")
+            println("  Total Complexes: $(get(stats, "n_complexes", 0))")
+            println("  Total Reactions: $(get(stats, "n_reactions", 0))")
+            println("  Total Metabolites: $(get(stats, "n_metabolites", 0))")
+
+            if haskey(stats, "n_balanced")
+                println("  Balanced complexes: $(stats["n_balanced"])")
+            end
+
+            if haskey(stats, "n_concordance_modules")
+                println("  Concordance modules: $(stats["n_concordance_modules"])")
+            end
+
+            if haskey(stats, "n_concordant_total")
+                println("\nConcordance Results:")
+                println("  Total concordant pairs: $(stats["n_concordant_total"])")
+            end
+
+            if haskey(stats, "n_kinetic_modules")
+                println("\nKinetic Statistics:")
+                println("  Kinetic modules: $(stats["n_kinetic_modules"])")
+            end
+        else
+            println("\nModel Statistics:")
+            println("  Total Complexes: 0")
+            println("  Total Reactions: 0")
+            println("  Total Metabolites: 0")
         end
-        if haskey(stats, "n_balanced")
-            println("  Balanced complexes: $(stats["n_balanced"])")
-        end
-        if haskey(stats, "n_modules")
-            println("  Modules found: $(stats["n_modules"])")
-        end
-        if haskey(stats, "n_concordant_total")
-            println("\nConcordance Results:")
-            println("  Total concordant pairs: $(stats["n_concordant_total"])")
-        end
-        if haskey(stats, "n_kinetic_modules")
-            println("\nKinetic Statistics:")
-            println("  Kinetic modules: $(stats["n_kinetic_modules"])")
-        end
-    else
-        println("\nNote: Summary statistics not available")
+    catch e
+        println("\nNote: Could not access model statistics")
+        println("  Total Complexes: 0")
+        println("  Total Reactions: 0")
+        println("  Total Metabolites: 0")
     end
     println("="^60)
 

@@ -39,15 +39,6 @@ for ((i=0; i<$MODEL_COUNT; i++)); do
     echo "  $((i+1)). $(basename "${MODEL_FILES[$i]}")"
 done
 
-echo ""
-echo "Job Configuration:"
-echo "  Array size: 1-$MODEL_COUNT"
-echo "  Max concurrent jobs: 15"
-echo "  Time limit: 24 hours per job"
-echo "  Memory: 128GB per job"
-echo "  CPUs: 64 per job (pinned 0-63 via LIKWID)"
-echo "  Memory tracking: SLURM accounting (MaxRSS/MaxVMSize)"
-
 # Create a temporary copy of the job script with the correct array size and paths
 TEMP_SCRIPT="analyse_models_array_temp_$$.sh"
 cp analyse_models_array.sh "$TEMP_SCRIPT"

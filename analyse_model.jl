@@ -8,7 +8,7 @@ model_path = "/work/schaffran1/toolbox/prpd_models/random_90/yHMPu5000034952_Cit
 sample_size = 1000
 seed = 42
 cv_threshold = 0.01
-batch_size = 1_000_000
+batch_size = 500_000
 use_transitivity = true
 # Construct output path based on parameters
 output_path = "/work/schaffran1/results_testjobs/concordance_results_schizo_split_" *

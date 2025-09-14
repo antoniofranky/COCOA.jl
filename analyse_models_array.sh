@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=cocoa_array
-#SBATCH --chdir=/work/schaffran1/jobresults
-#SBATCH --output=/work/schaffran1/jobresults/cocoa_model_%A_%a.out
+#SBATCH --chdir=/work/schaffran1/jobresults/random_0
+#SBATCH --output=/work/schaffran1/jobresults/random_0/cocoa_model_%A_%a.out
 #SBATCH --time=24:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -10,11 +10,11 @@
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=schaffran1@uni-potsdam.de
 #SBATCH --hint=nomultithread
-#SBATCH --array=1-ARRAY_SIZE%15  # Process up to 15 jobs concurrently
+#SBATCH --array=1-ARRAY_SIZE
 
 # Parameters to modify
 MODELS_DIR="/work/schaffran1/toolbox/prpd_models/random_0"  # Directory containing models
-RESULTS_BASE_DIR="/work/schaffran1/jobresults"       # Base directory for results
+RESULTS_BASE_DIR="/work/schaffran1/jobresults/random_0"       # Base directory for results
 
 # Use single results directory
 RESULTS_DIR="$RESULTS_BASE_DIR"
@@ -75,25 +75,38 @@ fi
 
 echo "Starting analysis for $MODEL_NAME..."
 
-# Run analysis with LIKWID CPU pinning (memory tracked by SLURM)
-julia $JULIA_OPTS analyse_models_array.jl "$MODEL_FILE" "$RESULTS_DIR" "$MODEL_NAME"
-EXIT_CODE=$?
+# Run analysis and capture output for parsing
+OUTPUT_FILE="/tmp/cocoa_output_${SLURM_ARRAY_TASK_ID}.log"
+julia $JULIA_OPTS analyse_models_array.jl "$MODEL_FILE" "$RESULTS_DIR" "$MODEL_NAME" 2>&1 | tee "$OUTPUT_FILE"
+EXIT_CODE=${PIPESTATUS[0]}
+
+# Extract model statistics from output
+N_REACTIONS=$(grep "Reactions:" "$OUTPUT_FILE" | head -1 | awk '{print $2}' || echo "0")
+N_METABOLITES=$(grep "Metabolites:" "$OUTPUT_FILE" | head -1 | awk '{print $2}' || echo "0")
+N_COMPLEXES=$(grep "Total Complexes:" "$OUTPUT_FILE" | head -1 | awk '{print $3}' || echo "0")
+
+# Clean up temp file
+rm -f "$OUTPUT_FILE"
 
 # Create single master CSV for all results (append mode)
 MASTER_CSV="$RESULTS_BASE_DIR/cocoa_performance_results.csv"
 
 # Create header if file doesn't exist
 if [ ! -f "$MASTER_CSV" ]; then
-  echo "model_name,job_id,task_id,timestamp,runtime_sec,peak_memory_mb,peak_vmem_mb" > "$MASTER_CSV"
+  echo "model_name,job_id,task_id,timestamp,runtime_sec,peak_memory_mb,peak_vmem_mb,n_reactions,n_metabolites,n_complexes" > "$MASTER_CSV"
 fi
 
-# Get memory and runtime info from SLURM accounting (wait briefly for accounting data)
-sleep 2
+# Get memory and runtime info from SLURM accounting (wait for accounting data)
+sleep 10  # Increased wait time for accounting data
 SLURM_METRICS=$(sacct -j $SLURM_JOB_ID.$SLURM_ARRAY_TASK_ID --format=MaxRSS,MaxVMSize,Elapsed --noheader --parsable2)
+echo "DEBUG: SLURM_METRICS = '$SLURM_METRICS'"  # Debug output
 if [ -n "$SLURM_METRICS" ]; then
+    echo "DEBUG: Parsing SLURM metrics: $SLURM_METRICS"
     PEAK_MEMORY_KB=$(echo "$SLURM_METRICS" | cut -d'|' -f1 | sed 's/K$//')
     PEAK_VMEM_KB=$(echo "$SLURM_METRICS" | cut -d'|' -f2 | sed 's/K$//')
     RUNTIME_STR=$(echo "$SLURM_METRICS" | cut -d'|' -f3)
+    
+    echo "DEBUG: PEAK_MEMORY_KB=$PEAK_MEMORY_KB, PEAK_VMEM_KB=$PEAK_VMEM_KB, RUNTIME_STR=$RUNTIME_STR"
     
     # Convert memory from KB to MB
     PEAK_MEMORY_MB=$((PEAK_MEMORY_KB / 1024))
@@ -111,33 +124,15 @@ if [ -n "$SLURM_METRICS" ]; then
     else
         RUNTIME_SEC=0
     fi
+    
+    echo "DEBUG: Final values - RUNTIME_SEC=$RUNTIME_SEC, PEAK_MEMORY_MB=$PEAK_MEMORY_MB, PEAK_VMEM_MB=$PEAK_VMEM_MB"
 else
+    echo "DEBUG: No SLURM metrics found - using zeros"
     PEAK_MEMORY_MB=0; PEAK_VMEM_MB=0; RUNTIME_SEC=0
 fi
 
-# # Extract analysis results from JLD2 file (if exists)
-# RESULTS_FILE=$(find "$RESULTS_DIR" -name "kinetic_results_${MODEL_NAME}_*.jld2" | head -1)
-# if [ -f "$RESULTS_FILE" ]; then
-#     # Use Julia to extract key stats and append to CSV
-#     julia --project=/work/schaffran1/COCOA.jl -e "
-#     using JLD2
-#     data = JLD2.load(\"$RESULTS_FILE\")
-#     results = data[\"results\"]
-#     n_robust_mets = results.n_robust_metabolites
-#     n_robust_pairs = results.n_robust_pairs
-#     largest_module = results.largest_robust_module_size
-#     summary = results.summary
-#     n_complexes = summary !== nothing ? get(summary, \"n_complexes\", 0) : 0
-#     n_modules = summary !== nothing ? get(summary, \"n_modules\", 0) : 0
-#     println(\"${MODEL_NAME},${SLURM_ARRAY_JOB_ID},${SLURM_ARRAY_TASK_ID},$(date -Iseconds),${RUNTIME_SEC},${PEAK_MEMORY_MB},${PEAK_VMEM_MB},\$n_robust_mets,\$n_robust_pairs,\$n_complexes,\$n_modules,\$largest_module\")
-#     " >> "$MASTER_CSV"
-# else
-#     # Fallback if no JLD2 file found
-#     echo "${MODEL_NAME},${SLURM_ARRAY_JOB_ID},${SLURM_ARRAY_TASK_ID},$(date -Iseconds),${RUNTIME_SEC},${PEAK_MEMORY_MB},${PEAK_VMEM_MB},0,0,0,0,0" >> "$MASTER_CSV"
-# fi
-
-# Write basic performance data to CSV (no JLD2 analysis needed)        
-echo "${MODEL_NAME},${SLURM_ARRAY_JOB_ID},${SLURM_ARRAY_TASK_ID},$(date -Iseconds),${RUNTIME_SEC},${PEAK_MEMORY_MB},${PEAK_VMEM_MB}" >> "$MASTER_CSV"
+# Write performance data to CSV
+echo "${MODEL_NAME},${SLURM_ARRAY_JOB_ID},${SLURM_ARRAY_TASK_ID},$(date -Iseconds),${RUNTIME_SEC},${PEAK_MEMORY_MB},${PEAK_VMEM_MB},${N_REACTIONS},${N_METABOLITES},${N_COMPLEXES}" >> "$MASTER_CSV"
 
   echo "Results appended to master CSV: $MASTER_CSV"
 
