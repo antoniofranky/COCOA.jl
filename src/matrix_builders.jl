@@ -1,13 +1,39 @@
-export build_S_matrix_from_flux_stoichiometry, build_Y_matrix_from_constraints, build_A_matrix_from_constraints
+"""
+    Matrix Building Functions for COCOA.jl
+
+This module provides functions to construct structural matrices from constraint trees
+for chemical reaction network analysis. The functions extract stoichiometric and 
+incidence matrices that are fundamental to concordance analysis and kinetic module
+identification.
+
+# Functions
+- [`S_from_constraints`](@ref): Build metabolite-reaction stoichiometric matrix
+- [`Y_matrix_from_constraints`](@ref): Build metabolite-complex stoichiometric matrix  
+- [`A_matrix_from_constraints`](@ref): Build complex-reaction incidence matrix
+
+# Dependencies
+Requires ConstraintTrees.jl for constraint tree processing and SparseArrays.jl for
+efficient sparse matrix construction.
+"""
 
 """
-Matrix building functions for COCOA - Extract structural matrices from constraint trees.
-"""
-
-"""
-$(TYPEDSIGNATURES)
+    get_reaction_names_from_constraints(balance_constraints::C.ConstraintTree)
 
 Extract reaction names from balance constraints, handling both standard and split flux variables.
+
+This function processes constraint trees to identify all reaction names, supporting both
+unidirectional (split into forward/reverse) and bidirectional flux representations.
+
+# Arguments
+- `balance_constraints::C.ConstraintTree`: Constraint tree containing flux variables
+
+# Returns
+- `Vector{String}`: Collection of reaction names with appropriate suffixes for split fluxes
+
+# Notes
+- For split fluxes: adds "_forward" and "_reverse" suffixes
+- For standard fluxes: uses original reaction names
+- Prioritizes split flux representation when available
 """
 function get_reaction_names_from_constraints(balance_constraints::C.ConstraintTree)
     reaction_names = Set{String}()
@@ -37,21 +63,40 @@ function get_reaction_names_from_constraints(balance_constraints::C.ConstraintTr
 end
 
 """
-$(TYPEDSIGNATURES)
+    S_from_constraints(constraints::C.ConstraintTree; return_ids::Bool=false)
 
-Build S matrix (metabolite-reaction stoichiometry matrix) directly from flux_stoichiometry constraints.
-This is much simpler than parsing the constraint structure - the flux_stoichiometry directly 
-gives us the stoichiometric coefficients.
+Build stoichiometric matrix S from flux stoichiometry constraints.
+
+Constructs the metabolite-reaction stoichiometric matrix directly from flux_stoichiometry 
+constraints in the constraint tree. This matrix represents the stoichiometric coefficients
+of metabolites in reactions, where S[i,j] gives the coefficient of metabolite i in reaction j.
 
 # Arguments
-- `constraints`: Constraint tree with flux_stoichiometry 
+- `constraints::C.ConstraintTree`: Constraint tree containing flux_stoichiometry data
+- `return_ids::Bool=false`: If true, also return metabolite and reaction ID vectors
 
 # Returns
-- `S_matrix`: Sparse matrix where S[i,j] = stoichiometry of metabolite i in reaction j
-- `metabolite_ids`: Ordered vector of metabolite IDs
-- `reaction_ids`: Ordered vector of reaction IDs  
+- If `return_ids=false`: `SparseMatrixCSC{Float64,Int}` - The stoichiometric matrix S
+- If `return_ids=true`: `Tuple` containing:
+  - `S_matrix::SparseMatrixCSC{Float64,Int}`: Stoichiometric matrix (metabolites × reactions)
+  - `metabolite_ids::Vector{Symbol}`: Ordered vector of metabolite identifiers
+  - `reaction_ids::Vector{Symbol}`: Ordered vector of reaction identifiers
+
+# Matrix Structure
+- Rows: metabolites (ordered alphabetically by string representation)
+- Columns: reactions (ordered alphabetically by string representation)
+- Values: stoichiometric coefficients (negative for substrates, positive for products)
+
+# Examples
+```julia
+# Get just the matrix
+S = S_from_constraints(constraints)
+
+# Get matrix with ID mappings
+S, metabolites, reactions = S_from_constraints(constraints; return_ids=true)
+```
 """
-function build_S_matrix_from_flux_stoichiometry(constraints::C.ConstraintTree)
+function S_from_constraints(constraints::C.ConstraintTree; return_ids::Bool=false)
     balance_constraints = haskey(constraints, :balance) ? constraints.balance : constraints
 
     # Get metabolite IDs from flux_stoichiometry keys (already sorted)
@@ -136,23 +181,48 @@ function build_S_matrix_from_flux_stoichiometry(constraints::C.ConstraintTree)
 
     S_matrix = SparseArrays.sparse(I, J, V, n_metabolites, n_reactions)
 
-    return S_matrix, metabolite_ids, reaction_ids
+    if return_ids
+        return S_matrix, metabolite_ids, reaction_ids
+    else
+        return S_matrix
+    end
 end
 
 """
-$(TYPEDSIGNATURES)
+    Y_matrix_from_constraints(constraints::C.ConstraintTree; return_ids::Bool=false)
 
-Build Y matrix (metabolite-complex stoichiometry matrix) from constraints.
+Build complex stoichiometric matrix Y from constraint tree.
+
+Constructs the metabolite-complex stoichiometric matrix from the constraint tree by
+extracting complex compositions. This matrix represents the stoichiometric coefficients
+of metabolites in complexes, where Y[i,j] gives the coefficient of metabolite i in complex j.
 
 # Arguments
-- `constraints`: Constraint tree with flux_stoichiometry constraints
+- `constraints::C.ConstraintTree`: Constraint tree containing complex and flux constraint data
+- `return_ids::Bool=false`: If true, also return metabolite and complex ID vectors
 
 # Returns
-- `Y_matrix`: Sparse matrix where Y[i,j] = stoichiometry of metabolite i in complex j  
-- `metabolite_ids`: Ordered vector of metabolite IDs
-- `complex_ids`: Ordered vector of complex IDs
+- If `return_ids=false`: `SparseMatrixCSC{Float64,Int}` - The complex stoichiometric matrix Y
+- If `return_ids=true`: `Tuple` containing:
+  - `Y_matrix::SparseMatrixCSC{Float64,Int}`: Complex stoichiometric matrix (metabolites × complexes)
+  - `metabolite_ids::Vector{Symbol}`: Ordered vector of metabolite identifiers
+  - `complex_ids::Vector{Symbol}`: Ordered vector of complex identifiers
+
+# Matrix Structure
+- Rows: metabolites (ordered alphabetically by string representation)
+- Columns: complexes (ordered alphabetically by string representation)  
+- Values: stoichiometric coefficients (typically positive, representing composition)
+
+# Examples
+```julia
+# Get just the matrix
+Y = Y_matrix_from_constraints(constraints)
+
+# Get matrix with ID mappings
+Y, metabolites, complexes = Y_matrix_from_constraints(constraints; return_ids=true)
+```
 """
-function build_Y_matrix_from_constraints(constraints::C.ConstraintTree)
+function Y_matrix_from_constraints(constraints::C.ConstraintTree; return_ids::Bool=false)
     # Extract complexes using the shared function
     complex_info, _ = extract_complexes(constraints)
 
@@ -192,27 +262,58 @@ function build_Y_matrix_from_constraints(constraints::C.ConstraintTree)
 
     Y_matrix = SparseArrays.sparse(I, J, V, n_metabolites, n_complexes)
 
-    return Y_matrix, metabolite_ids, complex_ids
+    if return_ids
+        return Y_matrix, metabolite_ids, complex_ids
+    else
+        return Y_matrix
+    end
 end
 
 """
-$(TYPEDSIGNATURES)
+    A_matrix_from_constraints(constraints::C.ConstraintTree; return_ids::Bool=false)
 
-Build A matrix (complex-reaction incidence matrix) from constraint tree.
-Each row represents a complex, each column a reaction.
-A[i,j] = -1 if complex i is consumed in reaction j
-A[i,j] = +1 if complex i is produced in reaction j
-A[i,j] = 0 if complex i doesn't participate in reaction j
+Build complex-reaction incidence matrix A from constraint tree.
+
+Constructs the incidence matrix representing the participation of complexes in reactions.
+This matrix encodes the reaction network structure in chemical reaction network theory,
+where A[i,j] indicates how complex i participates in reaction j.
 
 # Arguments
-- `constraints`: Constraint tree with balance constraints and activities
+- `constraints::C.ConstraintTree`: Constraint tree containing balance constraints and activities
+- `return_ids::Bool=false`: If true, also return complex and reaction ID vectors
 
 # Returns
-- `A_matrix`: Sparse matrix where A[i,j] represents incidence of complex i in reaction j
-- `complex_ids`: Ordered vector of complex IDs  
-- `reaction_ids`: Ordered vector of reaction IDs
+- If `return_ids=false`: `SparseMatrixCSC{Int,Int}` - The incidence matrix A
+- If `return_ids=true`: `Tuple` containing:
+  - `A_matrix::SparseMatrixCSC{Int,Int}`: Incidence matrix (complexes × reactions)
+  - `complex_ids::Vector{Symbol}`: Ordered vector of complex identifiers
+  - `reaction_ids::Vector{Symbol}`: Ordered vector of reaction identifiers
+
+# Matrix Structure
+- Rows: complexes (ordered alphabetically by string representation)
+- Columns: reactions (ordered alphabetically by string representation)
+- Values: 
+  - `-1`: complex i is consumed (substrate) in reaction j
+  - `+1`: complex i is produced (product) in reaction j
+  - `0`: complex i does not participate in reaction j
+
+# Requirements
+The constraint tree must contain an `activities` section that defines complex activities
+as linear combinations of reaction fluxes.
+
+# Examples
+```julia
+# Get just the matrix
+A = A_matrix_from_constraints(constraints)
+
+# Get matrix with ID mappings
+A, complexes, reactions = A_matrix_from_constraints(constraints; return_ids=true)
+```
+
+# Throws
+- `ArgumentError`: If constraints do not contain required `activities` section
 """
-function build_A_matrix_from_constraints(constraints::C.ConstraintTree)
+function A_matrix_from_constraints(constraints::C.ConstraintTree; return_ids::Bool=false)
     balance_constraints = haskey(constraints, :balance) ? constraints.balance : constraints
 
     # Get reaction names from the balance constraints
@@ -221,7 +322,7 @@ function build_A_matrix_from_constraints(constraints::C.ConstraintTree)
 
     # Get complex IDs from activities constraints
     if !haskey(constraints, :activities)
-        error("Constraints must have activities to build A matrix")
+        throw(ArgumentError("Constraints must have activities to build A matrix"))
     end
     complex_ids = sort!(collect(keys(constraints.activities)); by=string)
 
@@ -303,5 +404,9 @@ function build_A_matrix_from_constraints(constraints::C.ConstraintTree)
 
     A_matrix = SparseArrays.sparse(I, J, V, n_complexes, n_reactions)
 
-    return A_matrix, complex_ids, reaction_ids
+    if return_ids
+        return A_matrix, complex_ids, reaction_ids
+    else
+        return A_matrix
+    end
 end

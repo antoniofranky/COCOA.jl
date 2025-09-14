@@ -8,7 +8,7 @@ This module handles:
 """
 
 import COBREXA
-import HiGHS
+
 import JuMP as J
 import Distributed
 # CM imported from parent ModelPreparation module
@@ -33,7 +33,7 @@ function find_blocked_reactions_parallel(model::CM.Model, optimizer, flux_tolera
     # Identify blocked reactions - pre-allocate for better performance
     blocked = Vector{Symbol}()
     sizehint!(blocked, length(model.reactions) ÷ 10)  # Conservative estimate
-    
+
     @inbounds for (rid, (min_flux, max_flux)) in fva_results
         if !isnothing(min_flux) && !isnothing(max_flux) &&
            abs(min_flux) < flux_tolerance && abs(max_flux) < flux_tolerance

@@ -32,14 +32,6 @@ end
 const DIRECTION_POSITIVE = 0x01
 const DIRECTION_NEGATIVE = 0x02
 
-# Helper functions for direction bits
-@inline function directions_to_bits(directions::Set{Symbol})::UInt8
-    bits = 0x00
-    :positive in directions && (bits |= DIRECTION_POSITIVE)
-    :negative in directions && (bits |= DIRECTION_NEGATIVE)
-    return bits
-end
-
 @inline function determine_directions_bits(c2_idx::Int, positive::BitVector, negative::BitVector)::UInt8
     bits = 0x00
     # Positive direction feasible if c2 not constrained to negative only

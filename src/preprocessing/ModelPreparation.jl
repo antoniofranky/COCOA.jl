@@ -10,7 +10,7 @@ module ModelPreparation
 
 import COBREXA
 import AbstractFBCModels
-import HiGHS
+
 import JuMP as J
 import AbstractFBCModels.AbstractFBCModel
 import SBMLFBCModels.SBMLFBCModels

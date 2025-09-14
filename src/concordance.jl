@@ -1,11 +1,7 @@
 """
-Main analysis algorithms for COCOA.
+Concordance Analysis for COCOA.jl
 
-This module contains:
-- Batch processing with transitivity optimization
-- Concordance analysis using unified batch_size parameter
-- Main concordance analysis function
-- Module extraction and result formatting
+Main algorithms for identifying concordant complex pairs in metabolic networks.
 """
 
 # Note: All imports are handled via the main COCOA.jl module
@@ -15,8 +11,7 @@ This module contains:
 # ========================================================================================
 
 """
-Mutable container for batch counts with concrete types.
-Tracks all optimization termination status categories.
+Container for batch counts with concrete types.
 """
 mutable struct MutableCounts
     concordant::Int
@@ -36,7 +31,7 @@ end
 MutableCounts() = MutableCounts(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 
 """
-Configuration for batch processing with concrete types.
+Configuration for batch processing.
 """
 struct BatchProcessingConfig
     batch_size::Int
@@ -61,6 +56,7 @@ struct BatchOptimizationResult
     skipped::Int
     total_optimizations::Int
     optimization_results::Vector{Tuple{Int,Int,Symbol,Float64}}
+    direct_concordant_pairs::Union{Nothing,Set{Tuple{Int,Int}}}
 end
 
 
@@ -174,51 +170,6 @@ function check_memory!(monitor::MemoryMonitor)::Float64
     monitor.gc_time = gc_stats.total_time / 1e9  # Convert to seconds
 
     return current
-end
-
-"""
-Suggest batch size based on memory pressure.
-"""
-function suggest_batch_size(monitor::MemoryMonitor, current_batch_size::Int)::Int
-    current_mem = check_memory!(monitor)
-    mem_pressure = (current_mem - monitor.initial_memory) / monitor.initial_memory
-
-    if mem_pressure > 0.8  # High pressure
-        return max(10, current_batch_size ÷ 2)
-    elseif mem_pressure < 0.3  # Low pressure
-        return min(1000, current_batch_size * 2)
-    else
-        return current_batch_size
-    end
-end
-
-# --- Memory monitoring utilities ---
-
-"""
-Get available system memory in GB.
-"""
-function get_available_memory_gb()::Float64
-    try
-        if Sys.islinux()
-            # Read from /proc/meminfo on Linux
-            meminfo = read("/proc/meminfo", String)
-            for line in split(meminfo, '\n')
-                if startswith(line, "MemAvailable:")
-                    kb = parse(Int, split(line)[2])
-                    return kb / (1024^2)  # Convert KB to GB
-                end
-            end
-        elseif Sys.iswindows()
-            # Use WMI on Windows (fallback to rough estimate)
-            return 8.0  # Conservative default for Windows
-        elseif Sys.isapple()
-            # Use vm_stat on macOS (simplified)
-            return 8.0  # Conservative default for macOS  
-        end
-    catch
-        # Fallback if system memory detection fails
-    end
-    return 4.0  # Conservative fallback
 end
 
 const DEFAULT_SOLVER_TOLERANCE = 1e-6
@@ -379,8 +330,9 @@ function process_full_batch!(
     state::BatchProcessingState,
     concordance_tracker::ConcordanceTracker,
     config::BatchProcessingConfig,
-    streaming_filter::StreamingCandidateFilter
-)::Nothing
+    streaming_filter::StreamingCandidateFilter;
+    track_direct_pairs::Bool=false
+)::Union{Nothing,Set{Tuple{Int,Int}}}
     state.batches_processed += 1
 
     # Log batch collection completion
@@ -390,7 +342,7 @@ function process_full_batch!(
     clear_module_cache!(concordance_tracker)
 
     # Process the batch
-    batch_result = execute_batch_optimization!(constraints, state, concordance_tracker, config)
+    batch_result = execute_batch_optimization!(constraints, state, concordance_tracker, config; track_direct_pairs=track_direct_pairs)
 
     # Create counts for accumulation - extract concordant count from batch_result
     concordant_count = batch_result.concordant_pairs.n_pairs  # This was set correctly in execute_batch_optimization!
@@ -417,7 +369,13 @@ function process_full_batch!(
     # Reset for next batch
     empty!(state.current_batch)
     state.batch_collection_start_time = time()
-    return nothing
+
+    # Return direct concordant pairs if tracking was enabled
+    if track_direct_pairs && batch_result.direct_concordant_pairs !== nothing
+        return batch_result.direct_concordant_pairs
+    else
+        return nothing
+    end
 end
 
 function log_batch_collection!(state::BatchProcessingState, streaming_filter::StreamingCandidateFilter)::Nothing
@@ -440,7 +398,8 @@ function execute_batch_optimization!(
     constraints::C.ConstraintTree,
     state::BatchProcessingState,
     concordance_tracker::ConcordanceTracker,
-    config::BatchProcessingConfig
+    config::BatchProcessingConfig;
+    track_direct_pairs::Bool=false
 )::BatchOptimizationResult
     optimization_start_time = time()
 
@@ -453,7 +412,8 @@ function execute_batch_optimization!(
         optimizer=config.optimizer,
         settings=config.settings,
         workers=config.workers,
-        concordance_tolerance=config.concordance_tolerance
+        concordance_tolerance=config.concordance_tolerance,
+        track_direct_pairs=track_direct_pairs
     )
 
     # Log timing
@@ -479,7 +439,8 @@ function execute_batch_optimization!(
         batch_counts.other_error_count,
         0, 0,  # transitive counts handled elsewhere  
         batch_counts.total_optimizations,
-        batch_counts.optimization_results
+        batch_counts.optimization_results,
+        batch_counts.direct_concordant_pairs
     )
 end
 
@@ -525,7 +486,7 @@ mutable struct PairConcordanceState
     is_concordant::Bool
     reference_lambda::Float64
 
-    PairConcordanceState() = new(NaN, NaN, NaN, NaN, false, false, false, true, NaN)
+    PairConcordanceState() = new(NaN, NaN, NaN, NaN, false, false, false, false, NaN)
 end
 
 """
@@ -540,9 +501,10 @@ Returns true if pair is still potentially concordant, false if definitely non-co
     timeout::Bool,
     concordance_tolerance::Float64
 )::Bool
-    # Early exit if already failed or timeout
+    @debug "Checking concordance"
+    # Early exit if timeout
     timeout && (state.has_timeout = true; state.is_concordant = false; return false)
-    !state.is_concordant && return false
+    # Don't exit early based on is_concordant - let the validation run
 
     # Update min/max values for this direction
     if direction == :positive
@@ -563,9 +525,13 @@ Returns true if pair is still potentially concordant, false if definitely non-co
 
     # Check concordance for completed directions
     if direction == :positive && !isnan(state.positive_min) && !isnan(state.positive_max)
-        if abs(state.positive_min - state.positive_max) > concordance_tolerance
+        ratio_diff = abs(state.positive_min - state.positive_max)
+        if ratio_diff > concordance_tolerance
+            @debug "POSITIVE DIRECTION FAILED" pos_min = state.positive_min pos_max = state.positive_max diff = ratio_diff tolerance = concordance_tolerance
             state.is_concordant = false
             return false
+        else
+            @debug "POSITIVE DIRECTION PASSED" pos_min = state.positive_min pos_max = state.positive_max diff = ratio_diff tolerance = concordance_tolerance
         end
         current_lambda = (state.positive_min + state.positive_max) / 2
         if isnan(state.reference_lambda)
@@ -588,6 +554,35 @@ Returns true if pair is still potentially concordant, false if definitely non-co
         end
     end
 
+    # Final concordance check: Only mark as concordant if ALL tested directions
+    # completed successfully and show consistent results
+    all_tested_directions_valid = true
+    at_least_one_direction_tested = false
+
+    # Check positive direction if it was tested
+    if state.has_positive
+        at_least_one_direction_tested = true
+        if isnan(state.positive_min) || isnan(state.positive_max)
+            all_tested_directions_valid = false
+        end
+    end
+
+    # Check negative direction if it was tested
+    if state.has_negative
+        at_least_one_direction_tested = true
+        if isnan(state.negative_min) || isnan(state.negative_max)
+            all_tested_directions_valid = false
+        end
+    end
+
+    # Only mark as concordant if:
+    # 1. At least one direction was tested
+    # 2. All tested directions completed successfully (no NaN)
+    # 3. All validation checks passed (we would have returned false earlier if not)
+    if at_least_one_direction_tested && all_tested_directions_valid
+        state.is_concordant = true
+    end
+
     return state.is_concordant
 end
 
@@ -599,7 +594,8 @@ function process_solver_results_streaming!(
     solver_results,
     batch_pairs::Vector{PairCandidate},
     concordance_tracker,
-    concordance_tolerance::Float64
+    concordance_tolerance::Float64;
+    track_direct_pairs::Bool=false
 )
     # Pre-allocate lookup for O(1) pair finding
     pair_lookup = Dict{Tuple{Symbol,Symbol},Int}()
@@ -628,6 +624,7 @@ function process_solver_results_streaming!(
     concordant_count = 0
     non_concordant_count = 0
     timeout_count = 0
+    direct_concordant_pairs = track_direct_pairs ? Set{Tuple{Int,Int}}() : nothing
 
     for (i, state) in enumerate(pair_states)
         candidate = batch_pairs[i]
@@ -639,13 +636,19 @@ function process_solver_results_streaming!(
         if state.is_concordant
             union_sets!(concordance_tracker, candidate.c1_idx, candidate.c2_idx)
             concordant_count += 1
+
+            # Track this pair if requested
+            if track_direct_pairs
+                pair = candidate.c1_idx <= candidate.c2_idx ? (candidate.c1_idx, candidate.c2_idx) : (candidate.c2_idx, candidate.c1_idx)
+                push!(direct_concordant_pairs, pair)
+            end
         else
             add_non_concordant!(concordance_tracker, candidate.c1_idx, candidate.c2_idx)
             non_concordant_count += 1
         end
     end
 
-    return concordant_count, non_concordant_count, timeout_count
+    return concordant_count, non_concordant_count, timeout_count, direct_concordant_pairs
 end
 
 """
@@ -673,9 +676,11 @@ function process_streaming_batches(
     constraints::C.ConstraintTree,
     streaming_filter::StreamingCandidateFilter,
     concordance_tracker::ConcordanceTracker,
-    config::BatchProcessingConfig
+    config::BatchProcessingConfig;
+    track_direct_pairs::Bool=false
 )
     state = initialize_processing_state(streaming_filter, concordance_tracker, config)
+    all_direct_pairs = track_direct_pairs ? Set{Tuple{Int,Int}}() : nothing
 
     @info "Using fixed batch size: $(config.batch_size) candidates per batch"
     @info "Collecting candidates from streaming filter..."
@@ -685,16 +690,31 @@ function process_streaming_batches(
         collect_candidate!(state, candidate)
 
         if should_process_batch(state, config)
-            process_full_batch!(constraints, state, concordance_tracker, config, streaming_filter)
+            batch_direct_pairs = process_full_batch!(constraints, state, concordance_tracker, config, streaming_filter; track_direct_pairs=track_direct_pairs)
+            # Collect direct pairs from this batch if tracking
+            if track_direct_pairs && batch_direct_pairs !== nothing
+                union!(all_direct_pairs, batch_direct_pairs)
+            end
         end
     end
 
     # Process any remaining candidates in final batch
     if !isempty(state.current_batch)
-        process_full_batch!(constraints, state, concordance_tracker, config, streaming_filter)
+        batch_direct_pairs = process_full_batch!(constraints, state, concordance_tracker, config, streaming_filter; track_direct_pairs=track_direct_pairs)
+        # Collect direct pairs from this batch if tracking
+        if track_direct_pairs && batch_direct_pairs !== nothing
+            union!(all_direct_pairs, batch_direct_pairs)
+        end
     end
 
-    return build_final_results(state)
+    results = build_final_results(state)
+
+    # Add direct pairs to results if we were tracking them
+    if track_direct_pairs
+        return merge(results, (direct_concordant_pairs=all_direct_pairs,))
+    else
+        return results
+    end
 end
 
 
@@ -727,11 +747,6 @@ end
 
 
 
-"""
-$(TYPEDSIGNATURES)
-
-Helper function   2. Change build_final_results to use acc.counts.total_optimizationsto process optimization results into the expected format.
-"""
 # Define concrete types for better type stability
 # Use NaN as sentinel value instead of Nothing for better performance
 const OptValue = Float64  # NaN represents missing/invalid values
@@ -839,9 +854,7 @@ function process_optimization_results(optimization_results, batch_pairs::Vector{
 end
 
 """
-$(TYPEDSIGNATURES)
-
-Process a batch of concordance tests using ConstraintTrees templated approach with parallel batch processing.
+Process a batch of concordance tests using parallel optimization.
 """
 function process_concordance_batch(
     constraints::C.ConstraintTree,
@@ -850,7 +863,8 @@ function process_concordance_batch(
     optimizer,
     settings=[],
     workers=workers,
-    concordance_tolerance::Float64=1e-4
+    concordance_tolerance::Float64,
+    track_direct_pairs::Bool=false
 )
     # Create COBREXA-style test array with direction multipliers directly from PairCandidate
     test_array = []
@@ -868,16 +882,23 @@ function process_concordance_batch(
     # Process using pure COBREXA pattern
     optimization_results = screen_directions_optimization_model(
         (models_cache, (c1_id, c2_id, direction, dir_multiplier)) -> begin
+            @debug "Processing pair in optimization function" c1_id c2_id direction dir_multiplier
             om = direction == :positive ? models_cache.positive : models_cache.negative
 
+            # Check if model creation failed
+            if om === nothing
+                println("NULL MODEL: Worker failed to create optimization model for $(c1_id), $(c2_id)")
+                return (c1_id, c2_id, direction, dir_multiplier, NaN, J.OPTIMIZE_NOT_CALLED)
+            end
+
             try
-                # Debug: Check if activities exist for both complexes
+                # Check if activities exist for both complexes
                 if !haskey(constraints.activities, c1_id)
-                    @debug "Missing c1_id in constraints.activities" c1_id
+                    println("MISSING ACTIVITY: c1_id=$(c1_id)")
                     return (c1_id, c2_id, direction, dir_multiplier, NaN, J.OPTIMIZE_NOT_CALLED)
                 end
                 if !haskey(constraints.activities, c2_id)
-                    @debug "Missing c2_id in constraints.activities" c2_id
+                    println("MISSING ACTIVITY: c2_id=$(c2_id)")
                     return (c1_id, c2_id, direction, dir_multiplier, NaN, J.OPTIMIZE_NOT_CALLED)
                 end
 
@@ -899,6 +920,7 @@ function process_concordance_batch(
                 # Check termination status immediately after optimization
                 immediate_status = J.termination_status(om)
                 @debug "Termination status after optimize!" status = immediate_status
+                @debug "About to use immediate_status" immediate_status
 
                 # Get result (use NaN for invalid/missing values)
                 raw_value = if J.termination_status(om) in (J.OPTIMAL, J.LOCALLY_SOLVED) && J.is_solved_and_feasible(om)
@@ -913,8 +935,9 @@ function process_concordance_batch(
                 # Cleanup
                 J.delete(om, c2_constraint)
                 J.unregister(om, :c2_constraint)
-
-                return (c1_id, c2_id, direction, dir_multiplier, actual_value, J.termination_status(om))
+                result = (c1_id, c2_id, direction, dir_multiplier, actual_value, immediate_status)
+                @debug "Returning result" result
+                return result
             catch e
                 @warn "Optimization error" c1_id c2_id direction error = string(e)
                 return (c1_id, c2_id, direction, dir_multiplier, NaN, J.OTHER_ERROR)
@@ -994,6 +1017,7 @@ function process_concordance_batch(
     numerical_error_count = 0
     other_error_count = 0
     optimization_results_vec = Vector{Tuple{Int,Int,Symbol,Float64}}()
+    direct_concordant_pairs = track_direct_pairs ? Set{Tuple{Int,Int}}() : nothing
 
     for (i, state) in enumerate(pair_states)
         candidate = batch_pairs[i]
@@ -1014,6 +1038,12 @@ function process_concordance_batch(
             union_sets!(concordance_tracker, c1_idx, c2_idx)
             concordant_count += 1
 
+            # Track this pair if requested
+            if track_direct_pairs
+                pair = c1_idx <= c2_idx ? (c1_idx, c2_idx) : (c2_idx, c1_idx)
+                push!(direct_concordant_pairs, pair)
+            end
+
             # Store lambda result if valid
             if !isnan(state.reference_lambda)
                 final_direction = if state.has_positive && state.has_negative
@@ -1032,7 +1062,7 @@ function process_concordance_batch(
     end
 
     # Debug: Log termination status frequency and total optimizations for troubleshooting
-    @info "Optimization statistics" total_optimizations_attempted status_frequency
+    @debug "Optimization statistics" total_optimizations_attempted status_frequency
 
     # Return counts in same format as process_batch_results! expected
     return (
@@ -1046,7 +1076,8 @@ function process_concordance_batch(
         numerical_error_count=numerical_error_count,
         other_error_count=other_error_count,
         total_optimizations=total_optimizations_attempted,
-        optimization_results=optimization_results_vec
+        optimization_results=optimization_results_vec,
+        direct_concordant_pairs=direct_concordant_pairs
     )
 end
 
@@ -1078,20 +1109,16 @@ function screen_directions_optimization_model(
         constraints_tuple -> begin
             try
                 pos_const, neg_const = constraints_tuple
-                @debug "Creating positive optimization model"
                 pos_model = COBREXA.optimization_model(pos_const; optimizer=optimizer)
-                @debug "Creating negative optimization model"
                 neg_model = COBREXA.optimization_model(neg_const; optimizer=optimizer)
-                @debug "Applying solver settings"
                 for s in [COBREXA.configuration.default_solver_settings; settings]
                     s(pos_model)
                     s(neg_model)
                 end
-                @debug "Models created successfully"
                 return (positive=pos_model, negative=neg_model)
             catch e
-                @error "Failed to create optimization models" exception = e
-                rethrow(e)
+                @error "WORKER FAILED TO CREATE MODELS" worker_id = myid() exception = e
+                return (positive=nothing, negative=nothing)
             end
         end,
         (pos_constraints, neg_constraints)
@@ -1164,6 +1191,187 @@ end
 """
 $(TYPEDSIGNATURES)
 
+Find trivially balanced complexes using sparse matrix operations for memory efficiency.
+A complex is trivially balanced if all its metabolites appear in only this complex.
+"""
+function find_trivially_balanced_complexes_sparse(
+    Y_matrix::SparseArrays.SparseMatrixCSC,
+    metabolite_ids::Vector{Symbol},
+    complex_ids::Vector{Symbol}
+)::Set{Symbol}
+    # For each complex, check if it has any metabolites that appear only in this complex
+    n_metabolites, n_complexes = size(Y_matrix)
+
+    balanced_complexes = Set{Symbol}()
+
+    # For each complex, check if it has any metabolites that appear only in this complex
+    for (j, complex_id) in enumerate(complex_ids)
+        # Get metabolites in this complex (non-zero entries in column j)
+        metabolite_indices = SparseArrays.findnz(Y_matrix[:, j])[1]
+
+        # Check if any of these metabolites appear in only this complex
+        for i in metabolite_indices
+            # Count non-zero entries in row i (how many complexes this metabolite participates in)
+            row_nnz = SparseArrays.nnz(Y_matrix[i, :])
+            if row_nnz == 1
+                # This metabolite appears only in this complex
+                push!(balanced_complexes, complex_id)
+                break  # Found at least one unique metabolite, complex is balanced
+            end
+        end
+    end
+
+    return balanced_complexes
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Extend trivially balanced complexes using sparse matrix operations for memory efficiency.
+Identifies complexes connected to balanced complexes through metabolites that only appear 
+in balanced complexes plus one additional complex.
+"""
+function extend_trivially_balanced_complexes_sparse(
+    Y_matrix::SparseArrays.SparseMatrixCSC,
+    metabolite_ids::Vector{Symbol},
+    complex_ids::Vector{Symbol},
+    initial_balanced::Set{Symbol}
+)::Set{Symbol}
+    # Build index mappings
+    complex_to_idx = Dict(comp => j for (j, comp) in enumerate(complex_ids))
+
+    # Create boolean mask for currently balanced complexes
+    n_complexes = length(complex_ids)
+    extended_balanced = copy(initial_balanced)
+    newly_added = true
+    iteration = 0
+
+    while newly_added && iteration < 10  # Safety limit
+        newly_added = false
+        iteration += 1
+
+        # Create current balanced mask
+        balanced_mask = falses(n_complexes)
+        for complex_id in extended_balanced
+            if haskey(complex_to_idx, complex_id)
+                balanced_mask[complex_to_idx[complex_id]] = true
+            end
+        end
+
+        # For each metabolite, check if it appears only in balanced complexes + one other
+        for (i, met_id) in enumerate(metabolite_ids)
+            # Get complexes this metabolite participates in (non-zero entries in row i)
+            complex_indices = SparseArrays.findnz(Y_matrix[i, :])[1]
+
+            if length(complex_indices) >= 2
+                # Count balanced vs unbalanced complexes for this metabolite
+                balanced_count = count(j -> balanced_mask[j], complex_indices)
+                unbalanced_indices = filter(j -> !balanced_mask[j], complex_indices)
+
+                # If exactly one unbalanced complex and all others are balanced
+                if length(unbalanced_indices) == 1 && balanced_count == length(complex_indices) - 1
+                    new_balanced_idx = unbalanced_indices[1]
+                    new_balanced_id = complex_ids[new_balanced_idx]
+                    push!(extended_balanced, new_balanced_id)
+                    newly_added = true
+                    @debug "Extended trivially balanced: added $new_balanced_id (connected via metabolite $met_id)"
+                end
+            end
+        end
+    end
+
+    if length(extended_balanced) > length(initial_balanced)
+        @info "Extended trivially balanced complexes" initial = length(initial_balanced) final = length(extended_balanced) added = length(extended_balanced) - length(initial_balanced)
+    end
+
+    return extended_balanced
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Extend trivially balanced complexes by identifying complexes connected to balanced complexes
+through metabolites that only appear in balanced complexes plus one additional complex.
+
+If a metabolite appears only in balanced complexes and one other complex (not yet identified
+as trivially balanced), then that additional complex should also be trivially balanced.
+"""
+function extend_trivially_balanced_complexes(
+    complexes::Dict{Symbol,Vector{Tuple{Symbol,Float64}}},
+    initial_balanced::Set{Symbol}
+)::Set{Symbol}
+    # Build metabolite participation map
+    metabolite_participation = Dict{Symbol,Vector{Symbol}}()
+
+    for (complex_id, metabolite_composition) in complexes
+        for (met_id, _) in metabolite_composition
+            if !haskey(metabolite_participation, met_id)
+                metabolite_participation[met_id] = Symbol[]
+            end
+            push!(metabolite_participation[met_id], complex_id)
+        end
+    end
+
+    # Get metabolites that appear in trivially balanced complexes
+    balanced_metabolites = Set{Symbol}()
+    for balanced_complex in initial_balanced
+        if haskey(complexes, balanced_complex)
+            for (met_id, _) in complexes[balanced_complex]
+                push!(balanced_metabolites, met_id)
+            end
+        end
+    end
+
+    extended_balanced = copy(initial_balanced)
+    newly_added = true
+    iteration = 0
+
+    # Iterate until no new complexes are added
+    while newly_added && iteration < 10  # Safety limit to prevent infinite loops
+        newly_added = false
+        iteration += 1
+
+        # Only check metabolites that appear in currently balanced complexes
+        current_balanced_metabolites = Set{Symbol}()
+        for balanced_complex in extended_balanced
+            if haskey(complexes, balanced_complex)
+                for (met_id, _) in complexes[balanced_complex]
+                    push!(current_balanced_metabolites, met_id)
+                end
+            end
+        end
+
+        # Check each metabolite from balanced complexes
+        for met_id in current_balanced_metabolites
+            if haskey(metabolite_participation, met_id)
+                participating_complexes = metabolite_participation[met_id]
+                if length(participating_complexes) >= 2
+                    # Count how many of the participating complexes are already balanced
+                    balanced_count = count(c -> c in extended_balanced, participating_complexes)
+                    unbalanced_complexes = filter(c -> c ∉ extended_balanced, participating_complexes)
+
+                    # If exactly one unbalanced complex remains and all others are balanced
+                    if length(unbalanced_complexes) == 1 && balanced_count == length(participating_complexes) - 1
+                        new_balanced = unbalanced_complexes[1]
+                        push!(extended_balanced, new_balanced)
+                        newly_added = true
+                        @debug "Extended trivially balanced: added $new_balanced (connected via metabolite $met_id)"
+                    end
+                end
+            end
+        end
+    end
+
+    if length(extended_balanced) > length(initial_balanced)
+        @info "Extended trivially balanced complexes" initial = length(initial_balanced) final = length(extended_balanced) added = length(extended_balanced) - length(initial_balanced)
+    end
+
+    return extended_balanced
+end
+
+"""
+$(TYPEDSIGNATURES)
+
 Find trivially concordant pairs directly from complex compositions.
 Pairs are trivially concordant if they share exactly the same metabolite composition.
 """
@@ -1197,48 +1405,148 @@ function find_trivially_concordant_pairs(
     return concordant_pairs
 end
 
-
 """
 $(TYPEDSIGNATURES)
 
-Main concordance analysis function optimized for large models and HPC execution.
+Find trivially concordant pairs using sparse matrix operations for memory efficiency.
+Pairs are trivially concordant if they share a metabolite that appears in exactly two complexes.
+"""
+function find_trivially_concordant_pairs_sparse(
+    Y_matrix::SparseArrays.SparseMatrixCSC,
+    metabolite_ids::Vector{Symbol},
+    complex_ids::Vector{Symbol}
+)::Set{Tuple{Symbol,Symbol}}
+    concordant_pairs = Set{Tuple{Symbol,Symbol}}()
 
-## Statistics Dictionary Output
+    # For each metabolite (row), check if it appears in exactly two complexes
+    for (i, met_id) in enumerate(metabolite_ids)
+        # Get complexes this metabolite participates in (non-zero entries in row i)
+        complex_indices = SparseArrays.findnz(Y_matrix[i, :])[1]
 
-The analysis returns a comprehensive statistics dictionary with the following keys:
+        if length(complex_indices) == 2
+            # This metabolite appears in exactly two complexes
+            complex1_id = complex_ids[complex_indices[1]]
+            complex2_id = complex_ids[complex_indices[2]]
+            pair = complex1_id < complex2_id ? (complex1_id, complex2_id) : (complex2_id, complex1_id)
+            push!(concordant_pairs, pair)
+        end
+    end
 
-### Core Analysis Results
-- `n_candidate_pairs`: Total candidate pairs generated by the filter (after CV filtering)
-- `n_computed_pairs`: Concordant pairs found through analysis (direct testing + transitivity)
-- `n_concordant_via_testing`: Pairs found concordant through optimization testing
-- `n_concordant_via_transitivity`: Pairs found concordant through transitivity relationships
-- `n_non_concordant_pairs`: Pairs determined to be non-concordant
-- `n_trivial_pairs`: Trivially concordant pairs (balanced complexes)
-- `n_concordant_pairs`: Total concordant pairs (computed + trivial)
+    return concordant_pairs
+end
 
-### Processing Statistics
-- `n_candidates_skipped_by_transitivity`: Candidate pairs skipped during batch processing due to known transitivity relationships
-- `batches_completed`: Number of optimization batches processed
-- `elapsed_time`: Total analysis time in seconds
 
-### Model Information
-- `n_complexes`: Total number of complexes in the model
-- `n_balanced`: Number of balanced complexes
-- `n_trivially_balanced`: Number of trivially balanced complexes
-- `n_modules`: Number of concordance modules found
+"""
+    activity_concordance_analysis(model; optimizer, kwargs...)
 
-### Validation
-- `validation_passed`: Whether internal consistency checks passed
+Perform comprehensive concordance analysis to identify concordant complex pairs in metabolic networks.
 
-## Key Relationships
+This is the main function for concordance analysis in COCOA.jl. It systematically identifies
+pairs of complexes that can maintain the same activity ratio across the feasible flux space,
+which is fundamental for understanding concentration robustness in biochemical networks.
 
-The statistics follow these mathematical relationships:
-- `n_concordant_pairs` = `n_computed_pairs` + `n_trivial_pairs`
-- `n_computed_pairs` = `n_concordant_via_testing` + `n_concordant_via_transitivity`
-- Total work done ≈ `n_candidate_pairs` - `n_candidates_skipped_by_transitivity`
+# Result Overview
+Returns a `ConcordanceResults` with:
+- **Concordance matrix**: Binary relationships between all complex pairs
+- **Activity ranges**: Min/max activity values for each complex  
+- **Concordance modules**: Groups of mutually concordant complexes
+- **Analysis statistics**: Comprehensive metrics and processing information
+- **Optional kinetic data**: Kinetic modules and interface reactions (if requested)
 
-The transitivity optimization means that many candidate pairs are identified as concordant
-without requiring expensive optimization, significantly reducing computational cost.
+# Arguments
+- `model`: Metabolic model (supports COBREXA.jl compatible formats)
+
+# Required Keyword Arguments
+- `optimizer`: Optimization solver (e.g., HiGHS.Optimizer)
+
+# Optional Keyword Arguments
+
+## Model Processing
+- `modifications=Function[]`: Model modifications to apply before analysis
+- `use_unidirectional_constraints::Bool=true`: Use unidirectional flux constraints
+- `objective_bound=nothing`: Function to constrain objective value (takes optimal value, returns bound)
+
+## Analysis Parameters
+- `concordance_tolerance::Float64=NaN`: Tolerance for concordance detection
+- `balanced_tolerance::Float64=NaN`: Tolerance for balanced complex detection  
+- `cv_threshold::Float64=NaN`: Coefficient of variation threshold for filtering
+- `cv_epsilon::Float64=1e-16`: Small value added to avoid division by zero in CV calculation
+- `sample_size::Int=100`: Number of samples for coefficient of variation estimation
+- `min_valid_samples::Int=10`: Minimum valid samples required for CV calculation
+- `seed::Int=0`: Random seed for reproducible sampling (0 uses global RNG)
+
+## Performance Settings
+- `batch_size::Int=50_000`: Number of candidate pairs processed per batch, after a batch the newly identified concordant/non-concordant pairs are used to filter remaining candidates
+- `workers=D.workers()`: Worker processes for parallel computation
+- `settings=[]`: Solver-specific settings vector
+- `use_transitivity::Bool=true`: Use transitivity relationships to reduce computation
+
+## Advanced Options  
+- `n_burnin::Int=50`: Burnin samples for warmup point generation
+- `n_chains::Int=1`: Number of parallel chains (for future use)
+- `kinetic_analysis::Bool=false`: Apply kinetic module analysis to results
+
+# Returns
+`ConcordanceResults` containing:
+- `concordance_matrix`: Sparse boolean matrix of concordant pairs
+- `activity_ranges`: Activity variability ranges for each complex
+- `concordance_modules`: Concordance modules (connected components)
+- `stats`: Comprehensive analysis statistics
+- Additional fields for kinetic analysis (if enabled)
+
+# Statistics Dictionary
+The `stats` field contains detailed analysis metrics:
+
+## Core Results
+- `n_concordant_pairs`: Total concordant pairs found
+- `n_candidate_pairs`: Candidate pairs after filtering  
+- `n_computed_pairs`: Pairs found via optimization
+- `n_trivial_pairs`: Trivially concordant pairs
+- `n_non_concordant_pairs`: Non-concordant pairs
+
+## Processing Statistics
+- `batches_completed`: Number of optimization batches
+- `elapsed_time`: Total analysis time (seconds)
+- `n_candidates_skipped_by_transitivity`: Pairs skipped via transitivity
+
+## Model Information
+- `n_complexes`: Total complexes in model
+- `n_balanced`: Balanced complexes
+- `n_modules`: Concordance modules found
+
+# Examples
+```julia
+# Basic concordance analysis
+results = activity_concordance_analysis(model; optimizer=HiGHS.Optimizer)
+
+# With custom tolerances and batch size
+results = activity_concordance_analysis(
+    model;
+    optimizer=HiGHS.Optimizer,
+    concordance_tolerance=1e-5,
+    batch_size=100_000,
+    seed=1234
+)
+
+# With model modifications and objective bound
+modifications = [change_bound("EX_glc__D_e", lower=-10.0)]
+obj_bound = x -> (x * 0.9, x * 1.1)  # 10% tolerance around optimum
+
+results = activity_concordance_analysis(
+    model;
+    optimizer=HiGHS.Optimizer,
+    modifications=modifications,
+    objective_bound=obj_bound,
+    kinetic_analysis=true
+)
+```
+
+# Notes
+- SBML models are automatically processed for compatibility
+- Tolerances are auto-detected from solver settings if not specified
+- Uses activity variability analysis internally for warmup point generation
+- Supports parallel processing across multiple workers
+- Results include comprehensive validation and consistency checks
 """
 function activity_concordance_analysis(
     model;
@@ -1267,7 +1575,7 @@ function activity_concordance_analysis(
     solver_tolerance = extract_solver_tolerance(optimizer, settings)
 
     # Set default values based on solver tolerance if not provided (NaN indicates default should be used)
-    actual_concordance_tolerance = !isnan(concordance_tolerance) ? concordance_tolerance : max(solver_tolerance * 100, 1e-4)
+    actual_concordance_tolerance = !isnan(concordance_tolerance) ? concordance_tolerance : max(solver_tolerance * 100, 1e-2)
     actual_balanced_tolerance = !isnan(balanced_tolerance) ? balanced_tolerance : solver_tolerance
     actual_cv_threshold = !isnan(cv_threshold) ? cv_threshold : max(solver_tolerance * 100, 1e-2)
 
@@ -1338,12 +1646,17 @@ function activity_concordance_analysis(
     end
     metabolite_ids = sort!(collect(all_metabolites); by=string)
 
+    # Construct Y matrix once for all trivial relationship detection
+    @info "Building Y matrix for trivial relationship detection"
+    Y_matrix, Y_metabolite_ids, Y_complex_ids = Y_matrix_from_constraints(constraints; return_ids=true)
+
     @info "Finding trivially balanced complexes"
-    trivially_balanced = find_trivially_balanced_complexes(complexes)
+    initial_balanced = find_trivially_balanced_complexes_sparse(Y_matrix, Y_metabolite_ids, Y_complex_ids)
+    trivially_balanced = extend_trivially_balanced_complexes_sparse(Y_matrix, Y_metabolite_ids, Y_complex_ids, initial_balanced)
     @info "Found trivially balanced complexes" n_trivivally_balanced = length(trivially_balanced)
 
     @info "Finding trivially concordant pairs"
-    trivial_pairs = find_trivially_concordant_pairs(complexes)
+    trivial_pairs = find_trivially_concordant_pairs_sparse(Y_matrix, Y_metabolite_ids, Y_complex_ids)
     @info "Found trivially concordant pairs" n_trivially_concordant = length(trivial_pairs)
 
     # Initialize basic matrix structure - we'll build the complete matrix later
@@ -1707,56 +2020,30 @@ function activity_concordance_analysis(
         constraints,
         streaming_filter,
         concordance_tracker,
-        config
+        config;
+        track_direct_pairs=!use_transitivity
     )
 
     concordance_time_str = Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, concordance_time * 1000)), "HH:MM:SS.s")
     @info "Building concordance modules [$concordance_time_str]"
     modules = extract_modules(concordance_tracker)
 
-    # Use module-based counting for accurate totals
-    total_concordant_from_modules = count_concordant_pairs_from_modules(concordance_tracker)
-
-    # Debug: compare with tracked count
-    tracked_concordant = batch_results.concordant_pairs.n_pairs
-    @debug "Concordance counting comparison" (
-        from_modules=total_concordant_from_modules - length(trivial_pairs),
-        from_tracking=tracked_concordant,
-        trivial_pairs=length(trivial_pairs),
-        total_modules=total_concordant_from_modules
-    )
-
-
     elapsed = time() - start_time
 
-    # Calculate concordant pairs differently based on transitivity setting
-    if use_transitivity
-        # With transitivity: count all pairs in modules
-        concordant_found = total_concordant_from_modules - length(trivial_pairs)  # Non-trivial concordant pairs from modules
-        concordant_inferred = total_concordant_from_modules - length(trivial_pairs) - batch_results.concordant_count  # Found via transitivity
-        concordant_total = total_concordant_from_modules  # All concordant pairs from modules
-    else
-        # Without transitivity: only count directly optimized pairs + trivial pairs
-        concordant_found = batch_results.concordant_count  # Only pairs found through direct optimization
-        concordant_inferred = 0  # No inference when transitivity is disabled
-        concordant_total = batch_results.concordant_count + length(trivial_pairs)  # Only direct + trivial
-    end
-
-    stats = Dict(
-        # Analysis results
+    # Store intermediate processing statistics (but not final concordance counts yet)
+    intermediate_stats = Dict(
+        # Model information
         "n_reactions" => n_reactions,
         "n_metabolites" => n_metabolites,
         "n_complexes" => n_complexes,
         "n_balanced" => n_balanced_complexes,
         "n_trivially_balanced" => n_trivially_balanced_complexes,
         "n_trivial_pairs" => length(trivial_pairs),
-        "n_candidate_pairs" => batch_results.pairs_processed,  # Total candidates processed across all chunks
-        "n_concordant_found" => concordant_found,  # Non-trivial concordant pairs 
-        "n_concordant_opt" => batch_results.concordant_count,  # Found via direct optimization testing
-        "n_concordant_inferred" => concordant_inferred,  # Found via transitivity (0 when transitivity disabled)
-        "n_concordant_total" => concordant_total,  # Total concordant pairs
+
+        # Processing statistics (keep the useful logging info)
+        "n_candidate_pairs" => batch_results.pairs_processed,
         "n_non_concordant_pairs" => batch_results.non_concordant_pairs,
-        "n_candidates_skipped_by_transitivity" => streaming_filter.pairs_transitivity_concordant_filtered + streaming_filter.pairs_transitivity_non_concordant_filtered,  # Candidates not tested due to transitivity
+        "n_candidates_skipped_by_transitivity" => streaming_filter.pairs_transitivity_concordant_filtered + streaming_filter.pairs_transitivity_non_concordant_filtered,
         "n_timeout_pairs" => batch_results.timeout_pairs,
         "n_infeasible_pairs" => batch_results.infeasible_pairs,
         "n_unbounded_pairs" => batch_results.unbounded_pairs,
@@ -1765,7 +2052,6 @@ function activity_concordance_analysis(
         "n_numerical_error_pairs" => batch_results.numerical_error_pairs,
         "n_other_error_pairs" => batch_results.other_error_pairs,
         "n_total_optimizations" => batch_results.total_optimizations,
-        "n_concordance_modules" => length(filter(p -> length(p[2]) > 1, modules)) + 1,  # Multi-complex modules + balanced module
         "batches_completed" => batch_results.batches_completed,
         "elapsed_time" => elapsed,
 
@@ -1791,58 +2077,25 @@ function activity_concordance_analysis(
         # Model parameters
         "n_workers" => length(workers),
         "objective_bound" => objective_bound !== nothing ? "applied" : "none",
+
+        # Store batch processing results for reference
+        "batch_results_concordant_count" => batch_results.concordant_count,
     )
 
     # Add processing statistics if processed_mask is available
     if concordance_tracker.processed_mask !== nothing
         n_processed = count(concordance_tracker.processed_mask)
-        stats["n_processed_complexes"] = n_processed
-        stats["processing_completion_percent"] = round(n_processed / n_complexes * 100, digits=1)
+        intermediate_stats["n_processed_complexes"] = n_processed
+        intermediate_stats["processing_completion_percent"] = round(n_processed / n_complexes * 100, digits=1)
     end
 
-    # Validate consistency of concordant pair accounting
-    expected_total_concordant = stats["n_concordant_found"] + stats["n_trivial_pairs"]
-    actual_total_concordant = stats["n_concordant_total"]
-
-    validation_passed = (expected_total_concordant == actual_total_concordant)
-
-    # Validate core concordant pair accounting (most important check)
-    if !validation_passed
-        @warn "Concordant pair accounting mismatch detected!" (
-            expected_total=expected_total_concordant,
-            actual_total=actual_total_concordant,
-            found_pairs=stats["n_concordant_found"],
-            trivial_pairs=stats["n_trivial_pairs"],
-            via_direct_testing=stats["n_concordant_opt"],
-            via_inference=stats["n_concordant_inferred"],
-            difference=actual_total_concordant - expected_total_concordant
-        )
-    else
-        @debug "Concordant pair validation passed" (
-            total_concordant=actual_total_concordant,
-            expected_concordant=expected_total_concordant
-        )
-    end
-
-    stats["validation_passed"] = validation_passed
-
-    # Clear summary of the analysis results
-    @info "Concordance analysis complete"
-    @info "  Total concordant pairs: $(stats["n_concordant_total"])"
-    @info "  Breakdown: $(stats["n_concordant_opt"]) from optimization, $(stats["n_candidates_skipped_by_transitivity"]) filtered by transitivity"
-    @info "  Processing: $(stats["n_candidate_pairs"]) candidates, $(stats["n_trivial_pairs"]) trivial pairs"
-    @info "  Elapsed time: $(Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, stats["elapsed_time"] * 1000)), "HH:MM:SS.s"))"
-
-    @debug "Full concordance analysis statistics" stats
-
-    # Build complete concordance matrix in one efficient step with all relationships
     @info "Building complete concordance matrix with all relationships"
     concordance_matrix = build_complete_concordance_matrix(
         n_complexes, complex_idx, trivially_balanced, trivial_pairs,
-        concordance_tracker, balanced_complexes
+        concordance_tracker, balanced_complexes, use_transitivity, batch_results
     )
 
-    # Build CompleteConcordanceModel using canonical ordering established earlier
+    # Build ConcordanceResults using canonical ordering established earlier
     # complex_ids already canonical from concordance_tracker
     # metabolite_ids already canonical from earlier in function
     # Get reaction names directly from constraints
@@ -1894,7 +2147,7 @@ function activity_concordance_analysis(
     # via populate_trivial_relationships! and populate_discovered_relationships!
 
     # Use the constructor with pre-built concordance matrix (more efficient than coordinate vectors)
-    complete_model = CompleteConcordanceModel(
+    complete_model = ConcordanceResults(
         complex_ids,
         reaction_ids,
         Symbol.(metabolite_ids);
@@ -1904,8 +2157,18 @@ function activity_concordance_analysis(
         interface_reactions=falses(length(reaction_ids)),
         acr_metabolites=Symbol[],
         lambda_dict=lambda_dict,
-        stats=stats
+        stats=intermediate_stats  # Use intermediate stats for now
     )
+
+    # NOW calculate the final concordance statistics from the actual concordance matrix
+    final_stats = calculate_final_concordance_statistics!(
+        complete_model,
+        intermediate_stats,
+        use_transitivity
+    )
+
+    # Update the complete model with the final statistics
+    complete_model.stats = final_stats
 
     # Apply kinetic analysis if requested
     if kinetic_analysis
@@ -1925,7 +2188,9 @@ function build_complete_concordance_matrix(
     trivially_balanced::Set{Symbol},
     trivial_pairs::Set{Tuple{Symbol,Symbol}},
     concordance_tracker::ConcordanceTracker,
-    balanced_complexes::BitVector
+    balanced_complexes::BitVector,
+    use_transitivity::Bool,
+    batch_results::Union{Nothing,NamedTuple}
 )
     # Collect all matrix entries for single batch construction
     I_vals = Int[]
@@ -1995,36 +2260,72 @@ function build_complete_concordance_matrix(
     end
 
     # 4. Add discovered concordant pairs (Concordant = 1)
-    # Extract modules from concordance tracker
-    root_to_complexes = Dict{Int,Vector{Int}}()
-    sizehint!(root_to_complexes, n_complexes ÷ 4)
+    if use_transitivity
+        @debug "Using transitivity: extracting pairs from concordance modules"
+        # Extract modules from concordance tracker
+        root_to_complexes = Dict{Int,Vector{Int}}()
+        sizehint!(root_to_complexes, n_complexes ÷ 4)
 
-    for i in 1:n_complexes
-        root = find_set!(concordance_tracker, i)
-        group = get!(root_to_complexes, root) do
-            Vector{Int}()
+        for i in 1:n_complexes
+            root = find_set!(concordance_tracker, i)
+            group = get!(root_to_complexes, root) do
+                Vector{Int}()
+            end
+            push!(group, i)
         end
-        push!(group, i)
-    end
 
-    # Add concordant pairs from modules
-    for complex_group in values(root_to_complexes)
-        group_size = length(complex_group)
-        if group_size > 1
-            for i in 1:group_size-1
-                for j in i+1:group_size
-                    idx1, idx2 = complex_group[i], complex_group[j]
-                    # Ensure upper triangular ordering
-                    upper_i, upper_j = idx1 <= idx2 ? (idx1, idx2) : (idx2, idx1)
-                    # Only add if not already set (trivial pairs have priority)
-                    if (upper_i, upper_j) ∉ existing_pairs
-                        push!(I_vals, upper_i)
-                        push!(J_vals, upper_j)
-                        push!(V_vals, Int(Concordant))  # 1
+        # Add concordant pairs from modules
+        for complex_group in values(root_to_complexes)
+            group_size = length(complex_group)
+            if group_size > 1
+                for i in 1:group_size-1
+                    for j in i+1:group_size
+                        idx1, idx2 = complex_group[i], complex_group[j]
+                        # Ensure upper triangular ordering
+                        upper_i, upper_j = idx1 <= idx2 ? (idx1, idx2) : (idx2, idx1)
+                        # Only add if not already set (trivial pairs have priority)
+                        if (upper_i, upper_j) ∉ existing_pairs
+                            push!(I_vals, upper_i)
+                            push!(J_vals, upper_j)
+                            push!(V_vals, Int(Concordant))  # 1
+                        end
                     end
                 end
             end
         end
+    else
+        @info "Not using transitivity: using direct optimization results only"
+        # Use the directly tracked concordant pairs from batch processing
+
+        direct_pairs = haskey(batch_results, :direct_concordant_pairs) ? batch_results.direct_concordant_pairs : nothing
+        n_direct_pairs = direct_pairs !== nothing ? length(direct_pairs) : 0
+
+        @info "Batch results debug" concordant_count = (batch_results !== nothing ? batch_results.concordant_count : 0) directly_tracked_pairs = n_direct_pairs
+
+        # Add directly tracked concordant pairs to the matrix
+        pairs_added = 0
+        if direct_pairs !== nothing
+            for (i, j) in direct_pairs
+                # Only add if not already set (trivial pairs have priority)
+                if (i, j) ∉ existing_pairs
+                    # Check if this pair is balanced from the balanced_complexes BitVector
+                    is_balanced = balanced_complexes[i] && balanced_complexes[j]
+                    if is_balanced
+                        push!(I_vals, i)
+                        push!(J_vals, j)
+                        push!(V_vals, Int(Balanced))  # 3
+                        pairs_added += 1
+                    else
+                        push!(I_vals, i)
+                        push!(J_vals, j)
+                        push!(V_vals, Int(Concordant))  # 1
+                        pairs_added += 1
+                    end
+                end
+            end
+        end
+
+        @info "Added $pairs_added optimization pairs to matrix (found $n_direct_pairs directly tracked concordant pairs)"
     end
 
     # Build complete sparse matrix in one efficient operation
@@ -2034,4 +2335,122 @@ function build_complete_concordance_matrix(
     return concordance_matrix
 end
 
+"""
+Calculate final concordance statistics from the completed ConcordanceResults object.
+This is the single source of truth for all concordance counts.
+"""
+function calculate_final_concordance_statistics!(
+    results::ConcordanceResults,
+    intermediate_stats::Dict,
+    use_transitivity::Bool
+)
+    n_complexes = length(results.complex_ids)
 
+    # Count different types of concordance from the final matrix
+    n_concordant_total = 0
+    n_trivially_concordant = 0
+    n_balanced = 0
+    n_trivially_balanced = 0
+
+    # Count from upper triangular matrix (avoid double counting)
+    for i in 1:n_complexes
+        for j in (i+1):n_complexes  # Only upper triangle
+            concordance_type = ConcordanceType(results.concordance_matrix[i, j])
+
+            if concordance_type == Concordant
+                n_concordant_total += 1
+            elseif concordance_type == Trivially_concordant
+                n_trivially_concordant += 1
+                n_concordant_total += 1  # Trivially concordant are also concordant
+            end
+        end
+
+        # Check diagonal for balanced complexes
+        diagonal_type = ConcordanceType(results.concordance_matrix[i, i])
+        if diagonal_type == Balanced
+            n_balanced += 1
+        elseif diagonal_type == Trivially_balanced
+            n_trivially_balanced += 1
+            n_balanced += 1  # Trivially balanced are also balanced
+        end
+    end
+
+    # Count concordance modules (from the final concordance_modules field)
+    module_counts = Dict{Int,Int}()
+    for module_id in results.concordance_modules
+        if module_id >= 0  # Only count actual modules (-1 = singleton)
+            module_counts[module_id] = get(module_counts, module_id, 0) + 1
+        end
+    end
+    n_concordance_modules = count(>(1), values(module_counts))
+
+    # Get optimization counts from the batch processing
+    n_directly_tested = intermediate_stats["n_total_optimizations"]
+    n_found_via_optimization = intermediate_stats["batch_results_concordant_count"]
+
+    # Calculate inferred count ONLY if transitivity was used
+    if use_transitivity
+        n_concordant_inferred = n_concordant_total - n_found_via_optimization
+    else
+        n_concordant_inferred = 0
+        # Sanity check: without transitivity, all concordant pairs should be directly found
+        # (excluding trivial pairs which are never optimized)
+        non_trivial_concordant = n_concordant_total - n_trivially_concordant
+        if non_trivial_concordant != n_found_via_optimization
+            @warn "Inconsistency detected: non-trivial concordant pairs don't match optimization results" (
+                non_trivial_concordant=non_trivial_concordant,
+                n_found_via_optimization=n_found_via_optimization,
+                difference=non_trivial_concordant - n_found_via_optimization
+            )
+        end
+    end
+
+    # Build complete statistics dict
+    final_stats = copy(intermediate_stats)
+
+    # Add the final concordance counts
+    final_stats["n_concordant_total"] = n_concordant_total
+    final_stats["n_concordant_opt"] = n_found_via_optimization
+    final_stats["n_concordant_inferred"] = n_concordant_inferred
+    final_stats["n_concordant_found"] = n_concordant_total - n_trivially_concordant  # Non-trivial concordant pairs
+    final_stats["n_trivially_concordant"] = n_trivially_concordant
+    final_stats["n_balanced_total"] = n_balanced
+    final_stats["n_balanced_complexes"] = n_balanced
+    final_stats["n_trivially_balanced_complexes"] = n_trivially_balanced
+    final_stats["n_concordance_modules"] = n_concordance_modules
+
+    # Validation
+    expected_total_concordant = final_stats["n_concordant_found"] + final_stats["n_trivial_pairs"]
+    actual_total_concordant = final_stats["n_concordant_total"]
+    validation_passed = (expected_total_concordant == actual_total_concordant)
+
+    if !validation_passed
+        @warn "Concordant pair accounting mismatch detected!" (
+            expected_total=expected_total_concordant,
+            actual_total=actual_total_concordant,
+            found_pairs=final_stats["n_concordant_found"],
+            trivial_pairs=final_stats["n_trivial_pairs"],
+            via_direct_testing=final_stats["n_concordant_opt"],
+            via_inference=final_stats["n_concordant_inferred"],
+            difference=actual_total_concordant - expected_total_concordant
+        )
+    else
+        @debug "Concordant pair validation passed" (
+            total_concordant=actual_total_concordant,
+            expected_concordant=expected_total_concordant
+        )
+    end
+
+    final_stats["validation_passed"] = validation_passed
+
+    # Clear summary of the analysis results
+    @info "Concordance analysis complete"
+    @info "  Total concordant pairs: $(final_stats["n_concordant_total"])"
+    @info "  Breakdown: $(final_stats["n_concordant_opt"]) from optimization, $(final_stats["n_concordant_inferred"]) inferred, $(final_stats["n_trivially_concordant"]) trivial"
+    @info "  Processing: $(final_stats["n_candidate_pairs"]) candidates, $(final_stats["n_candidates_skipped_by_transitivity"]) filtered by transitivity"
+    @info "  Elapsed time: $(Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, final_stats["elapsed_time"] * 1000)), "HH:MM:SS.s"))"
+
+    @debug "Full concordance analysis statistics" final_stats
+
+    return final_stats
+end

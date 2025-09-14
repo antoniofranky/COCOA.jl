@@ -1,12 +1,15 @@
 
 """
-$(TYPEDSIGNATURES)
+Activity Variability Analysis for COCOA.jl
 
-Extract warmup points from activity variability analysis results.
+Functions for computing the variability of complex activities in metabolic networks.
+"""
 
-Takes the results from [`activity_variability_analysis`](@ref) when run with
-custom output function and processes them into activity ranges and warmup points
-for use in concordance analysis.
+"""
+Extract warmup points and activity ranges from AVA results.
+
+Internal function that processes activity variability analysis results to extract
+flux vectors for use as warmup points in concordance analysis.
 """
 function _extract_warmup_points(
     ava_results,
@@ -55,19 +58,52 @@ function _extract_warmup_points(
 end
 
 """
-$(TYPEDSIGNATURES)
+    activity_variability_analysis(constraints::C.ConstraintTree, complex_ids::Vector{Symbol}; kwargs...)
 
 Perform Activity Variability Analysis using pre-built constraints.
 
-Computes the variability of complex activities in the feasible space specified
-by `constraints`. The analysis examines all activities in `constraints.activities`
-corresponding to the given `complex_ids`.
+Computes the minimum and maximum achievable values for complex activities within
+the feasible space defined by the constraint system. This method provides direct
+control over the constraint system and is suitable for advanced usage scenarios.
 
-Parameters `optimizer`, `settings`, and `workers` are forwarded to
-[`COBREXA.constraints_variability`](@ref).
+# Arguments
+- `constraints::C.ConstraintTree`: Pre-built constraint tree containing balance and activity constraints
+- `complex_ids::Vector{Symbol}`: Ordered vector of complex identifiers to analyze
 
-For warmup point generation (used in concordance analysis), provide custom
-`output` and `output_type` parameters and set `return_warmup_points=true`.
+# Keyword Arguments
+- `optimizer`: Optimization solver (e.g., HiGHS.Optimizer)
+- `settings=[]`: Solver-specific settings vector
+- `workers=D.workers()`: Worker processes for parallel computation
+- `output=nothing`: Custom output function for results processing
+- `output_type=nothing`: Expected return type of output function
+- `return_warmup_points::Bool=false`: If true, extract warmup points when `output_type` is appropriate
+
+# Returns
+- If `return_warmup_points=false`: Dictionary mapping complex IDs to `(min_activity, max_activity)` tuples
+- If `return_warmup_points=true` and `output_type=Tuple{Float64,Vector{Float64}}`: 
+  Named tuple with `activity_ranges` and `warmup_points` fields
+
+# Notes
+- This method requires pre-built constraints from [`concordance_constraints`](@ref)
+- Parameters `optimizer`, `settings`, and `workers` are forwarded to [`COBREXA.constraints_variability`](@ref)
+- For warmup point generation, use `output=ava_output_with_warmup` and appropriate output type
+
+# Examples
+```julia
+# Basic activity variability analysis
+constraints, complexes = concordance_constraints(model; return_complexes=true)
+complex_ids = collect(keys(complexes))
+results = activity_variability_analysis(constraints, complex_ids; optimizer=HiGHS.Optimizer)
+
+# Generate warmup points for concordance analysis
+warmup_data = activity_variability_analysis(
+    constraints, complex_ids; 
+    optimizer=HiGHS.Optimizer,
+    output=ava_output_with_warmup,
+    output_type=Tuple{Float64,Vector{Float64}},
+    return_warmup_points=true
+)
+```
 """
 function activity_variability_analysis(
     constraints::C.ConstraintTree,
@@ -97,16 +133,56 @@ function activity_variability_analysis(
 end
 
 """
-$(TYPEDSIGNATURES)
+    activity_variability_analysis(model; optimizer, kwargs...)
 
-Perform Activity Variability Analysis on complex activities in the `model`.
+Perform Activity Variability Analysis on complex activities in a metabolic model.
 
-The constraint system is constructed using [`concordance_constraints`](@ref),
-and variability is examined on all complex activities. Parameters `optimizer`,
-`settings`, and `workers` are forwarded to the constraint-based method.
+This is the high-level interface for activity variability analysis. It automatically
+constructs the constraint system using [`concordance_constraints`](@ref) and analyzes
+variability for all complex activities in the model.
 
-Use the constraint-based method directly for advanced usage with pre-built
-constraints.
+# Arguments
+- `model`: Metabolic model (supports COBREXA.jl compatible formats)
+
+# Keyword Arguments
+- `optimizer`: Optimization solver (required, e.g., HiGHS.Optimizer)
+- `modifications=Function[]`: Model modifications to apply before analysis
+- `settings=[]`: Solver-specific settings vector
+- `workers=D.workers()`: Worker processes for parallel computation
+- `use_unidirectional_constraints::Bool=true`: Use unidirectional flux constraints
+- `kwargs...`: Additional parameters forwarded to constraint-based method
+
+# Returns
+- ConstraintTree mapping complex IDs to activity variability results
+- Return type depends on `output` and `output_type` parameters (see constraint-based method)
+
+# Notes
+- SBML models are automatically processed with [`ElementarySteps.fix_objective_after_conversion`](@ref)
+- Complex IDs are automatically extracted and sorted alphabetically
+- For advanced usage with custom constraints, use the constraint-based method directly
+
+# Examples
+```julia
+# Basic usage
+results = activity_variability_analysis(model; optimizer=HiGHS.Optimizer)
+
+# With model modifications
+modifications = [change_bound("EX_glc__D_e", lower=-10.0)]
+results = activity_variability_analysis(
+    model; 
+    optimizer=HiGHS.Optimizer,
+    modifications=modifications
+)
+
+# Generate warmup points
+warmup_data = activity_variability_analysis(
+    model;
+    optimizer=HiGHS.Optimizer,
+    output=ava_output_with_warmup,
+    output_type=Tuple{Float64,Vector{Float64}},
+    return_warmup_points=true
+)
+```
 """
 function activity_variability_analysis(
     model;
@@ -141,13 +217,10 @@ function activity_variability_analysis(
 end
 
 """
-$(TYPEDSIGNATURES)
+Custom output function for AVA that collects activity values and flux vectors.
 
-Output function for activity variability analysis that collects both activity
-values and flux vectors for warmup point generation.
-
-Returns `(activity, flux_vector)` tuple if optimization is successful,
-`(nothing, nothing)` otherwise. Results are rounded to `digits` precision.
+Returns `(activity, flux_vector)` if optimization succeeds, `(nothing, nothing)` otherwise.
+Used to generate warmup points for concordance analysis.
 """
 function ava_output_with_warmup(dir, om; digits, collect_flux=true)
     J.termination_status(om) != J.OPTIMAL && return (nothing, nothing)
@@ -160,5 +233,3 @@ function ava_output_with_warmup(dir, om; digits, collect_flux=true)
 
     (activity, flux_values)
 end
-
-export activity_variability_analysis, ava_output_with_warmup

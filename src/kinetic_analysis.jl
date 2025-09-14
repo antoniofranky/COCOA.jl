@@ -2,13 +2,13 @@
 Upstream Algorithm
 
 Optimized 4-phase upstream algorithm designed specifically for COCOA.jl's 
-CompleteConcordanceModel data structure and performance requirements.
+ConcordanceResults data structure and performance requirements.
 
 Based on theoretical foundations but adapted for practical use with:
 - Large metabolic networks (50k+ reactions)
 - Sparse matrix operations
 - Memory efficiency
-- Integration with CompleteConcordanceModel
+- Integration with ConcordanceResults
 """
 
 using LinearAlgebra
@@ -371,7 +371,6 @@ function upstream_algorithm(extended_module::Vector{Int}, A_matrix::SparseArrays
     end
 
     # Return union of Phase III and Phase IV complexes (the upstream set)
-    # This matches the theoretical specification and R implementation
     upstream_set = union(phase_iii_complexes, phase_iv_complexes)
 
     verbose && @debug " Upstream algorithm complete" (
@@ -419,7 +418,7 @@ This implements the complete theoretical algorithm:
 Updates the model's kinetic_modules field efficiently.
 """
 function apply_kinetic_analysis!(
-    complete_model::CompleteConcordanceModel,
+    complete_model::ConcordanceResults,
     constraints::C.ConstraintTree;
     min_module_size::Int=1,
     verbose::Bool=true
@@ -437,7 +436,7 @@ function apply_kinetic_analysis!(
     balanced_complexes = findall(==(0), complete_model.concordance_modules)
 
     # Build A matrix on-demand from constraints
-    A_matrix, _, _ = build_A_matrix_from_constraints(constraints)
+    A_matrix = A_matrix_from_constraints(constraints)
     verbose && @debug "Built A matrix on-demand" size = size(A_matrix) nnz = length(A_matrix.nzval)
 
     # Extract linkage classes for coupling detection
@@ -450,9 +449,6 @@ function apply_kinetic_analysis!(
     module_to_upstream = Dict{Int,Vector{Int}}()  # Map concordance module ID to its upstream set
 
     # The balanced complexes are those with concordance_modules[i] == 0
-    # We should only process actual concordance modules (1 to n), not the balanced "module 0"
-    # This matches R logic where balanced complexes are separate from concordance modules
-
     # Process each concordance module (1 to n) - balanced complexes are already identified above
     for concordance_module_id in 1:complete_model.stats["n_concordance_modules"]
         # Get complexes in this concordance module
@@ -478,8 +474,7 @@ function apply_kinetic_analysis!(
 
     @info "Found $(length(upstream_sets)) upstream sets from $(complete_model.stats["n_concordance_modules"]) concordance modules"
 
-    # CRITICAL FIX 2: R-style module merging based on intersection matrix
-    # This follows the R code: mdiff[i,j] = length(intersect(lres[[i]], lres[[j]]))
+
     kinetic_modules = Vector{Int}[]  # Final kinetic modules after merging
 
     if isempty(upstream_sets)
@@ -490,7 +485,7 @@ function apply_kinetic_analysis!(
 
     @info "Merging modules" n_upstream_sets = length(upstream_sets)
 
-    # Step 1: Create intersection matrix (like R code mdiff matrix)
+    # Step 1: Create intersection matrix
     n_sets = length(upstream_sets)
     intersection_matrix = zeros(Int, n_sets, n_sets)
 
@@ -507,7 +502,6 @@ function apply_kinetic_analysis!(
     end
 
     # Step 2: Create graph where modules with shared complexes are connected
-    # (equivalent to R code: mg <- graph_from_adjacency_matrix(mdiff, mode = "undirected"))
     module_graph = [Set{Int}() for _ in 1:n_sets]
     for i in 1:n_sets
         for j in 1:n_sets
@@ -517,7 +511,7 @@ function apply_kinetic_analysis!(
         end
     end
 
-    # Step 3: Find connected components (like R code: clustmg <- components(mg))
+    # Step 3: Find connected components
     visited = falses(n_sets)
     components = Vector{Vector{Int}}()
 
@@ -543,8 +537,7 @@ function apply_kinetic_analysis!(
 
     @debug "Found $(length(components)) connected components for merging" component_sizes = [length(c) for c in components]
 
-    # Step 4: Merge modules in same connected component 
-    # (like R code: final_lres[[length(final_lres) + 1]] <- union(lres[[p[1]]], lres[[p[j]]]))
+    # Step 4: Merge modules in same connected component
     for (comp_id, component) in enumerate(components)
         if length(component) == 1
             # Single module - no merging needed
@@ -634,7 +627,7 @@ function apply_kinetic_analysis!(
             end
         end
         # Build Y matrix using the new matrix building functions
-        Y_matrix, metabolite_ids, complex_ids = build_Y_matrix_from_constraints(constraints)
+        Y_matrix, metabolite_ids, complex_ids = Y_matrix_from_constraints(constraints; return_ids=true)
 
         # Detect ACR metabolites
         acr_metabolites = detect_acr_metabolites(kinetic_groups_dict, Y_matrix)
@@ -642,7 +635,7 @@ function apply_kinetic_analysis!(
         # Detect ACRR metabolite pairs  
         acrr_pairs = detect_acrr_metabolite_pairs(kinetic_groups_dict, Y_matrix)
 
-        # Step 7.1: Detect interface reactions (following R reference logic)
+        # Step 7.1: Detect interface reactions
         @info "Detecting interface reactions"
         detect_interface_reactions!(complete_model, kinetic_modules, constraints)
 
@@ -715,7 +708,6 @@ end
 
 """
 Check if two complexes satisfy ACRR conditions.
-Implements the specific criteria from the Upstream_Algorithm R code.
 """
 function check_acrr_conditions(Y_matrix::AbstractMatrix, complex1_idx::Int, complex2_idx::Int, diff_indices::Vector{Int})
     if length(diff_indices) != 2
@@ -726,7 +718,6 @@ function check_acrr_conditions(Y_matrix::AbstractMatrix, complex1_idx::Int, comp
     complex1_metabolites = findall(x -> abs(x) > 1e-10, Y_matrix[:, complex1_idx])
     complex2_metabolites = findall(x -> abs(x) > 1e-10, Y_matrix[:, complex2_idx])
 
-    # Check ACRR conditions from R code:
     # qq2: complex1 has exactly 1 metabolite not in the difference
     metabolites_only_in_complex1 = setdiff(complex1_metabolites, diff_indices)
     condition2 = length(metabolites_only_in_complex1) == 1
@@ -742,7 +733,7 @@ end
 Detect metabolites with Absolute Concentration Robustness (ACR).
 
 ACR metabolites are found by identifying cases where two complexes in the same 
-kinetic module differ by exactly one metabolite. Based on the Upstream_Algorithm R code.
+kinetic module differ by exactly one metabolite.
 
 # Arguments
 - `kinetic_groups::Dict{Int,Vector{Int}}`: Kinetic modules (group_id => complex_indices)
@@ -792,8 +783,7 @@ end
 Detect metabolite pairs with Absolute Concentration Ratio Robustness (ACRR).
 
 ACRR pairs are found by identifying cases where two complexes in the same kinetic module
-differ in exactly 2 metabolites with specific structural conditions. Based on the 
-Upstream_Algorithm R code.
+differ in exactly 2 metabolites with specific structural conditions.
 
 # Arguments
 - `kinetic_groups::Dict{Int,Vector{Int}}`: Kinetic modules (group_id => complex_indices) 
@@ -847,21 +837,16 @@ Detect interface reactions based on kinetic modules.
 Interface reactions connect complexes from different kinetic modules.
 Intra-module reactions connect complexes within the same kinetic module.
 
-This follows the R reference logic:
-- Get all edges (reactions) in the network
-- Identify which reactions have both source and target in the same kinetic module (intra-module)
-- All other reactions are interface reactions
-
 Updates the interface_reactions BitVector in the model.
 """
-function detect_interface_reactions!(complete_model::CompleteConcordanceModel, kinetic_modules::Vector{Vector{Int}}, constraints::C.ConstraintTree)
-    @info "Detecting interface reactions following R reference logic"
+function detect_interface_reactions!(complete_model::ConcordanceResults, kinetic_modules::Vector{Vector{Int}}, constraints::C.ConstraintTree)
+    @info "Detecting interface reactions"
 
     # Reset interface reactions BitVector (assume all are interface initially)
     fill!(complete_model.interface_reactions, true)
 
     # Build A matrix on-demand from constraints
-    A_matrix, _, _ = build_A_matrix_from_constraints(constraints)
+    A_matrix = A_matrix_from_constraints(constraints)
 
     # Create mapping from complex to its kinetic module
     complex_to_module = Dict{Int,Int}()
@@ -882,7 +867,6 @@ function detect_interface_reactions!(complete_model::CompleteConcordanceModel, k
         end
 
         # Find reactions where both source and target are in this module
-        # Following R logic: c1 <- which(eg[,1] %in% final_lres[[j]]) and c2 <- which(eg[,2] %in% final_lres[[j]])
         module_set = Set(module_complexes)
 
         # Check each reaction to see if both substrate and product are in this module

@@ -61,7 +61,7 @@ import Dates
 import ConstraintTrees as C
 import Distributed as D
 import JLD2
-import HiGHS
+
 import Graphs
 import LinearAlgebra
 
@@ -83,16 +83,19 @@ include("concordance.jl")
 include("kinetic_analysis.jl")
 
 
-# Re-export main functions
-export concordance_constraints, activity_concordance_analysis, activity_variability_analysis
-# Re-export streaming filter functions
-export StreamingCandidateFilter, process_streaming_batches
+
+# Export preprocessing functions
 export split_into_elementary_steps
 export prepare_model_for_concordance
-export extract_reaction_enzymes, build_enzyme_registry
-# Export kinetic analysis functions
-export identify_kinetic_modules, identify_concentration_robustness, activity_concordance_analysis, extract_network_matrices_from_constraints
-export KineticModuleResults, ConcentrationRobustnessResults
-# Export kinetic analysis utilities  
+
+# Export main analysis functions
+export concordance_constraints, activity_variability_analysis, activity_concordance_analysis
+
+# Export matrix building functions
+export S_from_constraints, Y_matrix_from_constraints, A_matrix_from_constraints
+
+
+
+# Export kinetic analysis function
 export apply_kinetic_analysis!
 end # module COCOA

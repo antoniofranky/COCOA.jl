@@ -13,7 +13,7 @@ import JSONFBCModels
 import Random
 import SparseArrays
 import Logging
-import HiGHS
+
 import AbstractFBCModels as A
 import AbstractFBCModels.CanonicalModel as CM
 
@@ -24,7 +24,7 @@ include("mechanisms.jl")
 include("mass_action_validation.jl")
 
 export split_into_elementary_steps, validate_split_model, normalize_bounds!, fix_objective_after_conversion,
-       validate_mass_action_kinetics, check_enzyme_conservation
+    validate_mass_action_kinetics, check_enzyme_conservation
 
 """
     normalize_bounds!(model::CM.Model; 
@@ -179,7 +179,7 @@ function split_into_elementary_steps(
     # Track intermediate metabolites and mappings
     intermediate_registry = Dict{Vector{String},String}()
     reaction_count = 0
-    
+
     # Track unexpanded reactions (matching upstream algorithm)
     unexpanded_reactions = String[]
 
@@ -232,17 +232,17 @@ function split_into_elementary_steps(
 
     # Calculate reaction statistics
     expanded_reactions = length(elementary_model.reactions) - length(unexpanded_reactions)
-    
+
     @info "Reaction splitting summary (matching upstream algorithm):"
     @info "  - Original reactions: $(length(work_model.reactions))"
-    @info "  - Elementary steps created: $expanded_reactions" 
+    @info "  - Elementary steps created: $expanded_reactions"
     @info "  - Unexpanded reactions: $(length(unexpanded_reactions))"
     @info "  - Total final reactions: $(length(elementary_model.reactions))"
     @info "  - Enzymes: $(length(enzyme_registry)), Intermediates: $(length(intermediate_registry))"
-    
+
     # Validate model properties
     validate_split_model(model, elementary_model)
-    
+
     # Validate mass action kinetics compatibility
     is_mass_action_valid, ma_violations = validate_mass_action_kinetics(elementary_model, verbose=true)
     if !is_mass_action_valid
@@ -359,12 +359,12 @@ This prevents ConstraintTrees from creating invalid zero constraints.
 """
 function cleanup_unused_metabolites!(model::CM.Model)
     # Count metabolite participation in reactions
-    met_reaction_count = Dict{String, Int}()
-    
+    met_reaction_count = Dict{String,Int}()
+
     for (mid, met) in model.metabolites
         met_reaction_count[mid] = 0
     end
-    
+
     for (rid, rxn) in model.reactions
         for (mid, coeff) in rxn.stoichiometry
             if haskey(met_reaction_count, mid)
@@ -372,17 +372,17 @@ function cleanup_unused_metabolites!(model::CM.Model)
             end
         end
     end
-    
+
     # Remove metabolites with no reactions
     unused_mets = [mid for (mid, count) in met_reaction_count if count == 0]
-    
+
     if !isempty(unused_mets)
         for mid in unused_mets
             delete!(model.metabolites, mid)
         end
         @info "Removed $(length(unused_mets)) unused metabolites (had no reactions)"
     end
-    
+
     return nothing
 end
 

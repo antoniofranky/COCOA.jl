@@ -437,7 +437,7 @@ end
     Trivially_balanced = 4
 end
 
-mutable struct CompleteConcordanceModel
+mutable struct ConcordanceResults
     # === IDENTIFIER MAPPINGS (following AbstractFBCModels pattern) ===
     complex_ids::Vector{Symbol}                # Position = index
     complex_idx::Dict{Symbol,Int}             # Symbol -> index lookup
@@ -470,7 +470,7 @@ end
 
 #  Constructor
 
-function CompleteConcordanceModel(
+function ConcordanceResults(
     complex_ids::Vector{Symbol},
     reaction_ids::Vector{Symbol},
     metabolite_ids::Vector{Symbol};
@@ -550,7 +550,7 @@ function CompleteConcordanceModel(
     n_concordance_modules = length(unique(filter(x -> x >= 0, concordance_modules)))
     n_kinetic_modules = kinetic_modules !== nothing ? length(unique(filter(x -> x > 0, kinetic_modules))) : 0
 
-    return CompleteConcordanceModel(
+    return ConcordanceResults(
         complex_ids, complex_idx,
         reaction_ids, reaction_idx,
         metabolite_ids, metabolite_idx,
@@ -575,24 +575,24 @@ get_reaction_idx(model, id::Symbol) = model.reaction_idx[id]
 get_metabolite_idx(model, id::Symbol) = model.metabolite_idx[id]
 
 # === CONCORDANCE QUERIES ===
-function get_concordance_type(model::CompleteConcordanceModel, c1::Symbol, c2::Symbol)
+function get_concordance_type(model::ConcordanceResults, c1::Symbol, c2::Symbol)
     i, j = model.complex_idx[c1], model.complex_idx[c2]
     canonical_pair = i < j ? (i, j) : (j, i)
     return ConcordanceType(model.concordance_matrix[i, j])  # UpperTriangular handles symmetry
 end
 
-function get_lambda_value(model::CompleteConcordanceModel, c1::Symbol, c2::Symbol)
+function get_lambda_value(model::ConcordanceResults, c1::Symbol, c2::Symbol)
     i, j = model.complex_idx[c1], model.complex_idx[c2]
     key = i < j ? (i, j) : (j, i)
     return haskey(model.lambda_dict, key) ? model.lambda_dict[key] : NaN
 end
 
-function is_concordant(model::CompleteConcordanceModel, c1::Symbol, c2::Symbol)
+function is_concordant(model::ConcordanceResults, c1::Symbol, c2::Symbol)
     return get_concordance_type(model, c1, c2) != None
 end
 
 # === ACRR QUERIES (efficient for sparse data) ===
-function has_acrr(model::CompleteConcordanceModel, c1::Symbol, c2::Symbol)
+function has_acrr(model::ConcordanceResults, c1::Symbol, c2::Symbol)
     if model.acrr_pairs === nothing
         return false  # ACRR analysis not performed
     end
@@ -600,14 +600,14 @@ function has_acrr(model::CompleteConcordanceModel, c1::Symbol, c2::Symbol)
     return canonical_pair ∈ model.acrr_pairs
 end
 
-function get_acrr_pairs(model::CompleteConcordanceModel)
+function get_acrr_pairs(model::ConcordanceResults)
     if model.acrr_pairs === nothing
         return Tuple{Symbol,Symbol}[]  # ACRR analysis not performed
     end
     return model.acrr_pairs
 end
 
-function add_acrr_pair!(model::CompleteConcordanceModel, c1::Symbol, c2::Symbol)
+function add_acrr_pair!(model::ConcordanceResults, c1::Symbol, c2::Symbol)
     if model.acrr_pairs === nothing
         model.acrr_pairs = Tuple{Symbol,Symbol}[]  # Initialize if needed
     end
@@ -618,7 +618,7 @@ function add_acrr_pair!(model::CompleteConcordanceModel, c1::Symbol, c2::Symbol)
 end
 
 # === STRUCTURAL QUERIES ===
-function get_complex_reactions(model::CompleteConcordanceModel, complex::Symbol)
+function get_complex_reactions(model::ConcordanceResults, complex::Symbol)
     idx = model.complex_idx[complex]
     reaction_idxs, _ = SparseArrays.findnz(model.complex_reaction_matrix[idx, :])
     return model.reaction_ids[reaction_idxs]
@@ -626,14 +626,14 @@ end
 
 
 # === ACR QUERIES ===
-function has_acr(model::CompleteConcordanceModel, metabolite::Symbol)
+function has_acr(model::ConcordanceResults, metabolite::Symbol)
     if model.acr_metabolites === nothing
         return false  # ACR analysis not performed
     end
     return metabolite ∈ model.acr_metabolites
 end
 
-function get_acr_metabolites(model::CompleteConcordanceModel)
+function get_acr_metabolites(model::ConcordanceResults)
     if model.acr_metabolites === nothing
         return Symbol[]  # ACR analysis not performed
     end
