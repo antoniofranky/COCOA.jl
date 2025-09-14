@@ -501,38 +501,38 @@ Returns true if pair is still potentially concordant, false if definitely non-co
     timeout::Bool,
     concordance_tolerance::Float64
 )::Bool
-    @debug "Checking concordance"
     # Early exit if timeout
-    timeout && (state.has_timeout = true; state.is_concordant = false; return false)
-    # Don't exit early based on is_concordant - let the validation run
+    if timeout
+        state.has_timeout = true
+        state.is_concordant = false
+        return false
+    end
 
     # Update min/max values for this direction
     if direction == :positive
         if dir_multiplier == -1
             state.positive_min = value
-        else  # dir_multiplier == 1
+        else
             state.positive_max = value
         end
         state.has_positive = true
-    else  # direction == :negative
+    else # direction == :negative
         if dir_multiplier == -1
             state.negative_min = value
-        else  # dir_multiplier == 1
+        else
             state.negative_max = value
         end
         state.has_negative = true
     end
 
-    # Check concordance for completed directions
+    # Check concordance when we have both min/max for a direction
     if direction == :positive && !isnan(state.positive_min) && !isnan(state.positive_max)
-        ratio_diff = abs(state.positive_min - state.positive_max)
-        if ratio_diff > concordance_tolerance
-            @debug "POSITIVE DIRECTION FAILED" pos_min = state.positive_min pos_max = state.positive_max diff = ratio_diff tolerance = concordance_tolerance
+        # Check if min/max are concordant within tolerance
+        if abs(state.positive_min - state.positive_max) > concordance_tolerance
             state.is_concordant = false
             return false
-        else
-            @debug "POSITIVE DIRECTION PASSED" pos_min = state.positive_min pos_max = state.positive_max diff = ratio_diff tolerance = concordance_tolerance
         end
+        # Check lambda consistency
         current_lambda = (state.positive_min + state.positive_max) / 2
         if isnan(state.reference_lambda)
             state.reference_lambda = current_lambda
@@ -541,10 +541,12 @@ Returns true if pair is still potentially concordant, false if definitely non-co
             return false
         end
     elseif direction == :negative && !isnan(state.negative_min) && !isnan(state.negative_max)
+        # Check if min/max are concordant within tolerance
         if abs(state.negative_min - state.negative_max) > concordance_tolerance
             state.is_concordant = false
             return false
         end
+        # Check lambda consistency
         current_lambda = (state.negative_min + state.negative_max) / 2
         if isnan(state.reference_lambda)
             state.reference_lambda = current_lambda
@@ -554,33 +556,15 @@ Returns true if pair is still potentially concordant, false if definitely non-co
         end
     end
 
-    # Final concordance check: Only mark as concordant if ALL tested directions
-    # completed successfully and show consistent results
-    all_tested_directions_valid = true
-    at_least_one_direction_tested = false
+    # Mark as concordant if all tested directions are complete and valid
+    has_complete_positive = state.has_positive && !isnan(state.positive_min) && !isnan(state.positive_max)
+    has_complete_negative = state.has_negative && !isnan(state.negative_min) && !isnan(state.negative_max)
 
-    # Check positive direction if it was tested
-    if state.has_positive
-        at_least_one_direction_tested = true
-        if isnan(state.positive_min) || isnan(state.positive_max)
-            all_tested_directions_valid = false
+    if (state.has_positive || state.has_negative) && (has_complete_positive || has_complete_negative)
+        # Only mark concordant if all tested directions are complete
+        if (!state.has_positive || has_complete_positive) && (!state.has_negative || has_complete_negative)
+            state.is_concordant = true
         end
-    end
-
-    # Check negative direction if it was tested
-    if state.has_negative
-        at_least_one_direction_tested = true
-        if isnan(state.negative_min) || isnan(state.negative_max)
-            all_tested_directions_valid = false
-        end
-    end
-
-    # Only mark as concordant if:
-    # 1. At least one direction was tested
-    # 2. All tested directions completed successfully (no NaN)
-    # 3. All validation checks passed (we would have returned false earlier if not)
-    if at_least_one_direction_tested && all_tested_directions_valid
-        state.is_concordant = true
     end
 
     return state.is_concordant
@@ -866,11 +850,18 @@ function process_concordance_batch(
     concordance_tolerance::Float64,
     track_direct_pairs::Bool=false
 )
+
     # Create COBREXA-style test array with direction multipliers directly from PairCandidate
     test_array = []
+    debug_candidate_pairs = Set{Tuple{Symbol,Symbol}}()
+
     for candidate in batch_pairs
         c1_id = concordance_tracker.idx_to_id[candidate.c1_idx]
         c2_id = concordance_tracker.idx_to_id[candidate.c2_idx]
+
+        # Track all candidate pairs being tested
+        push!(debug_candidate_pairs, (c1_id, c2_id))
+
         # Iterate over directions using bit flags
         for direction in iterate_directions(candidate.directions_bits)
             # Add both MIN (-1) and MAX (+1) tests
@@ -890,15 +881,14 @@ function process_concordance_batch(
                 println("NULL MODEL: Worker failed to create optimization model for $(c1_id), $(c2_id)")
                 return (c1_id, c2_id, direction, dir_multiplier, NaN, J.OPTIMIZE_NOT_CALLED)
             end
-
             try
                 # Check if activities exist for both complexes
                 if !haskey(constraints.activities, c1_id)
-                    println("MISSING ACTIVITY: c1_id=$(c1_id)")
+                    @warn("MISSING ACTIVITY: c1_id=$(c1_id)")
                     return (c1_id, c2_id, direction, dir_multiplier, NaN, J.OPTIMIZE_NOT_CALLED)
                 end
                 if !haskey(constraints.activities, c2_id)
-                    println("MISSING ACTIVITY: c2_id=$(c2_id)")
+                    @warn("MISSING ACTIVITY: c2_id=$(c2_id)")
                     return (c1_id, c2_id, direction, dir_multiplier, NaN, J.OPTIMIZE_NOT_CALLED)
                 end
 
@@ -991,11 +981,6 @@ function process_concordance_batch(
 
         # Debug: Track termination status frequency
         status_frequency[termination_status] = get(status_frequency, termination_status, 0) + 1
-
-        # Debug: Log OPTIMIZE_NOT_CALLED cases specifically
-        if termination_status == J.OPTIMIZE_NOT_CALLED
-            @debug "Found OPTIMIZE_NOT_CALLED in results" c1_id c2_id direction dir_multiplier
-        end
 
         # Track failure statistics per pair
         pair_failure_counts[pair_idx][status_category] += 1
@@ -1800,19 +1785,9 @@ function activity_concordance_analysis(
         union_sets!(concordance_tracker, concordance_tracker.id_to_idx[c1_id], concordance_tracker.id_to_idx[c2_id])
     end
 
-    # CRITICAL: Union all balanced complexes into a single module
-    # This includes both trivially balanced complexes AND AVA-detected balanced complexes
-    # All balanced complexes have zero net flux and are therefore concordant with each other
-    balanced_indices = findall(balanced_complexes)
-    if length(balanced_indices) > 1
-        @info "Unioning all balanced complexes into single module" n_balanced = length(balanced_indices) n_trivially_balanced = length(trivially_balanced)
-        # Union all balanced complexes with the first balanced complex
-        first_balanced_idx = balanced_indices[1]
-        for i in eachindex(balanced_indices)[2:end]
-            union_sets!(concordance_tracker, first_balanced_idx, balanced_indices[i])
-        end
-    end
-
+    # Note: Balanced complexes are handled separately in the matrix construction
+    # They should not be added to the concordance tracker as they don't participate
+    # in flux ratio concordance analysis (zero flux = undefined ratios)
 
     # Create filtered activities constraint tree excluding balanced complexes for memory efficiency
     active_complex_ids = [
@@ -2235,31 +2210,7 @@ function build_complete_concordance_matrix(
         end
     end
 
-    # 3. Add trivial pairs (Trivially_concordant = 2)
-    for (id1, id2) in trivial_pairs
-        i = get(complex_idx, id1, 0)
-        j = get(complex_idx, id2, 0)
-        if i > 0 && j > 0 && i != j
-            # Ensure upper triangular ordering
-            upper_i, upper_j = i <= j ? (i, j) : (j, i)
-            push!(I_vals, upper_i)
-            push!(J_vals, upper_j)
-            push!(V_vals, Int(Trivially_concordant))  # 2
-        end
-    end
-
-    # Track which pairs are already set to avoid overwriting
-    existing_pairs = Set{Tuple{Int,Int}}()
-    for (id1, id2) in trivial_pairs
-        i = get(complex_idx, id1, 0)
-        j = get(complex_idx, id2, 0)
-        if i > 0 && j > 0 && i != j
-            upper_i, upper_j = i <= j ? (i, j) : (j, i)
-            push!(existing_pairs, (upper_i, upper_j))
-        end
-    end
-
-    # 4. Add discovered concordant pairs (Concordant = 1)
+    # 3. Add discovered concordant pairs (Concordant = 1) FIRST
     if use_transitivity
         @debug "Using transitivity: extracting pairs from concordance modules"
         # Extract modules from concordance tracker
@@ -2274,7 +2225,19 @@ function build_complete_concordance_matrix(
             push!(group, i)
         end
 
-        # Add concordant pairs from modules
+        # Create set of trivial pair positions to avoid overwriting them
+        trivial_positions = Set{Tuple{Int,Int}}()
+        for (id1, id2) in trivial_pairs
+            i = get(complex_idx, id1, 0)
+            j = get(complex_idx, id2, 0)
+            if i > 0 && j > 0 && i != j
+                upper_i, upper_j = i <= j ? (i, j) : (j, i)
+                push!(trivial_positions, (upper_i, upper_j))
+            end
+        end
+
+        # Add concordant pairs from modules, but skip trivial pairs
+        concordant_pairs_added = 0
         for complex_group in values(root_to_complexes)
             group_size = length(complex_group)
             if group_size > 1
@@ -2283,16 +2246,19 @@ function build_complete_concordance_matrix(
                         idx1, idx2 = complex_group[i], complex_group[j]
                         # Ensure upper triangular ordering
                         upper_i, upper_j = idx1 <= idx2 ? (idx1, idx2) : (idx2, idx1)
-                        # Only add if not already set (trivial pairs have priority)
-                        if (upper_i, upper_j) ∉ existing_pairs
+
+                        # Skip if this is a trivial pair (should remain value 2)
+                        if (upper_i, upper_j) ∉ trivial_positions
                             push!(I_vals, upper_i)
                             push!(J_vals, upper_j)
                             push!(V_vals, Int(Concordant))  # 1
+                            concordant_pairs_added += 1
                         end
                     end
                 end
             end
         end
+        @info "Concordant pairs added from modules" concordant_pairs_added total_trivial_skipped = length(trivial_positions)
     else
         @info "Not using transitivity: using direct optimization results only"
         # Use the directly tracked concordant pairs from batch processing
@@ -2306,21 +2272,18 @@ function build_complete_concordance_matrix(
         pairs_added = 0
         if direct_pairs !== nothing
             for (i, j) in direct_pairs
-                # Only add if not already set (trivial pairs have priority)
-                if (i, j) ∉ existing_pairs
-                    # Check if this pair is balanced from the balanced_complexes BitVector
-                    is_balanced = balanced_complexes[i] && balanced_complexes[j]
-                    if is_balanced
-                        push!(I_vals, i)
-                        push!(J_vals, j)
-                        push!(V_vals, Int(Balanced))  # 3
-                        pairs_added += 1
-                    else
-                        push!(I_vals, i)
-                        push!(J_vals, j)
-                        push!(V_vals, Int(Concordant))  # 1
-                        pairs_added += 1
-                    end
+                # Check if this pair is balanced from the balanced_complexes BitVector
+                is_balanced = balanced_complexes[i] && balanced_complexes[j]
+                if is_balanced
+                    push!(I_vals, i)
+                    push!(J_vals, j)
+                    push!(V_vals, Int(Balanced))  # 3
+                    pairs_added += 1
+                else
+                    push!(I_vals, i)
+                    push!(J_vals, j)
+                    push!(V_vals, Int(Concordant))  # 1
+                    pairs_added += 1
                 end
             end
         end
@@ -2328,8 +2291,25 @@ function build_complete_concordance_matrix(
         @info "Added $pairs_added optimization pairs to matrix (found $n_direct_pairs directly tracked concordant pairs)"
     end
 
+    # 4. Add trivial pairs (Trivially_concordant = 2)
+    trivial_pairs_added = 0
+    for (id1, id2) in trivial_pairs
+        i = get(complex_idx, id1, 0)
+        j = get(complex_idx, id2, 0)
+        if i > 0 && j > 0 && i != j
+            # Ensure upper triangular ordering
+            upper_i, upper_j = i <= j ? (i, j) : (j, i)
+            push!(I_vals, upper_i)
+            push!(J_vals, upper_j)
+            push!(V_vals, Int(Trivially_concordant))  # 2
+            trivial_pairs_added += 1
+        end
+    end
+
     # Build complete sparse matrix in one efficient operation
+    @info "Matrix construction debug" total_entries = length(I_vals) unique_positions = length(Set(zip(I_vals, J_vals)))
     sparse_matrix = SparseArrays.sparse(I_vals, J_vals, V_vals, n_complexes, n_complexes)
+    @info "Sparse matrix created" nnz = SparseArrays.nnz(sparse_matrix) count_1s = count(==(1), sparse_matrix) count_2s = count(==(2), sparse_matrix) count_3s = count(==(3), sparse_matrix) count_4s = count(==(4), sparse_matrix)
     concordance_matrix = LinearAlgebra.UpperTriangular(sparse_matrix)
 
     return concordance_matrix
@@ -2420,7 +2400,7 @@ function calculate_final_concordance_statistics!(
     final_stats["n_concordance_modules"] = n_concordance_modules
 
     # Validation
-    expected_total_concordant = final_stats["n_concordant_found"] + final_stats["n_trivial_pairs"]
+    expected_total_concordant = final_stats["n_concordant_found"] + final_stats["n_trivially_concordant"]
     actual_total_concordant = final_stats["n_concordant_total"]
     validation_passed = (expected_total_concordant == actual_total_concordant)
 

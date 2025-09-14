@@ -210,7 +210,7 @@ function StreamingCandidateFilter(
     samples_tree::C.Tree{Vector{Float64}},
     concordance_tracker::ConcordanceTracker;
     cv_threshold::Float64=0.01,
-    cv_epsilon::Float64=1e-15,
+    cv_epsilon::Float64=1e-16,
     min_valid_samples::Int=10,
     use_transitivity::Bool=true
 )
