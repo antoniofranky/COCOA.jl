@@ -4,7 +4,7 @@
 # Usage: ./submit_array_job.sh [models_directory] [results_directory]
 
 # Default parameters - modify as needed
-DEFAULT_MODELS_DIR="/work/schaffran1/toolbox/prpd_models/ordered"
+DEFAULT_MODELS_DIR="/work/schaffran1/toolbox/prpd_models/random_0"
 DEFAULT_RESULTS_DIR="/work/schaffran1/jobresults"
 DEFAULT_EMAIL="schaffran1@uni-potsdam.de"
 
