@@ -1,20 +1,20 @@
 #!/bin/bash
 #SBATCH --job-name=cocoa_array
-#SBATCH --chdir=/work/schaffran1/jobresults/random_0
-#SBATCH --output=/work/schaffran1/jobresults/random_0/cocoa_model_%A_%a.out
-#SBATCH --time=24:00:00
+#SBATCH --chdir=/work/schaffran1/jobresults/no_split
+#SBATCH --output=/work/schaffran1/jobresults/no_split/cocoa_model_%A_%a.out
+#SBATCH --time=12:00:00
+#SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=64
-#SBATCH --mem=128G
+#SBATCH --mem=100G
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=schaffran1@uni-potsdam.de
 #SBATCH --hint=nomultithread
 #SBATCH --array=1-ARRAY_SIZE
-
 # Parameters to modify
-MODELS_DIR="/work/schaffran1/toolbox/prpd_models/random_0"  # Directory containing models
-RESULTS_BASE_DIR="/work/schaffran1/jobresults/random_0"       # Base directory for results
+MODELS_DIR="/work/schaffran1/Yeast-Species-GEMs"  # Directory containing models
+RESULTS_BASE_DIR="/work/schaffran1/jobresults/no_split"       # Base directory for results
 
 # Use single results directory
 RESULTS_DIR="$RESULTS_BASE_DIR"
@@ -80,61 +80,8 @@ OUTPUT_FILE="/tmp/cocoa_output_${SLURM_ARRAY_TASK_ID}.log"
 julia $JULIA_OPTS analyse_models_array.jl "$MODEL_FILE" "$RESULTS_DIR" "$MODEL_NAME" 2>&1 | tee "$OUTPUT_FILE"
 EXIT_CODE=${PIPESTATUS[0]}
 
-# Extract model statistics from output
-N_REACTIONS=$(grep "Reactions:" "$OUTPUT_FILE" | head -1 | awk '{print $2}' || echo "0")
-N_METABOLITES=$(grep "Metabolites:" "$OUTPUT_FILE" | head -1 | awk '{print $2}' || echo "0")
-N_COMPLEXES=$(grep "Total Complexes:" "$OUTPUT_FILE" | head -1 | awk '{print $3}' || echo "0")
-
 # Clean up temp file
 rm -f "$OUTPUT_FILE"
-
-# Create single master CSV for all results (append mode)
-MASTER_CSV="$RESULTS_BASE_DIR/cocoa_performance_results.csv"
-
-# Create header if file doesn't exist
-if [ ! -f "$MASTER_CSV" ]; then
-  echo "model_name,job_id,task_id,timestamp,runtime_sec,peak_memory_mb,peak_vmem_mb,n_reactions,n_metabolites,n_complexes" > "$MASTER_CSV"
-fi
-
-# Get memory and runtime info from SLURM accounting (wait for accounting data)
-sleep 10  # Increased wait time for accounting data
-SLURM_METRICS=$(sacct -j $SLURM_JOB_ID.$SLURM_ARRAY_TASK_ID --format=MaxRSS,MaxVMSize,Elapsed --noheader --parsable2)
-echo "DEBUG: SLURM_METRICS = '$SLURM_METRICS'"  # Debug output
-if [ -n "$SLURM_METRICS" ]; then
-    echo "DEBUG: Parsing SLURM metrics: $SLURM_METRICS"
-    PEAK_MEMORY_KB=$(echo "$SLURM_METRICS" | cut -d'|' -f1 | sed 's/K$//')
-    PEAK_VMEM_KB=$(echo "$SLURM_METRICS" | cut -d'|' -f2 | sed 's/K$//')
-    RUNTIME_STR=$(echo "$SLURM_METRICS" | cut -d'|' -f3)
-    
-    echo "DEBUG: PEAK_MEMORY_KB=$PEAK_MEMORY_KB, PEAK_VMEM_KB=$PEAK_VMEM_KB, RUNTIME_STR=$RUNTIME_STR"
-    
-    # Convert memory from KB to MB
-    PEAK_MEMORY_MB=$((PEAK_MEMORY_KB / 1024))
-    PEAK_VMEM_MB=$((PEAK_VMEM_KB / 1024))
-    
-    # Convert runtime to seconds (format: HH:MM:SS or MM:SS)
-    if [[ $RUNTIME_STR =~ ^[0-9]+:[0-9]+:[0-9]+$ ]]; then
-        # HH:MM:SS format
-        IFS=':' read -r hours minutes seconds <<< "$RUNTIME_STR"
-        RUNTIME_SEC=$((hours * 3600 + minutes * 60 + seconds))
-    elif [[ $RUNTIME_STR =~ ^[0-9]+:[0-9]+$ ]]; then
-        # MM:SS format
-        IFS=':' read -r minutes seconds <<< "$RUNTIME_STR"
-        RUNTIME_SEC=$((minutes * 60 + seconds))
-    else
-        RUNTIME_SEC=0
-    fi
-    
-    echo "DEBUG: Final values - RUNTIME_SEC=$RUNTIME_SEC, PEAK_MEMORY_MB=$PEAK_MEMORY_MB, PEAK_VMEM_MB=$PEAK_VMEM_MB"
-else
-    echo "DEBUG: No SLURM metrics found - using zeros"
-    PEAK_MEMORY_MB=0; PEAK_VMEM_MB=0; RUNTIME_SEC=0
-fi
-
-# Write performance data to CSV
-echo "${MODEL_NAME},${SLURM_ARRAY_JOB_ID},${SLURM_ARRAY_TASK_ID},$(date -Iseconds),${RUNTIME_SEC},${PEAK_MEMORY_MB},${PEAK_VMEM_MB},${N_REACTIONS},${N_METABOLITES},${N_COMPLEXES}" >> "$MASTER_CSV"
-
-  echo "Results appended to master CSV: $MASTER_CSV"
 
 echo "Analysis completed for $MODEL_NAME with exit code: $EXIT_CODE"
 exit $EXIT_CODE
