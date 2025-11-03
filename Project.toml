@@ -1,7 +1,6 @@
 name = "COCOA"
 uuid = "9ecc82ce-b930-45f2-8d28-709640a22783"
 version = "1.0.0-DEV"
-version = "1.0.0-DEV"
 authors = ["Anton Schaffranke"]
 
 [deps]
