@@ -25,7 +25,7 @@ Uses COBREXA's symmetric approach with variable substitution and pruning.
 - Set of reaction indices that were split (for downstream analysis)
 """
 function create_unidirectional_constraints(
-    model::AbstractFBCModels.AbstractFBCModel
+    model::A.AbstractFBCModel
 )
     # Use symmetric approach following COBREXA documentation exactly
     constraints = COBREXA.flux_balance_constraints(model)
@@ -76,7 +76,7 @@ function create_unidirectional_constraints(
     @info "Using symmetric unidirectional approach with variable pruning" var_count = C.var_count(constraints)
 
     # Count reactions that were split (all of them in this symmetric approach)
-    reactions = AbstractFBCModels.reactions(model)
+    reactions = A.reactions(model)
     n_reactions = length(reactions)
     all_indices = Set(1:n_reactions)
 
@@ -89,7 +89,7 @@ $(TYPEDSIGNATURES)
 Memory-efficient concordance constraints that work with large models.
 """
 function concordance_constraints(
-    model::AbstractFBCModels.AbstractFBCModel;
+    model::A.AbstractFBCModel;
     return_complexes::Bool=false,
     modifications=Function[],
     interface=nothing,
@@ -317,7 +317,7 @@ function extract_activities_from_constraints(constraints::C.ConstraintTree)
 
     # Sort complex IDs for consistent ordering
     sorted_complex_ids = sort!(collect(keys(complex_info)); by=string)
-    
+
     for complex_id in sorted_complex_ids
         metabolite_composition = complex_info[complex_id]
         # Build activity as sum of reaction contributions

@@ -72,8 +72,7 @@ function find_nonreactant_complexes(complexes::Vector{Int}, A_matrix::SparseArra
 end
 
 """
-Find complexes with outgoing reactions to outside the given set.
-Exit complexes violate internal closure but are part of the feeding property.
+Find complexes with outgoing reactions to outside the given set (feeding property).
 """
 function find_exit_complexes(complexes::Vector{Int}, A_matrix::SparseArrays.SparseMatrixCSC{Int,Int})
     exit_complexes = Int[]
@@ -261,10 +260,6 @@ Optimized implementation for large metabolic networks with sparse operations.
 3. **Phase III**: Iteratively remove exit complexes (feeding property)
 4. **Phase IV**: Remove terminal strongly connected components (feeding property)
 
-# Performance Notes
-- Uses sparse matrix operations for memory efficiency
-- Optimized for networks with 50k+ reactions
-- Returns union of Phase III and IV complexes as per theoretical specification
 """
 function upstream_algorithm(extended_module::Vector{Int}, A_matrix::SparseArrays.SparseMatrixCSC{Int,Int}; verbose::Bool=true)
     if isempty(extended_module)

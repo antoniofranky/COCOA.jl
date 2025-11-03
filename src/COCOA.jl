@@ -49,7 +49,7 @@ module COCOA
 # Core dependencies - following JuMP style guide recommendations
 # Use qualified imports to avoid namespace pollution and improve code clarity
 import COBREXA
-import AbstractFBCModels
+import AbstractFBCModels as A
 import AbstractFBCModels.CanonicalModel as CM
 import SBMLFBCModels
 import SparseArrays
@@ -67,11 +67,6 @@ import LinearAlgebra
 
 using DocStringExtensions
 
-# Include preprocessing modules
-include("preprocessing/ElementarySteps.jl")
-include("preprocessing/ModelPreparation.jl")
-using .ElementarySteps
-using .ModelPreparation
 
 # Include main modules
 include("data_structures.jl")
@@ -82,18 +77,26 @@ include("variability.jl")
 include("concordance.jl")
 include("kinetic_analysis.jl")
 
+# Include preprocessing functions
+include("preprocessing/preprocessing.jl")
+include("preprocessing/elementary_splitting.jl")  # This includes mechanisms.jl
+include("preprocessing/irreversible_splitting.jl")
+
 
 
 # Export preprocessing functions
-export split_into_elementary_steps
-export prepare_model_for_concordance
+export split_into_elementary
+export split_into_irreversible
+export find_blocked_reactions, remove_blocked_reactions!, remove_blocked_reactions
+export normalize_bounds!, normalize_bounds
+export remove_orphans!, remove_orphans
+
 
 # Export main analysis functions
 export concordance_constraints, activity_variability_analysis, activity_concordance_analysis
 
 # Export matrix building functions
 export S_from_constraints, Y_matrix_from_constraints, A_matrix_from_constraints
-
 
 
 # Export kinetic analysis function

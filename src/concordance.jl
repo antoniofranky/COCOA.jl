@@ -1547,7 +1547,7 @@ function activity_concordance_analysis(
     batch_size::Int=50_000,
     min_valid_samples::Int=10,
     seed::Int=0,
-    use_unidirectional_constraints::Bool=true,
+    use_unidirectional_constraints::Bool=false,
     objective_bound=nothing,
     use_transitivity::Bool=true,
     n_burnin::Int=50,

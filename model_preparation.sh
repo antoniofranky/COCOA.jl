@@ -36,5 +36,6 @@ JULIA_OPTS="$JULIA_OPTS --check-bounds=no"
 
 cd /work/schaffran1/COCOA.jl
 
-echo "Processing model array task ${SLURM_ARRAY_TASK_ID}/$NUM_MODELS..."
-julia $JULIA_OPTS custom_model_prep.jl
+echo "Processing model array task ${SLURM_ARRAY_TASK_ID}/343..."
+echo "Preprocessing pipeline: remove_orphans -> normalize_bounds -> remove_blocked_reactions -> remove_orphans -> split_into_elementary -> split_into_irreversible"
+julia $JULIA_OPTS model_preparation.jl
