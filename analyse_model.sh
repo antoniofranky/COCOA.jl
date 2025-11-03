@@ -2,14 +2,15 @@
 #SBATCH --job-name=bmtest
 #SBATCH --chdir=/work/schaffran1/results_testjobs
 #SBATCH --output=results_testjobs/big_model_test_%j.out
-#SBATCH --time=48:00:00
+#SBATCH --time=9-00:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=64
-#SBATCH --mem=256G
+#SBATCH --mem=300G
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=schaffran1@uni-potsdam.de
 #SBATCH --hint=nomultithread
+#SBATCH --qos=long
 
 # Create a unique output directory based on job ID and timestamp
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)

@@ -570,10 +570,6 @@ Returns true if pair is still potentially concordant, false if definitely non-co
     return state.is_concordant
 end
 
-"""
-Most efficient streaming processor for solver results.
-Eliminates all intermediate data structures and processes in single pass.
-"""
 function process_solver_results_streaming!(
     solver_results,
     batch_pairs::Vector{PairCandidate},

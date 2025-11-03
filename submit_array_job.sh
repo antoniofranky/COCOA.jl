@@ -4,8 +4,8 @@
 # Usage: ./submit_array_job.sh [models_directory] [results_directory]
 
 # Default parameters - modify as needed
-DEFAULT_MODELS_DIR="/work/schaffran1/toolbox/prpd_models/random_0"
-DEFAULT_RESULTS_DIR="/work/schaffran1/jobresults"
+DEFAULT_MODELS_DIR="/work/schaffran1/Yeast-Species-GEMs"
+DEFAULT_RESULTS_DIR="/work/schaffran1/jobresults/no_split"
 DEFAULT_EMAIL="schaffran1@uni-potsdam.de"
 
 # Parse command line arguments
@@ -39,18 +39,10 @@ for ((i=0; i<$MODEL_COUNT; i++)); do
     echo "  $((i+1)). $(basename "${MODEL_FILES[$i]}")"
 done
 
-echo ""
-echo "Job Configuration:"
-echo "  Array size: 1-$MODEL_COUNT"
-echo "  Max concurrent jobs: 15"
-echo "  Time limit: 24 hours per job"
-echo "  Memory: 128GB per job"
-echo "  CPUs: 64 per job (pinned 0-63 via LIKWID)"
-echo "  Memory tracking: SLURM accounting (MaxRSS/MaxVMSize)"
-
 # Create a temporary copy of the job script with the correct array size and paths
 TEMP_SCRIPT="analyse_models_array_temp_$$.sh"
-cp analyse_models_array.sh "$TEMP_SCRIPT"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cp "$SCRIPT_DIR/analyse_models_array.sh" "$TEMP_SCRIPT"
 
 # Replace placeholders in the temporary script
 sed -i "s|ARRAY_SIZE|$MODEL_COUNT|g" "$TEMP_SCRIPT"
@@ -75,7 +67,9 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
         echo ""
         echo "View job outputs in: $RESULTS_DIR"
         echo "Log files will be named: cocoa_model_${JOB_ID}_*.out"
-        echo "Performance results CSV: $RESULTS_DIR/cocoa_performance_results.csv"
+        echo ""
+        echo "After job completion, create CSV with:"
+        echo "  /work/schaffran1/jobresults/collect_resources.sh $RESULTS_DIR"
         echo ""
         echo "Cancel all array tasks with:"
         echo "  scancel $JOB_ID"

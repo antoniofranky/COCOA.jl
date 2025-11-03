@@ -26,7 +26,7 @@ highs_settings = [
     COBREXA.set_optimizer_attribute("dual_feasibility_tolerance", 1e-7),
     COBREXA.set_optimizer_attribute("mip_feasibility_tolerance", 1e-7),
     COBREXA.set_optimizer_attribute("random_seed", seed),
-    COBREXA.set_optimizer_attribute("time_limit", 1200.0),  # 20 minutes per optimization
+    COBREXA.set_optimizer_attribute("time_limit", 2400.0),  # 40 minutes per optimization
     COBREXA.set_optimizer_attribute("presolve", "on"),
 ]
 
@@ -69,7 +69,7 @@ for (idx, row) in enumerate(eachrow(candidates_df))
 
     # Construct model file path
     # Adjust this path based on where your models are stored
-    model_file = joinpath("toolbox", "prpd_models", "random_0", "$(model_id).xml")
+    model_file = joinpath("/work", "schaffran1", "toolbox", "prpd_models", "random_90", "$(model_id).xml")
 
     if !isfile(model_file)
         println("WARNING: Model file not found: $model_file")
@@ -178,9 +178,9 @@ for (idx, row) in enumerate(eachrow(candidates_df))
 
         # Display kinetic and robustness results
         println("\nRobustness Results:")
-        println("  Robust metabolites: $(results.n_robust_metabolites)")
-        println("  Robust metabolite pairs: $(results.n_robust_pairs)")
-        println("  Largest robust module size: $(results.largest_robust_module_size)")
+        println("  Robust metabolites: $(length(results.acr_metabolites))")
+        println("  Robust metabolite pairs: $(length(results.acrr_pairs))")
+        println("  Largest robust module size: $(count(==(results.giant_id),results.kinetic_modules))")
 
         # Print general statistics from summary if available
         if results.summary !== nothing

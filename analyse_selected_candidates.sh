@@ -1,20 +1,21 @@
 #!/bin/bash
 #SBATCH --job-name=cocoa_candidates
 #SBATCH --chdir=/work/schaffran1/jobresults
-#SBATCH --output=/work/schaffran1/jobresults/cocoa_candidate_%A_%a.out
-#SBATCH --time=24:00:00
+#SBATCH --output=/work/schaffran1/jobresults/random_90/cocoa_candidate_%A_%a.out
+#SBATCH --time=14-00:00:00
+#SBATCH --qos=long
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=64
-#SBATCH --mem=128G
+#SBATCH --cpus-per-task=128
+#SBATCH --mem=700G
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=schaffran1@uni-potsdam.de
 #SBATCH --hint=nomultithread
 #SBATCH --array=1-13  # 13 candidates
-
+#SBATCH 
 # Parameters to modify
 CANDIDATES_CSV="/work/schaffran1/toolbox/results/analysis/recommended_candidates.csv"
-RESULTS_DIR="/work/schaffran1/jobresults/selected_candidates"
+RESULTS_DIR="/work/schaffran1/jobresults/random_90"
 
 # Create results directory
 mkdir -p "$RESULTS_DIR"
@@ -22,14 +23,6 @@ mkdir -p "$RESULTS_DIR"
 # Calculate heap size hint (80% of allocated memory from SLURM_MEM_PER_NODE)
 HEAP_SIZE_GB=$(( SLURM_MEM_PER_NODE * 8 / 10 / 1024 ))
 HEAP_SIZE="${HEAP_SIZE_GB}G"
-
-# HPC optimizations for Julia
-export JULIA_NUM_THREADS=1
-export OMP_NUM_THREADS=1
-export OPENBLAS_NUM_THREADS=1
-export MKL_NUM_THREADS=1
-export JULIA_GC_MEASURE_MALLOC=0
-export JULIA_GC_PARALLEL_COLLECT=1
 
 # Julia optimization flags
 JULIA_OPTS="--project=/work/schaffran1/COCOA.jl"
@@ -55,11 +48,6 @@ if [ ! -f "$CANDIDATES_CSV" ]; then
     exit 1
 fi
 
-# Force consistent package precompilation (only for first task)
-if [ $SLURM_ARRAY_TASK_ID -eq 1 ]; then
-    echo "Precompiling packages..."
-    julia --project=/work/schaffran1/COCOA.jl -e "using Pkg; Pkg.precompile()"
-fi
 
 echo "Starting analysis for candidate $SLURM_ARRAY_TASK_ID..."
 

@@ -413,7 +413,7 @@ This implements the complete theoretical algorithm:
 Updates the model's kinetic_modules field efficiently.
 """
 function apply_kinetic_analysis!(
-    complete_model::ConcordanceResults,
+    results::ConcordanceResults,
     constraints::C.ConstraintTree;
     min_module_size::Int=1,
     verbose::Bool=true
@@ -421,14 +421,14 @@ function apply_kinetic_analysis!(
     verbose && @debug "Applying upstream algorithm with coupling detection for kinetic module identification"
 
     # Initialize kinetic analysis fields
-    complete_model.kinetic_modules = fill(0, length(complete_model.complex_ids))
-    complete_model.interface_reactions = falses(complete_model.stats["n_reactions"])
-    complete_model.acr_metabolites = Symbol[]
-    complete_model.acrr_pairs = Tuple{Symbol,Symbol}[]
-    complete_model.giant_id = 0
+    results.kinetic_modules = fill(0, length(results.complex_ids))
+    results.interface_reactions = falses(results.stats["n_reactions"])
+    results.acr_metabolites = Symbol[]
+    results.acrr_pairs = Tuple{Symbol,Symbol}[]
+    results.giant_id = 0
 
     # Get balanced complexes (concordance module 0) 
-    balanced_complexes = findall(==(0), complete_model.concordance_modules)
+    balanced_complexes = findall(==(0), results.concordance_modules)
 
     # Build A matrix on-demand from constraints
     A_matrix = A_matrix_from_constraints(constraints)
@@ -445,9 +445,9 @@ function apply_kinetic_analysis!(
 
     # The balanced complexes are those with concordance_modules[i] == 0
     # Process each concordance module (1 to n) - balanced complexes are already identified above
-    for concordance_module_id in 1:complete_model.stats["n_concordance_modules"]
+    for concordance_module_id in 1:results.stats["n_concordance_modules"]
         # Get complexes in this concordance module
-        concordance_complexes = findall(==(concordance_module_id), complete_model.concordance_modules)
+        concordance_complexes = findall(==(concordance_module_id), results.concordance_modules)
 
         if isempty(concordance_complexes)
             continue
@@ -467,14 +467,14 @@ function apply_kinetic_analysis!(
         end
     end
 
-    @info "Found $(length(upstream_sets)) upstream sets from $(complete_model.stats["n_concordance_modules"]) concordance modules"
+    @info "Found $(length(upstream_sets)) upstream sets from $(results.stats["n_concordance_modules"]) concordance modules"
 
 
     kinetic_modules = Vector{Int}[]  # Final kinetic modules after merging
 
     if isempty(upstream_sets)
         @info "No upstream sets found - no kinetic modules identified"
-        complete_model.stats["n_kinetic_modules"] = 0
+        results.stats["n_kinetic_modules"] = 0
         return 0
     end
 
@@ -561,8 +561,8 @@ function apply_kinetic_analysis!(
 
     # Get all complexes that were in extended modules (balanced + all concordance complexes)
     all_extended_complexes = Set{Int}(balanced_complexes)
-    for concordance_id in 1:complete_model.stats["n_concordance_modules"]
-        concordance_complexes = findall(==(concordance_id), complete_model.concordance_modules)
+    for concordance_id in 1:results.stats["n_concordance_modules"]
+        concordance_complexes = findall(==(concordance_id), results.concordance_modules)
         union!(all_extended_complexes, concordance_complexes)
     end
 
@@ -586,7 +586,7 @@ function apply_kinetic_analysis!(
 
             # Update kinetic_modules field in model
             for complex_idx in kinetic_complexes
-                complete_model.kinetic_modules[complex_idx] = kinetic_module_count
+                results.kinetic_modules[complex_idx] = kinetic_module_count
             end
 
             @debug "Kinetic module $kinetic_module_count created" size = length(kinetic_complexes)
@@ -594,20 +594,20 @@ function apply_kinetic_analysis!(
     end
 
     # Update model statistics
-    complete_model.stats["n_kinetic_modules"] = kinetic_module_count
+    results.stats["n_kinetic_modules"] = kinetic_module_count
 
     # Find and store the ID of the largest kinetic module (giant component)
     if kinetic_module_count > 0
         module_sizes = [length(km) for (i, km) in enumerate(kinetic_modules) if length(km) >= min_module_size]
         if !isempty(module_sizes)
             largest_module_idx = argmax(module_sizes)
-            complete_model.giant_id = largest_module_idx
+            results.giant_id = largest_module_idx
             @info "Giant kinetic module identified" giant_id = largest_module_idx giant_size = module_sizes[largest_module_idx]
         else
-            complete_model.giant_id = 0
+            results.giant_id = 0
         end
     else
-        complete_model.giant_id = 0
+        results.giant_id = 0
     end
 
     # Step 7: Detect ACR and ACRR properties from kinetic modules
@@ -632,35 +632,35 @@ function apply_kinetic_analysis!(
 
         # Step 7.1: Detect interface reactions
         @info "Detecting interface reactions"
-        detect_interface_reactions!(complete_model, kinetic_modules, constraints)
+        detect_interface_reactions!(results, kinetic_modules, constraints)
 
         # Convert indices to metabolite IDs and store directly in model
         if !isempty(acr_metabolites)
             for met_idx in acr_metabolites
-                if met_idx <= length(complete_model.metabolite_ids)
-                    push!(complete_model.acr_metabolites, complete_model.metabolite_ids[met_idx])
+                if met_idx <= length(results.metabolite_ids)
+                    push!(results.acr_metabolites, results.metabolite_ids[met_idx])
                 end
             end
         end
 
         if !isempty(acrr_pairs)
             for (met1_idx, met2_idx) in acrr_pairs
-                if met1_idx <= length(complete_model.metabolite_ids) && met2_idx <= length(complete_model.metabolite_ids)
-                    met1_id = complete_model.metabolite_ids[met1_idx]
-                    met2_id = complete_model.metabolite_ids[met2_idx]
-                    push!(complete_model.acrr_pairs, (met1_id, met2_id))
+                if met1_idx <= length(results.metabolite_ids) && met2_idx <= length(results.metabolite_ids)
+                    met1_id = results.metabolite_ids[met1_idx]
+                    met2_id = results.metabolite_ids[met2_idx]
+                    push!(results.acrr_pairs, (met1_id, met2_id))
                 end
             end
         end
 
         # Store results in stats  
-        n_interface_reactions = count(complete_model.interface_reactions)
-        n_intra_module_reactions = complete_model.stats["n_reactions"] - n_interface_reactions
+        n_interface_reactions = count(results.interface_reactions)
+        n_intra_module_reactions = results.stats["n_reactions"] - n_interface_reactions
 
-        complete_model.stats["n_acr_metabolites"] = length(complete_model.acr_metabolites)
-        complete_model.stats["n_acrr_metabolite_pairs"] = length(complete_model.acrr_pairs)
-        complete_model.stats["n_interface_reactions"] = n_interface_reactions
-        complete_model.stats["n_intra_module_reactions"] = n_intra_module_reactions
+        results.stats["n_acr_metabolites"] = length(results.acr_metabolites)
+        results.stats["n_acrr_metabolite_pairs"] = length(results.acrr_pairs)
+        results.stats["n_interface_reactions"] = n_interface_reactions
+        results.stats["n_intra_module_reactions"] = n_intra_module_reactions
 
         @info " Concentration robustness analysis complete" (
             acr_metabolites=length(acr_metabolites),
@@ -668,18 +668,18 @@ function apply_kinetic_analysis!(
         )
     else
         @info "  No kinetic modules found - skipping ACR/ACRR analysis"
-        complete_model.stats["n_acr_metabolites"] = 0
-        complete_model.stats["n_acrr_metabolite_pairs"] = 0
-        complete_model.stats["n_interface_reactions"] = 0
-        complete_model.stats["n_intra_module_reactions"] = complete_model.stats["n_reactions"]
+        results.stats["n_acr_metabolites"] = 0
+        results.stats["n_acrr_metabolite_pairs"] = 0
+        results.stats["n_interface_reactions"] = 0
+        results.stats["n_intra_module_reactions"] = results.stats["n_reactions"]
     end
 
     @info "Kinetic analysis with coupling detection and robustness analysis completed" (
         kinetic_modules=kinetic_module_count,
         total_complexes=total_kinetic_complexes,
-        acr_metabolites=length(complete_model.acr_metabolites),
-        acrr_pairs=length(complete_model.acrr_pairs),
-        interface_reactions=count(complete_model.interface_reactions)
+        acr_metabolites=length(results.acr_metabolites),
+        acrr_pairs=length(results.acrr_pairs),
+        interface_reactions=count(results.interface_reactions)
     )
 
     return kinetic_module_count
@@ -834,11 +834,11 @@ Intra-module reactions connect complexes within the same kinetic module.
 
 Updates the interface_reactions BitVector in the model.
 """
-function detect_interface_reactions!(complete_model::ConcordanceResults, kinetic_modules::Vector{Vector{Int}}, constraints::C.ConstraintTree)
+function detect_interface_reactions!(results::ConcordanceResults, kinetic_modules::Vector{Vector{Int}}, constraints::C.ConstraintTree)
     @info "Detecting interface reactions"
 
     # Reset interface reactions BitVector (assume all are interface initially)
-    fill!(complete_model.interface_reactions, true)
+    fill!(results.interface_reactions, true)
 
     # Build A matrix on-demand from constraints
     A_matrix = A_matrix_from_constraints(constraints)
@@ -865,7 +865,7 @@ function detect_interface_reactions!(complete_model::ConcordanceResults, kinetic
         module_set = Set(module_complexes)
 
         # Check each reaction to see if both substrate and product are in this module
-        for reaction_idx in 1:complete_model.stats["n_reactions"]
+        for reaction_idx in 1:results.stats["n_reactions"]
             reaction_column = A_matrix[:, reaction_idx]
 
             # Find substrate complexes (negative entries)
@@ -885,14 +885,14 @@ function detect_interface_reactions!(complete_model::ConcordanceResults, kinetic
 
     # Mark intra-module reactions as false (not interface)
     for reaction_idx in intra_module_reactions
-        complete_model.interface_reactions[reaction_idx] = false
+        results.interface_reactions[reaction_idx] = false
     end
 
-    n_interface = count(complete_model.interface_reactions)
+    n_interface = count(results.interface_reactions)
     n_intra_module = length(intra_module_reactions)
 
     @debug "Interface reaction detection complete" (
-        total_reactions=complete_model.stats["n_reactions"],
+        total_reactions=results.stats["n_reactions"],
         intra_module_reactions=n_intra_module,
         interface_reactions=n_interface
     )
