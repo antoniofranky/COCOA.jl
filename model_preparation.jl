@@ -21,10 +21,10 @@ f = model_files[task_id]
 println("Processing model $task_id/$(length(model_files)): $(basename(f))")
 
 try
-    for rdm in collect(0.0:0.1:0.9)
+    for rdm in collect(0.0:0.25:1.0)
         println("Processing random fraction: $rdm")
 
-        model_canonical = convert(M.CanonicalModel.Model, M.load("toolbox\\prpd_models\\random_0\\Alloascoidea_hylecoeti.xml"))
+        model_canonical = convert(M.CanonicalModel.Model, M.load(f))
 
         # Preprocessing pipeline:
         # 1. Remove orphans (unused metabolites/reactions)
