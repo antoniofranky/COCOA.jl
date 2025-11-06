@@ -24,7 +24,7 @@ Follows COBRA Toolbox conventions:
 - Pure backward reactions (lb < 0, ub ≤ 0) are optionally flipped and marked '_r'
 - All reaction-associated fields (GPR, annotations, etc.) are properly propagated
 
-The original reaction ID is stored in the `notes` field under key `"original_reaction"`,
+The original reaction ID is stored in the `annotations` field under key `"original_reaction"`,
 and the paired reaction (for split reactions) is stored under `"paired_reaction"`.
 
 # Arguments
@@ -42,9 +42,9 @@ and the paired reaction (for split reactions) is stored under `"paired_reaction"
 
 # Reaction Metadata
 After splitting, each reaction contains:
-- `notes["original_reaction"]`: Vector with original reaction ID (e.g., `["R_ME1"]`)
-- `notes["paired_reaction"]`: Vector with paired reaction ID for split reactions (e.g., `["R_ME1_b"]`)
-- `notes["split_type"]`: Vector indicating split type: `["forward"]`, `["backward"]`, or `["flipped"]`
+- `annotations["original_reaction"]`: Vector with original reaction ID (e.g., `["R_ME1"]`)
+- `annotations["paired_reaction"]`: Vector with paired reaction ID for split reactions (e.g., `["R_ME1_b"]`)
+- `annotations["split_type"]`: Vector indicating split type: `["forward"]`, `["backward"]`, or `["flipped"]`
 
 # Examples
 
@@ -66,14 +66,14 @@ model_irrev = split_into_irreversible(
 
 # Query original reaction from split reaction
 rxn = model_irrev.reactions["R_ME1_f"]
-original_id = rxn.notes["original_reaction"][1]  # "R_ME1"
-paired_id = rxn.notes["paired_reaction"][1]      # "R_ME1_b"
-split_type = rxn.notes["split_type"][1]          # "forward"
+original_id = rxn.annotations["original_reaction"][1]  # "R_ME1"
+paired_id = rxn.annotations["paired_reaction"][1]      # "R_ME1_b"
+split_type = rxn.annotations["split_type"][1]          # "forward"
 
 # Find all split reactions from an original
 for (rid, rxn) in model_irrev.reactions
-    if get(rxn.notes, "original_reaction", [""]) == ["R_ME1"]
-        println("\$rid: \$(rxn.notes["split_type"][1])")
+    if get(rxn.annotations, "original_reaction", [""]) == ["R_ME1"]
+        println("\$rid: \$(rxn.annotations["split_type"][1])")
     end
 end
 ```
@@ -175,15 +175,15 @@ function split_into_irreversible(
                 notes=deepcopy(rxn.notes)
             )
 
-            # Add metadata tracking the transformation
-            if !haskey(flipped_rxn.notes, "original_reaction")
-                flipped_rxn.notes["original_reaction"] = String[]
+            # Add metadata tracking the transformation (in annotations for SBML compatibility)
+            if !haskey(flipped_rxn.annotations, "original_reaction")
+                flipped_rxn.annotations["original_reaction"] = String[]
             end
-            if !haskey(flipped_rxn.notes, "split_type")
-                flipped_rxn.notes["split_type"] = String[]
+            if !haskey(flipped_rxn.annotations, "split_type")
+                flipped_rxn.annotations["split_type"] = String[]
             end
-            push!(flipped_rxn.notes["original_reaction"], rid)
-            push!(flipped_rxn.notes["split_type"], "flipped")
+            push!(flipped_rxn.annotations["original_reaction"], rid)
+            push!(flipped_rxn.annotations["split_type"], "flipped")
 
             model_irrev.reactions[new_rid] = flipped_rxn
         end
@@ -227,32 +227,32 @@ function split_into_irreversible(
             notes=deepcopy(rxn.notes)
         )
 
-        # Add metadata tracking the split
-        if !haskey(fwd_rxn.notes, "original_reaction")
-            fwd_rxn.notes["original_reaction"] = String[]
+        # Add metadata tracking the split (in annotations for SBML compatibility)
+        if !haskey(fwd_rxn.annotations, "original_reaction")
+            fwd_rxn.annotations["original_reaction"] = String[]
         end
-        if !haskey(fwd_rxn.notes, "paired_reaction")
-            fwd_rxn.notes["paired_reaction"] = String[]
+        if !haskey(fwd_rxn.annotations, "paired_reaction")
+            fwd_rxn.annotations["paired_reaction"] = String[]
         end
-        if !haskey(fwd_rxn.notes, "split_type")
-            fwd_rxn.notes["split_type"] = String[]
+        if !haskey(fwd_rxn.annotations, "split_type")
+            fwd_rxn.annotations["split_type"] = String[]
         end
-        push!(fwd_rxn.notes["original_reaction"], rid)
-        push!(fwd_rxn.notes["paired_reaction"], bwd_rid)
-        push!(fwd_rxn.notes["split_type"], "forward")
+        push!(fwd_rxn.annotations["original_reaction"], rid)
+        push!(fwd_rxn.annotations["paired_reaction"], bwd_rid)
+        push!(fwd_rxn.annotations["split_type"], "forward")
 
-        if !haskey(bwd_rxn.notes, "original_reaction")
-            bwd_rxn.notes["original_reaction"] = String[]
+        if !haskey(bwd_rxn.annotations, "original_reaction")
+            bwd_rxn.annotations["original_reaction"] = String[]
         end
-        if !haskey(bwd_rxn.notes, "paired_reaction")
-            bwd_rxn.notes["paired_reaction"] = String[]
+        if !haskey(bwd_rxn.annotations, "paired_reaction")
+            bwd_rxn.annotations["paired_reaction"] = String[]
         end
-        if !haskey(bwd_rxn.notes, "split_type")
-            bwd_rxn.notes["split_type"] = String[]
+        if !haskey(bwd_rxn.annotations, "split_type")
+            bwd_rxn.annotations["split_type"] = String[]
         end
-        push!(bwd_rxn.notes["original_reaction"], rid)
-        push!(bwd_rxn.notes["paired_reaction"], fwd_rid)
-        push!(bwd_rxn.notes["split_type"], "backward")
+        push!(bwd_rxn.annotations["original_reaction"], rid)
+        push!(bwd_rxn.annotations["paired_reaction"], fwd_rid)
+        push!(bwd_rxn.annotations["split_type"], "backward")
 
         model_irrev.reactions[fwd_rid] = fwd_rxn
         model_irrev.reactions[bwd_rid] = bwd_rxn

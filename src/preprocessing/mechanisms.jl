@@ -204,7 +204,8 @@ function add_ordered_reactions!(
 )
     # Determine reaction compartment
     reaction_compartment = get_reaction_compartment(original_model, original_rxn)
-    # MATLAB behavior: Copy objective to ALL elementary steps (not distribute)
+    # FIX: Only catalytic step should carry objective coefficient
+    # Assigning objective to all steps artificially inflates the objective value
     objective_coefficient = original_rxn.objective_coefficient
 
     # Get global bounds for reversible steps (matching MATLAB logic)
@@ -241,7 +242,7 @@ function add_ordered_reactions!(
             lower_bound=reversible_lb,  # Always -1000
             upper_bound=reversible_ub,  # Always 1000
             gene_association_dnf=original_rxn.gene_association_dnf,
-            objective_coefficient=objective_coefficient,  # Copy original objective (MATLAB behavior)
+            objective_coefficient=0.0,  # Only catalytic step has objective
             annotations=elem_annotations,
             notes=original_rxn.notes  # Keep original notes unchanged
         )
@@ -343,7 +344,7 @@ function add_ordered_reactions!(
             lower_bound=reversible_lb,  # Always -1000
             upper_bound=reversible_ub,  # Always 1000
             gene_association_dnf=original_rxn.gene_association_dnf,
-            objective_coefficient=objective_coefficient,  # Copy original objective (MATLAB behavior)
+            objective_coefficient=0.0,  # Only catalytic step has objective
             annotations=prod_annotations,
             notes=original_rxn.notes  # Keep original notes unchanged
         )
@@ -387,7 +388,8 @@ function add_random_reactions!(
 )
     # Determine reaction compartment
     reaction_compartment = get_reaction_compartment(original_model, original_rxn)
-    # MATLAB behavior: Copy objective to ALL elementary steps
+    # FIX: Only catalytic step should carry objective coefficient
+    # Assigning objective to all steps artificially inflates the objective value
     objective_coefficient = original_rxn.objective_coefficient
 
     # ALL steps in random mechanism are fully reversible (matching MATLAB)
@@ -432,7 +434,7 @@ function add_random_reactions!(
                     lower_bound=reversible_lb,
                     upper_bound=reversible_ub,
                     gene_association_dnf=original_rxn.gene_association_dnf,
-                    objective_coefficient=objective_coefficient,
+                    objective_coefficient=0.0,  # Only catalytic step has objective
                     annotations=rand_annotations,
                     notes=original_rxn.notes  # Keep original notes unchanged
                 )
@@ -489,7 +491,7 @@ function add_random_reactions!(
                             lower_bound=reversible_lb,
                             upper_bound=reversible_ub,
                             gene_association_dnf=original_rxn.gene_association_dnf,
-                            objective_coefficient=objective_coefficient,
+                            objective_coefficient=0.0,  # Only catalytic step has objective
                             annotations=rand_annotations,
                             notes=original_rxn.notes  # Keep original notes unchanged
                         )
@@ -607,7 +609,7 @@ function add_random_reactions!(
                         lower_bound=reversible_lb,
                         upper_bound=reversible_ub,
                         gene_association_dnf=original_rxn.gene_association_dnf,
-                        objective_coefficient=objective_coefficient,
+                        objective_coefficient=0.0,  # Only catalytic step has objective
                         annotations=prod_annotations,
                         notes=original_rxn.notes  # Keep original notes unchanged
                     )
@@ -672,7 +674,7 @@ function add_random_reactions!(
                             lower_bound=reversible_lb,
                             upper_bound=reversible_ub,
                             gene_association_dnf=original_rxn.gene_association_dnf,
-                            objective_coefficient=objective_coefficient,
+                            objective_coefficient=0.0,  # Only catalytic step has objective
                             annotations=prod_annotations,
                             notes=original_rxn.notes  # Keep original notes unchanged
                         )

@@ -1655,7 +1655,7 @@ function activity_concordance_analysis(
     # Use the separated AVA function with warmup point generation and external timing
     ava_digits = max(1, -floor(Int, log10(solver_tolerance)))
     ava_output_func = (dir, om) -> ava_output_with_warmup(dir, om; digits=ava_digits)
-
+    @info "Running Activity Variability Analysis (AVA)"
     ava_time = @elapsed ava_results = activity_variability_analysis(
         constraints,
         complex_ids;
