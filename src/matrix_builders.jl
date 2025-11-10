@@ -410,3 +410,111 @@ function A_matrix_from_constraints(constraints::C.ConstraintTree; return_ids::Bo
         return A_matrix
     end
 end
+
+# ========================================================================================
+# Direct Matrix Extraction from AbstractFBCModels (similar to A.stoichiometry pattern)
+# ========================================================================================
+
+"""
+    A_matrix_from_model(model::A.AbstractFBCModel; return_ids::Bool=false, use_unidirectional::Bool=true)
+
+Build complex-reaction incidence matrix A directly from an AbstractFBCModel.
+
+This function constructs the incidence matrix by first building a constraint tree
+(optionally with unidirectional reactions), then extracting complexes using the same
+logic as `extract_complexes` to ensure consistency.
+
+# Arguments
+- `model::A.AbstractFBCModel`: FBC model containing reactions and metabolites
+- `return_ids::Bool=false`: If true, also return complex and reaction ID vectors
+- `use_unidirectional::Bool=true`: If true, split reactions into forward/reverse (matches concordance analysis)
+
+# Returns
+- If `return_ids=false`: `SparseMatrixCSC{Int,Int}` - The incidence matrix A
+- If `return_ids=true`: `Tuple` containing:
+  - `A_matrix::SparseMatrixCSC{Int,Int}`: Incidence matrix (complexes × reactions)
+  - `complex_ids::Vector{Symbol}`: Ordered vector of complex identifiers  
+  - `reaction_ids::Vector{Symbol}`: Ordered vector of reaction identifiers
+
+# Matrix Structure
+- Rows: complexes (ordered alphabetically)
+- Columns: reactions (ordered alphabetically)
+- Values: -1 (substrate), +1 (product), 0 (no participation)
+
+# Examples
+```julia
+model = load_model("model.xml")
+A = A_matrix_from_model(model)
+A, complexes, reactions = A_matrix_from_model(model; return_ids=true)
+
+# Without unidirectional splitting (may give different complexes)
+A = A_matrix_from_model(model; use_unidirectional=false)
+```
+
+# Notes
+To ensure complex IDs match those from concordance analysis, use `use_unidirectional=true` (default).
+This will build constraints and extract complexes using the same logic as `extract_complexes`.
+"""
+function A_matrix_from_model(model::A.AbstractFBCModel; return_ids::Bool=false, use_unidirectional::Bool=true)
+    # Build constraints to extract complexes consistently
+    if use_unidirectional
+        constraints, _ = create_unidirectional_constraints(model)
+    else
+        constraints = COBREXA.flux_balance_constraints(model)
+    end
+
+    # Use the same extraction logic as constraints.jl
+    return A_matrix_from_constraints(constraints; return_ids=return_ids)
+end
+
+"""
+    Y_matrix_from_model(model::A.AbstractFBCModel; return_ids::Bool=false, use_unidirectional::Bool=true)
+
+Build metabolite-complex stoichiometric matrix Y directly from an AbstractFBCModel.
+
+This function constructs the Y matrix by first building a constraint tree
+(optionally with unidirectional reactions), then extracting complexes using the same
+logic as `extract_complexes` to ensure consistency.
+
+# Arguments
+- `model::A.AbstractFBCModel`: FBC model containing reactions and metabolites
+- `return_ids::Bool=false`: If true, also return metabolite and complex ID vectors
+- `use_unidirectional::Bool=true`: If true, split reactions into forward/reverse (matches concordance analysis)
+
+# Returns
+- If `return_ids=false`: `SparseMatrixCSC{Float64,Int}` - The Y matrix
+- If `return_ids=true`: `Tuple` containing:
+  - `Y_matrix::SparseMatrixCSC{Float64,Int}`: Stoichiometric matrix (metabolites × complexes)
+  - `metabolite_ids::Vector{Symbol}`: Ordered vector of metabolite identifiers
+  - `complex_ids::Vector{Symbol}`: Ordered vector of complex identifiers
+
+# Matrix Structure
+- Rows: metabolites (ordered alphabetically)
+- Columns: complexes (ordered alphabetically)
+- Values: stoichiometric coefficients in complex composition
+
+# Examples
+```julia
+model = load_model("model.xml")
+Y = Y_matrix_from_model(model)
+Y, metabolites, complexes = Y_matrix_from_model(model; return_ids=true)
+
+# Without unidirectional splitting (may give different complexes)
+Y = Y_matrix_from_model(model; use_unidirectional=false)
+```
+
+# Notes
+To ensure complex IDs match those from concordance analysis, use `use_unidirectional=true` (default).
+This will build constraints and extract complexes using the same logic as `extract_complexes`.
+"""
+function Y_matrix_from_model(model::A.AbstractFBCModel; return_ids::Bool=false, use_unidirectional::Bool=true)
+    # Build constraints to extract complexes consistently
+    if use_unidirectional
+        constraints, _ = create_unidirectional_constraints(model)
+    else
+        constraints = COBREXA.flux_balance_constraints(model)
+    end
+
+    # Use the same extraction logic as constraints.jl
+    return Y_matrix_from_constraints(constraints; return_ids=return_ids)
+end

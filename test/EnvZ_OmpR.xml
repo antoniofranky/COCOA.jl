@@ -16,6 +16,7 @@
     <listOfSpecies>
       <species id="M_H_c" name="OmpR_ADP" compartment="c" hasOnlySubstanceUnits="false" boundaryCondition="false" constant="false" fbc:charge="-3" fbc:chemicalFormula="C13H20N5O12P2"/>
       <species id="M_I_c" name="EnvZ_ADP" compartment="c" hasOnlySubstanceUnits="false" boundaryCondition="false" constant="false" fbc:charge="-3" fbc:chemicalFormula="C14H20N7O10P2"/>
+      <species id="M_J_c" name="EnvZ_ADP_complex" compartment="c" hasOnlySubstanceUnits="false" boundaryCondition="false" constant="false" fbc:charge="-3" fbc:chemicalFormula="C14H20N7O12P2"/>
       <species id="M_C_c" name="OmpR" compartment="c" hasOnlySubstanceUnits="false" boundaryCondition="false" constant="false" fbc:charge="0" fbc:chemicalFormula="C3H5O2"/>
       <species id="M_D_c" name="OmpR_P" compartment="c" hasOnlySubstanceUnits="false" boundaryCondition="false" constant="false" fbc:charge="-2" fbc:chemicalFormula="C3H5O2P"/>
       <species id="M_F_c" name="EnvZ_OmpR_complex" compartment="c" hasOnlySubstanceUnits="false" boundaryCondition="false" constant="false" fbc:charge="-2" fbc:chemicalFormula="C7H10N2O3P"/>
@@ -132,12 +133,12 @@
           <speciesReference species="M_G_c" stoichiometry="1" constant="true"/>
         </listOfReactants>
         <listOfProducts>
-          <speciesReference species="M_I_c" stoichiometry="1" constant="true"/>
+          <speciesReference species="M_J_c" stoichiometry="1" constant="true"/>
         </listOfProducts>
       </reaction>
       <reaction id="R_R13" name="EnvZ_ADP_dissociation" reversible="false" fbc:lowerFluxBound="cobra_0_bound" fbc:upperFluxBound="cobra_default_ub">
         <listOfReactants>
-          <speciesReference species="M_I_c" stoichiometry="1" constant="true"/>
+          <speciesReference species="M_J_c" stoichiometry="1" constant="true"/>
         </listOfReactants>
         <listOfProducts>
           <speciesReference species="M_A_c" stoichiometry="1" constant="true"/>
@@ -146,16 +147,45 @@
       </reaction>
       <reaction id="R_R14" name="EnvZ_ADP_to_EnvZ_Pi" reversible="false" fbc:lowerFluxBound="cobra_0_bound" fbc:upperFluxBound="cobra_default_ub">
         <listOfReactants>
-          <speciesReference species="M_I_c" stoichiometry="1" constant="true"/>
+          <speciesReference species="M_J_c" stoichiometry="1" constant="true"/>
         </listOfReactants>
         <listOfProducts>
           <speciesReference species="M_A_c" stoichiometry="1" constant="true"/>
-          <speciesReference species="M_E_c" stoichiometry="1" constant="true"/>
+          <speciesReference species="M_I_c" stoichiometry="1" constant="true"/>
         </listOfProducts>
+      </reaction>
+      <reaction id="R_EX_A" name="Exchange_A" reversible="true" fbc:lowerFluxBound="cobra_default_lb" fbc:upperFluxBound="cobra_default_ub">
+        <listOfReactants>
+          <speciesReference species="M_A_c" stoichiometry="1" constant="true"/>
+        </listOfReactants>
+      </reaction>
+      <reaction id="R_EX_E" name="Exchange_E" reversible="true" fbc:lowerFluxBound="cobra_default_lb" fbc:upperFluxBound="cobra_default_ub">
+        <listOfReactants>
+          <speciesReference species="M_E_c" stoichiometry="1" constant="true"/>
+        </listOfReactants>
+      </reaction>
+      <reaction id="R_EX_G" name="Exchange_G" reversible="true" fbc:lowerFluxBound="cobra_default_lb" fbc:upperFluxBound="cobra_default_ub">
+        <listOfReactants>
+          <speciesReference species="M_G_c" stoichiometry="1" constant="true"/>
+        </listOfReactants>
+      </reaction>
+      <reaction id="R_EX_D" name="Exchange_D" reversible="false" fbc:lowerFluxBound="cobra_0_bound" fbc:upperFluxBound="cobra_default_ub">
+        <listOfReactants>
+          <speciesReference species="M_D_c" stoichiometry="1" constant="true"/>
+        </listOfReactants>
+      </reaction>
+      <reaction id="R_EX_I" name="Exchange_I" reversible="false" fbc:lowerFluxBound="cobra_0_bound" fbc:upperFluxBound="cobra_default_ub">
+        <listOfReactants>
+          <speciesReference species="M_I_c" stoichiometry="1" constant="true"/>
+        </listOfReactants>
       </reaction>
     </listOfReactions>
     <fbc:listOfObjectives fbc:activeObjective="obj">
-      <fbc:objective fbc:id="obj" fbc:type="maximize"/>
+      <fbc:objective fbc:id="obj" fbc:type="maximize">
+        <fbc:listOfFluxObjectives>
+          <fbc:fluxObjective fbc:reaction="R_EX_I" fbc:coefficient="1"/>
+        </fbc:listOfFluxObjectives>
+      </fbc:objective>
     </fbc:listOfObjectives>
   </model>
 </sbml>

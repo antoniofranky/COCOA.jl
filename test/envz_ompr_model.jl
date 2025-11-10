@@ -127,9 +127,9 @@ function create_envz_ompr_model()
         upper_bound=1000.0
     )
 
-    # R11: H → C + I (irreversible)
+    # R11: H → C + I (irreversible - produces C and I separately, not as complex)
     model.reactions["R11"] = CM.Reaction(
-        name="Reaction 11: H to C+I",
+        name="Reaction 11: H to C and I",
         stoichiometry=Dict("H" => -1.0, "C" => 1.0, "I" => 1.0),
         lower_bound=0.0,  # Irreversible
         upper_bound=1000.0
@@ -190,7 +190,7 @@ function create_envz_ompr_model()
     )
 
     model.reactions["R14"] = CM.Reaction(
-        name="Reaction 14: J to A+I",
+        name="Reaction 14: J to A and I",
         stoichiometry=Dict("J" => -1.0, "A" => 1.0, "I" => 1.0),
         lower_bound=0.0,  # Irreversible
         upper_bound=1000.0
@@ -237,174 +237,4 @@ function create_envz_ompr_model()
     )
 
     return model
-end
-
-"""
-Create a simplified version without J as a metabolite for testing.
-This version treats J as an implicit complex state.
-"""
-function create_envz_ompr_model_simple()
-    # Create empty model
-    model = CM.Model()
-
-    # Add metabolites (species A through I only)
-    model.metabolites = Dict(
-        "A" => CM.Metabolite(name="Species A"),
-        "B" => CM.Metabolite(name="Species B"),
-        "C" => CM.Metabolite(name="Species C"),
-        "D" => CM.Metabolite(name="Species D"),
-        "E" => CM.Metabolite(name="Species E"),
-        "F" => CM.Metabolite(name="Species F"),
-        "G" => CM.Metabolite(name="Species G"),
-        "H" => CM.Metabolite(name="Species H"),
-        "I" => CM.Metabolite(name="Species I")
-    )
-
-    # All reactions as above but simplified R12-R14 handling
-    # R1-R11 are the same
-    model.reactions["R1"] = CM.Reaction(
-        name="Reaction 1: A to B",
-        stoichiometry=Dict("A" => -1.0, "B" => 1.0),
-        lower_bound=0.0,
-        upper_bound=1000.0
-    )
-
-    model.reactions["R2"] = CM.Reaction(
-        name="Reaction 2: B to A",
-        stoichiometry=Dict("B" => -1.0, "A" => 1.0),
-        lower_bound=0.0,
-        upper_bound=1000.0
-    )
-
-    model.reactions["R3"] = CM.Reaction(
-        name="Reaction 3: B to C",
-        stoichiometry=Dict("B" => -1.0, "C" => 1.0),
-        lower_bound=0.0,
-        upper_bound=1000.0
-    )
-
-    model.reactions["R4"] = CM.Reaction(
-        name="Reaction 4: C to B",
-        stoichiometry=Dict("C" => -1.0, "B" => 1.0),
-        lower_bound=0.0,
-        upper_bound=1000.0
-    )
-
-    model.reactions["R5"] = CM.Reaction(
-        name="Reaction 5: C to D",
-        stoichiometry=Dict("C" => -1.0, "D" => 1.0),
-        lower_bound=0.0,
-        upper_bound=1000.0
-    )
-
-    model.reactions["R6"] = CM.Reaction(
-        name="Reaction 6: D+E to F",
-        stoichiometry=Dict("D" => -1.0, "E" => -1.0, "F" => 1.0),
-        lower_bound=0.0,
-        upper_bound=1000.0
-    )
-
-    model.reactions["R7"] = CM.Reaction(
-        name="Reaction 7: F to D+E",
-        stoichiometry=Dict("F" => -1.0, "D" => 1.0, "E" => 1.0),
-        lower_bound=0.0,
-        upper_bound=1000.0
-    )
-
-    model.reactions["R8"] = CM.Reaction(
-        name="Reaction 8: F to B+G",
-        stoichiometry=Dict("F" => -1.0, "B" => 1.0, "G" => 1.0),
-        lower_bound=0.0,
-        upper_bound=1000.0
-    )
-
-    model.reactions["R9"] = CM.Reaction(
-        name="Reaction 9: C+G to H",
-        stoichiometry=Dict("C" => -1.0, "G" => -1.0, "H" => 1.0),
-        lower_bound=0.0,
-        upper_bound=1000.0
-    )
-
-    model.reactions["R10"] = CM.Reaction(
-        name="Reaction 10: H to C+G",
-        stoichiometry=Dict("H" => -1.0, "C" => 1.0, "G" => 1.0),
-        lower_bound=0.0,
-        upper_bound=1000.0
-    )
-
-    model.reactions["R11"] = CM.Reaction(
-        name="Reaction 11: H to C+I",
-        stoichiometry=Dict("H" => -1.0, "C" => 1.0, "I" => 1.0),
-        lower_bound=0.0,
-        upper_bound=1000.0
-    )
-
-    # Simplified R12-R14: Direct transformations without explicit J
-    model.reactions["R12"] = CM.Reaction(
-        name="Reaction 12: A+G binding",
-        stoichiometry=Dict("A" => -1.0, "G" => -1.0),
-        lower_bound=0.0,
-        upper_bound=1000.0
-    )
-
-    model.reactions["R13"] = CM.Reaction(
-        name="Reaction 13: A+G unbinding",
-        stoichiometry=Dict("A" => 1.0, "G" => 1.0),
-        lower_bound=0.0,
-        upper_bound=1000.0
-    )
-
-    model.reactions["R14"] = CM.Reaction(
-        name="Reaction 14: G to I conversion with A",
-        stoichiometry=Dict("G" => -1.0, "I" => 1.0),
-        lower_bound=0.0,
-        upper_bound=1000.0
-    )
-
-    # Exchange reactions
-    model.reactions["EX_A"] = CM.Reaction(
-        name="Exchange A",
-        stoichiometry=Dict("A" => 1.0),
-        lower_bound=-10.0,
-        upper_bound=10.0
-    )
-
-    model.reactions["EX_E"] = CM.Reaction(
-        name="Exchange E",
-        stoichiometry=Dict("E" => 1.0),
-        lower_bound=-10.0,
-        upper_bound=10.0
-    )
-
-    model.reactions["EX_G"] = CM.Reaction(
-        name="Exchange G",
-        stoichiometry=Dict("G" => 1.0),
-        lower_bound=-10.0,
-        upper_bound=10.0
-    )
-
-    return model
-end
-
-# Export the main functions
-export create_envz_ompr_model, create_envz_ompr_model_simple
-
-# If run as script, create and display the model
-if abspath(PROGRAM_FILE) == @__FILE__
-    model = create_envz_ompr_model()
-    @info "Created EnvZ-OmpR model with:" reactions = length(model.reactions) metabolites = length(model.metabolites)
-
-    println("\nReactions:")
-    for (rid, rxn) in model.reactions
-        println("  $rid: $(rxn.name)")
-        if !isempty(rxn.stoichiometry)
-            stoich_str = join(["$coeff*$met" for (met, coeff) in rxn.stoichiometry], " + ")
-            println("    $stoich_str")
-        end
-    end
-
-    println("\nMetabolites:")
-    for (mid, met) in model.metabolites
-        println("  $mid: $(met.name)")
-    end
 end

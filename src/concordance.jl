@@ -1562,11 +1562,6 @@ function activity_concordance_analysis(
 
     @info "Starting concordance analysis" n_workers = length(workers) concordance_tolerance = actual_concordance_tolerance balanced_tolerance = actual_balanced_tolerance cv_threshold = actual_cv_threshold sample_size use_unidirectional_constraints batch_size solver_tolerance
 
-    # Fix model objective if it has conversion issues (e.g., missing R_ prefix)
-    if isa(model, SBMLFBCModels.SBMLFBCModel)
-        model = COCOA.ElementarySteps.fix_objective_after_conversion(model)
-    end
-
     constraints, complexes =
         concordance_constraints(model; modifications, use_unidirectional_constraints, return_complexes=true)
 
