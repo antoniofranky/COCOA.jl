@@ -18,8 +18,8 @@ using SparseArrays
 using Statistics
 @everywhere using COCOA, HiGHS
 # Configuration
-const MODEL_PATH = "test\\e_coli_core.xml"
-const MATLAB_MODEL_PATH = "test\\ecoli_irr_matlab.mat"
+const MODEL_PATH = "test/AraCore_v2_1.xml"
+const MATLAB_MODEL_PATH = "test/ArabidopsisCoreModel_pre_balanced_fixed.mat"
 const SAVE_JULIA_MODEL = false
 const JULIA_OUTPUT_PATH = "C:\\Users\\anton\\master-thesis\\COCOA.jl\\test\\julia_preprocessed_iSDY.xml"
 

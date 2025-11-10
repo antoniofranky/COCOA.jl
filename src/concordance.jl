@@ -1548,7 +1548,7 @@ function activity_concordance_analysis(
     use_transitivity::Bool=true,
     n_burnin::Int=50,
     n_chains::Int=1,
-    kinetic_analysis::Bool=false,
+    kinetic_analysis::Bool=true,
 )
     start_time = time()
 
