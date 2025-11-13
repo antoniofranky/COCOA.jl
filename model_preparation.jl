@@ -17,53 +17,61 @@ if task_id > length(model_files)
 end
 
 # Process the specific model for this task
-f = model_files[task_id]
-println("Processing model $task_id/$(length(model_files)): $(basename(f))")
+f = "/work/schaffran1/Yeast-Species-GEMs/yHMPu5000034952_Citeromyces_siamensis.xml"
+println("Processing model array task $task_id/$(length(model_files))...")
+println("Preprocessing pipeline: remove_orphans -> normalize_bounds -> remove_blocked_reactions -> remove_orphans -> split_into_elementary -> split_into_irreversible")
 
 try
+    # Do common preprocessing once (steps 1-4)
+    println("Loading and preprocessing base model...")
+    base_model = convert(M.CanonicalModel.Model, M.load(f))
+    
+    # 1. Remove orphans (unused metabolites/reactions)
+    base_model = remove_orphans(base_model)
+    
+    # 2. Normalize bounds
+    base_model = normalize_bounds(base_model)
+    
+    # 3. Remove blocked reactions (requires optimizer)
+    base_model, blocked = remove_blocked_reactions(
+        base_model,
+        optimizer=HiGHS.Optimizer
+    )
+    
+    # 4. Remove orphans again (from blocked reaction removal)
+    base_model = remove_orphans(base_model)
+    
+    println("Base model preprocessed. Starting random splits...")
+    
+    # Now process each random fraction using the base model
     for rdm in collect(0.0:0.25:1.0)
         println("Processing random fraction: $rdm")
-
-        model_canonical = convert(M.CanonicalModel.Model, M.load(f))
-
-        # Preprocessing pipeline:
-        # 1. Remove orphans (unused metabolites/reactions)
-        model_canonical = remove_orphans(model_canonical)
-
-        # 2. Normalize bounds
-        model_canonical = normalize_bounds(model_canonical)
-
-        # 3. Remove blocked reactions (requires optimizer)
-        model_canonical, blocked = remove_blocked_reactions(
-            model_canonical,
-            optimizer=HiGHS.Optimizer
-        )
-
-        # 4. Remove orphans again (from blocked reaction removal)
-        model_canonical = remove_orphans(model_canonical)
-
+        
+        # Copy base model for this random fraction
+        model_canonical = deepcopy(base_model)
+        
         # 5. Split into elementary steps (with random fraction parameter)
         model_canonical = split_into_elementary(
             model_canonical,
             random=rdm,
             seed=42
         )
-
+        
         # 6. Split into irreversible reactions
         model_canonical = split_into_irreversible(model_canonical)
-
+        
         # Convert to SBML format for saving
         model_sbml = convert(SBMLFBCModels.SBMLFBCModel, model_canonical)
-
+        
         # Create output directory for this random fraction
         dir_name = "random_$(Int(rdm * 100))"
         output_dir = "/work/schaffran1/toolbox/prpd_models/$(dir_name)"
         mkpath(output_dir)  # Ensure directory exists
-
+        
         # Save the preprocessed model
         output_path = joinpath(output_dir, "$(splitext(basename(f))[1]).xml")
-        M.save(output_path, model_sbml)
-
+        M.save(model_sbml, output_path)
+        
         println("Successfully processed $(basename(f)) with random=$rdm")
     end
 catch e

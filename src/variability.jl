@@ -157,7 +157,6 @@ variability for all complex activities in the model.
 - Return type depends on `output` and `output_type` parameters (see constraint-based method)
 
 # Notes
-- SBML models are automatically processed with [`ElementarySteps.fix_objective_after_conversion`](@ref)
 - Complex IDs are automatically extracted and sorted alphabetically
 - For advanced usage with custom constraints, use the constraint-based method directly
 
@@ -193,10 +192,6 @@ function activity_variability_analysis(
     use_unidirectional_constraints::Bool=true,
     kwargs...
 )
-    if isa(model, SBMLFBCModels.SBMLFBCModel)
-        model = COCOA.ElementarySteps.fix_objective_after_conversion(model)
-    end
-
     constraints, complexes = concordance_constraints(
         model;
         modifications,

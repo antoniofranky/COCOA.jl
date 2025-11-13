@@ -214,27 +214,25 @@ end
 
 
 """
-    find_blocked_reactions(model::A.AbstractFBCModel;
+    find_blocked_reactions(constraints::COBREXA.C.ConstraintTree;
                            optimizer,
                            flux_tolerance::Float64=1e-9,
-                           objective_bound=COBREXA.relative_tolerance_bound(0.999),
                            settings=[],
                            workers=D.workers())
 
-Find blocked reactions using Flux Variability Analysis (FVA).
+Find blocked reactions using Flux Variability Analysis (FVA) on pre-built constraints.
 
 A reaction is considered blocked if both its minimum and maximum fluxes
-are below the flux tolerance threshold. This follows the COBREXA pattern of using
-[`constraints_variability`](@ref) internally for maximum flexibility.
+are below the flux tolerance threshold. Follows COBREXA.jl patterns by accepting
+pre-built constraint trees, allowing users to add objective bounds via constraint
+tree merging before calling this function.
 
 This matches MATLAB's FVA-based blocking detection in run_preprocessing.m lines 58-62.
 
 # Arguments
-- `model::A.AbstractFBCModel`: Model to analyze
-- `optimizer`: Optimization solver (e.g., GLPK.Optimizer, HiGHS.Optimizer)
+- `constraints::COBREXA.C.ConstraintTree`: Pre-built constraint system (from `flux_balance_constraints`)
+- `optimizer`: Optimization solver (e.g., HiGHS.Optimizer)
 - `flux_tolerance::Float64`: Threshold below which reactions are blocked (default: 1e-9)
-- `objective_bound`: Function that returns (min, max) bounds for objective value
-  Default: `relative_tolerance_bound(0.999)` = 99.9% of optimal
 - `settings`: Additional settings passed to optimizer
 - `workers`: Parallel workers for FVA (default: all available via `D.workers()`)
 
@@ -245,29 +243,31 @@ This matches MATLAB's FVA-based blocking detection in run_preprocessing.m lines 
 ```julia
 using HiGHS
 import COBREXA
+import ConstraintTrees as C
 
-# Find blocked reactions with default settings (99.9% of optimal)
-blocked = find_blocked_reactions(model, optimizer=HiGHS.Optimizer)
+# Basic usage - no objective bound
+constraints = COBREXA.flux_balance_constraints(model)
+blocked = find_blocked_reactions(constraints; optimizer=HiGHS.Optimizer)
 
-# More strict objective bound (95% of optimal)
-blocked = find_blocked_reactions(
-    model,
-    optimizer=HiGHS.Optimizer,
-    objective_bound=COBREXA.relative_tolerance_bound(0.95)
+# With objective bound (99.9% of optimal) - the COBREXA way
+constraints = COBREXA.flux_balance_constraints(model)
+obj_flux = COBREXA.optimized_values(
+    constraints;
+    objective=constraints.objective.value,
+    output=constraints.objective,
+    optimizer=HiGHS.Optimizer
 )
-
-# Custom flux tolerance
-blocked = find_blocked_reactions(
-    model,
-    optimizer=HiGHS.Optimizer,
-    flux_tolerance=1e-6
+constraints *= :objective_bound^C.Constraint(
+    constraints.objective.value,
+    COBREXA.relative_tolerance_bound(0.999)(obj_flux)
 )
+blocked = find_blocked_reactions(constraints; optimizer=HiGHS.Optimizer)
 
-# Absolute tolerance instead of relative
+# Or use the model-based convenience wrapper with objective_bound parameter
 blocked = find_blocked_reactions(
-    model,
+    model; 
     optimizer=HiGHS.Optimizer,
-    objective_bound=COBREXA.absolute_tolerance_bound(0.1)
+    objective_bound=COBREXA.relative_tolerance_bound(0.999)
 )
 ```
 
@@ -279,38 +279,15 @@ BLK = model.rxns(find(abs(mini)<thr & abs(maxi)<thr));
 ```
 """
 function find_blocked_reactions(
-    model::A.AbstractFBCModel;
+    constraints::COBREXA.C.ConstraintTree;
     optimizer,
     flux_tolerance::Float64=1e-9,
-    objective_bound=COBREXA.relative_tolerance_bound(0.999),
     settings=[],
     workers=D.workers()
 )
-    # Build flux balance constraints
-    constraints = COBREXA.flux_balance_constraints(model)
-
-    # Find optimal objective value
-    objective_flux = COBREXA.optimized_values(
-        constraints;
-        objective=constraints.objective.value,
-        output=constraints.objective,
-        optimizer,
-        settings
-    )
-
-    # Return empty if model is infeasible
-    isnothing(objective_flux) && return String[]
-
-    # Add objective bound constraint using ConstraintTrees merge operator (*)
-    bounded_constraints = constraints *
-                          :objective_bound^COBREXA.C.Constraint(
-        constraints.objective.value,
-        objective_bound(objective_flux)
-    )
-
     # Run variability analysis on all fluxes
     variability = COBREXA.constraints_variability(
-        bounded_constraints,
+        constraints,
         constraints.fluxes;
         optimizer,
         settings,
@@ -318,9 +295,13 @@ function find_blocked_reactions(
     )
 
     # Find reactions where both min and max are below tolerance
-    # MATLAB logic: abs(mini)<thr & abs(maxi)<thr
     blocked = String[]
     for (rid, (min_flux, max_flux)) in variability
+        # Skip reactions with missing flux values
+        if isnothing(min_flux) || isnothing(max_flux)
+            @warn "Reaction $rid has missing flux values, skipping blocked check"
+            continue
+        end
         if abs(min_flux) < flux_tolerance && abs(max_flux) < flux_tolerance
             push!(blocked, String(rid))
         end
@@ -330,11 +311,87 @@ function find_blocked_reactions(
 end
 
 """
+    find_blocked_reactions(model::A.AbstractFBCModel; optimizer, objective_bound=nothing, kwargs...)
+
+Convenience wrapper that builds constraints from model before finding blocked reactions.
+
+Follows COBREXA pattern: builds constraints, optionally adds objective bound via `*` merge,
+then finds blocked reactions. The `objective_bound` parameter should be a bound function
+like `relative_tolerance_bound(0.999)` or `absolute_tolerance_bound(1e-5)`, or `nothing`
+to skip objective bounding.
+
+# Arguments
+- `model::A.AbstractFBCModel`: Model to analyze
+- `optimizer`: Optimization solver (e.g., HiGHS.Optimizer)
+- `objective_bound`: Bound function for objective constraint, or `nothing` (default: `nothing`)
+- `flux_tolerance::Float64`: Threshold for blocked reactions (default: 1e-9)
+- `settings`: Solver settings
+- `workers`: Parallel workers
+
+# Examples
+```julia
+using HiGHS
+import COBREXA
+
+# Without objective bound
+blocked = find_blocked_reactions(model; optimizer=HiGHS.Optimizer)
+
+# With 99.9% objective bound (MATLAB-style preprocessing)
+blocked = find_blocked_reactions(
+    model;
+    optimizer=HiGHS.Optimizer,
+    objective_bound=COBREXA.relative_tolerance_bound(0.999)
+)
+```
+
+See the constraint-tree version for more details.
+"""
+function find_blocked_reactions(
+    model::A.AbstractFBCModel;
+    optimizer,
+    objective_bound=nothing,
+    flux_tolerance::Float64=1e-9,
+    settings=[],
+    workers=D.workers()
+)
+    constraints = COBREXA.flux_balance_constraints(model)
+    
+    # Add objective bound if specified (COBREXA pattern)
+    if !isnothing(objective_bound)
+        objective = constraints.objective.value
+        
+        objective_flux = COBREXA.optimized_values(
+            constraints;
+            objective=constraints.objective.value,
+            output=constraints.objective,
+            optimizer,
+            settings,
+        )
+        
+        isnothing(objective_flux) && return String[]
+        
+        # Merge objective bound constraint (COBREXA way with *)
+        constraints *= :objective_bound^COBREXA.C.Constraint(
+            objective,
+            objective_bound(objective_flux)
+        )
+    end
+    
+    return find_blocked_reactions(
+        constraints;
+        optimizer,
+        flux_tolerance,
+        settings,
+        workers
+    )
+end
+
+"""
     remove_blocked_reactions(
         model::A.AbstractFBCModel;
         optimizer,
+        objective_bound=nothing,
         flux_tolerance::Float64=1e-9,
-        objective_bound=COBREXA.relative_tolerance_bound(0.999),
         settings=[],
         workers=D.workers()
     ) -> (typeof(model), Vector{String})
@@ -342,12 +399,13 @@ end
 Find and remove blocked reactions (immutable).
 
 Creates a deep copy of the model before removing blocked reactions, preserving the original.
+Follows COBREXA pattern for objective bounding.
 
 # Arguments
-Same as `find_blocked_reactions`:
+- `model::A.AbstractFBCModel`: Model to process (will NOT be modified)
 - `optimizer`: Optimization solver (e.g., HiGHS.Optimizer)
+- `objective_bound`: Bound function for objective (e.g., `relative_tolerance_bound(0.999)`), or `nothing` (default: `nothing`)
 - `flux_tolerance`: Threshold for considering a flux zero (default: 1e-9)
-- `objective_bound`: Constraint on objective value (default: 99.9% of optimal)
 - `settings`: Solver settings (default: [])
 - `workers`: Distributed workers for parallel computation (default: Distributed.workers())
 
@@ -359,28 +417,39 @@ Tuple of:
 # Examples
 ```julia
 using HiGHS
+import COBREXA
 
-# Immutable pipeline (original model preserved)
-model_unblocked, blocked_ids = remove_blocked_reactions(model, optimizer=HiGHS.Optimizer)
+# Without objective bound
+model_unblocked, blocked_ids = remove_blocked_reactions(
+    model;
+    optimizer=HiGHS.Optimizer
+)
+
+# With 99.9% objective bound (MATLAB-style preprocessing)
+model_unblocked, blocked_ids = remove_blocked_reactions(
+    model;
+    optimizer=HiGHS.Optimizer,
+    objective_bound=COBREXA.relative_tolerance_bound(0.999)
+)
 ```
 """
 function remove_blocked_reactions(
     model::A.AbstractFBCModel;
     optimizer,
+    objective_bound=nothing,
     flux_tolerance::Float64=1e-9,
-    objective_bound=COBREXA.relative_tolerance_bound(0.999),
     settings=[],
     workers=D.workers()
 )
     # Deep copy to preserve original
     model_copy = deepcopy(model)
 
-    # Find blocked reactions
+    # Find blocked reactions (uses convenience wrapper with objective_bound)
     blocked = find_blocked_reactions(
         model_copy;
         optimizer,
-        flux_tolerance,
         objective_bound,
+        flux_tolerance,
         settings,
         workers
     )

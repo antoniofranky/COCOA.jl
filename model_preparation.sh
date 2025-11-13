@@ -2,15 +2,15 @@
 #SBATCH --job-name=model_prep_array
 #SBATCH --chdir=/work/schaffran1/results_testjobs
 #SBATCH --output=/work/schaffran1/results_testjobs/model_prep_%A_%a.out
-#SBATCH --time=18:00:00
+#SBATCH --time=24:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=64
-#SBATCH --mem=128G
+#SBATCH --cpus-per-task=94
+#SBATCH --mem=600G
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=schaffran1@uni-potsdam.de
 #SBATCH --hint=nomultithread
-#SBATCH --array=1-343
+#SBATCH --array=1-1
 
 # Calculate heap size hint (80% of allocated memory)
 HEAP_SIZE_GB=$(( SLURM_MEM_PER_NODE * 8 / 10 / 1024 ))
