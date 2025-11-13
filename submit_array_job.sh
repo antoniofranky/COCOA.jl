@@ -60,6 +60,18 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
     if [ $? -eq 0 ] && [ ! -z "$JOB_ID" ]; then
         echo "Array job submitted successfully!"
         echo "Job ID: $JOB_ID"
+        
+        # Save model list for this job
+        MODEL_LIST_FILE="$RESULTS_DIR/model_list_${JOB_ID}.txt"
+        printf "# Job ID: %s\n" "$JOB_ID" > "$MODEL_LIST_FILE"
+        printf "# Submitted: %s\n" "$(date)" >> "$MODEL_LIST_FILE"
+        printf "# Array Size: %d\n" "$MODEL_COUNT" >> "$MODEL_LIST_FILE"
+        printf "# TaskID|ModelName|ModelFile\n" >> "$MODEL_LIST_FILE"
+        for ((i=0; i<$MODEL_COUNT; i++)); do
+            printf "%d|%s|%s\n" "$((i+1))" "$(basename "${MODEL_FILES[$i]}" .xml)" "${MODEL_FILES[$i]}" >> "$MODEL_LIST_FILE"
+        done
+        echo "Model list saved to: $MODEL_LIST_FILE"
+        
         echo ""
         echo "Monitor job status with:"
         echo "  squeue -j $JOB_ID"
@@ -68,8 +80,8 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
         echo "View job outputs in: $RESULTS_DIR"
         echo "Log files will be named: cocoa_model_${JOB_ID}_*.out"
         echo ""
-        echo "After job completion, create CSV with:"
-        echo "  /work/schaffran1/jobresults/collect_resources.sh $RESULTS_DIR"
+        echo "After job completion, collect performance metrics with:"
+        echo "  ./collect_slurm_stats.sh $JOB_ID $RESULTS_DIR"
         echo ""
         echo "Cancel all array tasks with:"
         echo "  scancel $JOB_ID"

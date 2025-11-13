@@ -404,8 +404,8 @@ function apply_kinetic_analysis!(
     results.acrr_pairs = Tuple{Symbol,Symbol}[]
     results.giant_id = 0
 
-    # Build A matrix from constraints
-    A_matrix = A_matrix_from_constraints(constraints)
+    # Build incidence matrix A from constraints
+    A_matrix = incidence(constraints)
     balanced_complexes = findall(==(0), results.concordance_modules)
 
     verbose && @debug "Setup" n_complexes = length(results.complex_ids) n_balanced = length(balanced_complexes)
@@ -592,8 +592,8 @@ function analyze_robustness_properties!(
         length(km) >= min_module_size && (kinetic_groups[i] = km)
     end
 
-    # Build Y matrix
-    Y_matrix, _, _ = Y_matrix_from_constraints(constraints; return_ids=true)
+    # Build complex composition matrix Y
+    Y_matrix, _, _ = complex_stoichiometry(constraints; return_ids=true)
 
     # Detect ACR metabolites
     acr_indices = detect_acr_metabolites(kinetic_groups, Y_matrix)
@@ -706,8 +706,8 @@ function detect_interface_reactions!(
     # Initialize all as interface reactions
     fill!(results.interface_reactions, true)
 
-    # Build A matrix and complex-to-module mapping
-    A_matrix = A_matrix_from_constraints(constraints)
+    # Build incidence matrix A and complex-to-module mapping
+    A_matrix = incidence(constraints)
     complex_to_module = Dict{Int,Int}()
     for (mod_id, complexes) in enumerate(kinetic_modules)
         for complex_idx in complexes
