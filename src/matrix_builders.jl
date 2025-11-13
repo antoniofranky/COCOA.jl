@@ -1,20 +1,35 @@
 """
     Matrix Building Functions for COCOA.jl
 
-This module provides functions to construct structural matrices from constraint trees
+This module provides functions to construct structural matrices from metabolic models
 for chemical reaction network analysis. The functions extract stoichiometric and 
 incidence matrices that are fundamental to concordance analysis and kinetic module
 identification.
 
+# Mathematical Notation (following Küken et al. 2022, Science Advances)
+- N: Stoichiometric matrix (metabolites × reactions), N = YA
+- Y: Species-complex composition matrix (metabolites × complexes)
+- A: Complex-reaction incidence matrix (complexes × reactions)
+
 # Functions
-- [`S_from_constraints`](@ref): Build metabolite-reaction stoichiometric matrix
-- [`Y_matrix_from_constraints`](@ref): Build metabolite-complex stoichiometric matrix  
-- [`A_matrix_from_constraints`](@ref): Build complex-reaction incidence matrix
+- [`stoichiometry`](@ref): Build metabolite-reaction stoichiometric matrix N
+- [`complex_stoichiometry`](@ref): Build metabolite-complex composition matrix Y  
+- [`incidence`](@ref): Build complex-reaction incidence matrix A
+
+# Legacy Aliases (for backward compatibility)
+- `S_from_constraints` → `stoichiometry`
+- `Y_matrix_from_constraints` → `complex_stoichiometry`
+- `A_matrix_from_constraints` → `incidence`
+- `A_matrix_from_model` → `incidence`
 
 # Dependencies
-Requires ConstraintTrees.jl for constraint tree processing and SparseArrays.jl for
-efficient sparse matrix construction.
+Requires ConstraintTrees.jl for constraint tree processing, SparseArrays.jl for
+efficient sparse matrix construction, and AbstractFBCModels.jl for model interfaces.
 """
+
+# ========================================================================================
+# Helper Functions
+# ========================================================================================
 
 """
     get_reaction_names_from_constraints(balance_constraints::C.ConstraintTree)
@@ -62,23 +77,28 @@ function get_reaction_names_from_constraints(balance_constraints::C.ConstraintTr
     return collect(reaction_names)
 end
 
-"""
-    S_from_constraints(constraints::C.ConstraintTree; return_ids::Bool=false)
+# ========================================================================================
+# Stoichiometric Matrix N (metabolites × reactions)
+# ========================================================================================
 
-Build stoichiometric matrix S from flux stoichiometry constraints.
+"""
+    stoichiometry(constraints::C.ConstraintTree; return_ids::Bool=false)
+
+Build stoichiometric matrix N from constraint tree flux stoichiometry.
 
 Constructs the metabolite-reaction stoichiometric matrix directly from flux_stoichiometry 
 constraints in the constraint tree. This matrix represents the stoichiometric coefficients
-of metabolites in reactions, where S[i,j] gives the coefficient of metabolite i in reaction j.
+of metabolites in reactions, where N[i,j] gives the coefficient of metabolite i in reaction j.
+Follows notation from Küken et al. (2022), Science Advances: N = YA.
 
 # Arguments
 - `constraints::C.ConstraintTree`: Constraint tree containing flux_stoichiometry data
 - `return_ids::Bool=false`: If true, also return metabolite and reaction ID vectors
 
 # Returns
-- If `return_ids=false`: `SparseMatrixCSC{Float64,Int}` - The stoichiometric matrix S
+- If `return_ids=false`: `SparseMatrixCSC{Float64,Int}` - The stoichiometric matrix N
 - If `return_ids=true`: `Tuple` containing:
-  - `S_matrix::SparseMatrixCSC{Float64,Int}`: Stoichiometric matrix (metabolites × reactions)
+  - `N::SparseMatrixCSC{Float64,Int}`: Stoichiometric matrix (metabolites × reactions)
   - `metabolite_ids::Vector{Symbol}`: Ordered vector of metabolite identifiers
   - `reaction_ids::Vector{Symbol}`: Ordered vector of reaction identifiers
 
@@ -90,13 +110,13 @@ of metabolites in reactions, where S[i,j] gives the coefficient of metabolite i 
 # Examples
 ```julia
 # Get just the matrix
-S = S_from_constraints(constraints)
+S = stoichiometry(constraints)
 
 # Get matrix with ID mappings
-S, metabolites, reactions = S_from_constraints(constraints; return_ids=true)
+S, metabolites, reactions = stoichiometry(constraints; return_ids=true)
 ```
 """
-function S_from_constraints(constraints::C.ConstraintTree; return_ids::Bool=false)
+function stoichiometry(constraints::C.ConstraintTree; return_ids::Bool=false)
     balance_constraints = haskey(constraints, :balance) ? constraints.balance : constraints
 
     # Get metabolite IDs from flux_stoichiometry keys (already sorted)
@@ -189,22 +209,61 @@ function S_from_constraints(constraints::C.ConstraintTree; return_ids::Bool=fals
 end
 
 """
-    Y_matrix_from_constraints(constraints::C.ConstraintTree; return_ids::Bool=false)
+    stoichiometry(model::A.AbstractFBCModel; return_ids::Bool=false, use_unidirectional::Bool=true)
 
-Build complex stoichiometric matrix Y from constraint tree.
+Build stoichiometric matrix S directly from an AbstractFBCModel.
+
+This function constructs the stoichiometric matrix by first building a constraint tree
+(optionally with unidirectional reactions), then extracting the stoichiometry.
+
+# Arguments
+- `model::A.AbstractFBCModel`: FBC model containing reactions and metabolites
+- `return_ids::Bool=false`: If true, also return metabolite and reaction ID vectors
+- `use_unidirectional::Bool=true`: If true, split reactions into forward/reverse
+
+# Returns
+Same as `stoichiometry(::C.ConstraintTree)`
+
+# Examples
+```julia
+model = load_model("model.xml")
+S = stoichiometry(model)
+S, metabolites, reactions = stoichiometry(model; return_ids=true)
+```
+"""
+function stoichiometry(model::A.AbstractFBCModel; return_ids::Bool=false, use_unidirectional::Bool=true)
+    # Build constraints to extract stoichiometry consistently
+    if use_unidirectional
+        constraints, _ = create_unidirectional_constraints(model)
+    else
+        constraints = COBREXA.flux_balance_constraints(model)
+    end
+
+    return stoichiometry(constraints; return_ids=return_ids)
+end
+
+# ========================================================================================
+# Complex Composition Matrix Y (species-complex matrix, metabolites × complexes)
+# ========================================================================================
+
+"""
+    complex_stoichiometry(constraints::C.ConstraintTree; return_ids::Bool=false)
+
+Build species-complex composition matrix Y from constraint tree.
 
 Constructs the metabolite-complex stoichiometric matrix from the constraint tree by
 extracting complex compositions. This matrix represents the stoichiometric coefficients
 of metabolites in complexes, where Y[i,j] gives the coefficient of metabolite i in complex j.
+Follows notation from Küken et al. (2022), Science Advances.
 
 # Arguments
 - `constraints::C.ConstraintTree`: Constraint tree containing complex and flux constraint data
 - `return_ids::Bool=false`: If true, also return metabolite and complex ID vectors
 
 # Returns
-- If `return_ids=false`: `SparseMatrixCSC{Float64,Int}` - The complex stoichiometric matrix Y
+- If `return_ids=false`: `SparseMatrixCSC{Float64,Int}` - The complex composition matrix Y
 - If `return_ids=true`: `Tuple` containing:
-  - `Y_matrix::SparseMatrixCSC{Float64,Int}`: Complex stoichiometric matrix (metabolites × complexes)
+  - `Y::SparseMatrixCSC{Float64,Int}`: Complex composition matrix (metabolites × complexes)
   - `metabolite_ids::Vector{Symbol}`: Ordered vector of metabolite identifiers
   - `complex_ids::Vector{Symbol}`: Ordered vector of complex identifiers
 
@@ -216,13 +275,13 @@ of metabolites in complexes, where Y[i,j] gives the coefficient of metabolite i 
 # Examples
 ```julia
 # Get just the matrix
-Y = Y_matrix_from_constraints(constraints)
+Y = complex_stoichiometry(constraints)
 
 # Get matrix with ID mappings
-Y, metabolites, complexes = Y_matrix_from_constraints(constraints; return_ids=true)
+Y, metabolites, complexes = complex_stoichiometry(constraints; return_ids=true)
 ```
 """
-function Y_matrix_from_constraints(constraints::C.ConstraintTree; return_ids::Bool=false)
+function complex_stoichiometry(constraints::C.ConstraintTree; return_ids::Bool=false)
     # Extract complexes using the shared function
     complex_info, _ = extract_complexes(constraints)
 
@@ -270,13 +329,60 @@ function Y_matrix_from_constraints(constraints::C.ConstraintTree; return_ids::Bo
 end
 
 """
-    A_matrix_from_constraints(constraints::C.ConstraintTree; return_ids::Bool=false)
+    complex_stoichiometry(model::A.AbstractFBCModel; return_ids::Bool=false, use_unidirectional::Bool=true)
+
+Build species-complex composition matrix Y directly from an AbstractFBCModel.
+
+This function constructs the Y matrix by first building a constraint tree
+(optionally with unidirectional reactions), then extracting complexes using the same
+logic as `extract_complexes` to ensure consistency.
+
+# Arguments
+- `model::A.AbstractFBCModel`: FBC model containing reactions and metabolites
+- `return_ids::Bool=false`: If true, also return metabolite and complex ID vectors
+- `use_unidirectional::Bool=true`: If true, split reactions into forward/reverse (matches concordance analysis)
+
+# Returns
+Same as `complex_stoichiometry(::C.ConstraintTree)`
+
+# Examples
+```julia
+model = load_model("model.xml")
+Y = complex_stoichiometry(model)
+Y, metabolites, complexes = complex_stoichiometry(model; return_ids=true)
+
+# Without unidirectional splitting (may give different complexes)
+Y = complex_stoichiometry(model; use_unidirectional=false)
+```
+
+# Notes
+To ensure complex IDs match those from concordance analysis, use `use_unidirectional=true` (default).
+This will build constraints and extract complexes using the same logic as `extract_complexes`.
+"""
+function complex_stoichiometry(model::A.AbstractFBCModel; return_ids::Bool=false, use_unidirectional::Bool=true)
+    # Build constraints to extract complexes consistently
+    if use_unidirectional
+        constraints, _ = create_unidirectional_constraints(model)
+    else
+        constraints = COBREXA.flux_balance_constraints(model)
+    end
+
+    return complex_stoichiometry(constraints; return_ids=return_ids)
+end
+
+# ========================================================================================
+# Complex-Reaction Incidence Matrix A (complexes × reactions)
+# ========================================================================================
+
+"""
+    incidence(constraints::C.ConstraintTree; return_ids::Bool=false)
 
 Build complex-reaction incidence matrix A from constraint tree.
 
 Constructs the incidence matrix representing the participation of complexes in reactions.
 This matrix encodes the reaction network structure in chemical reaction network theory,
 where A[i,j] indicates how complex i participates in reaction j.
+Follows notation from Küken et al. (2022), Science Advances.
 
 # Arguments
 - `constraints::C.ConstraintTree`: Constraint tree containing balance constraints and activities
@@ -285,7 +391,7 @@ where A[i,j] indicates how complex i participates in reaction j.
 # Returns
 - If `return_ids=false`: `SparseMatrixCSC{Int,Int}` - The incidence matrix A
 - If `return_ids=true`: `Tuple` containing:
-  - `A_matrix::SparseMatrixCSC{Int,Int}`: Incidence matrix (complexes × reactions)
+  - `A::SparseMatrixCSC{Int,Int}`: Incidence matrix (complexes × reactions)
   - `complex_ids::Vector{Symbol}`: Ordered vector of complex identifiers
   - `reaction_ids::Vector{Symbol}`: Ordered vector of reaction identifiers
 
@@ -304,16 +410,16 @@ as linear combinations of reaction fluxes.
 # Examples
 ```julia
 # Get just the matrix
-A = A_matrix_from_constraints(constraints)
+A = incidence(constraints)
 
 # Get matrix with ID mappings
-A, complexes, reactions = A_matrix_from_constraints(constraints; return_ids=true)
+A, complexes, reactions = incidence(constraints; return_ids=true)
 ```
 
 # Throws
 - `ArgumentError`: If constraints do not contain required `activities` section
 """
-function A_matrix_from_constraints(constraints::C.ConstraintTree; return_ids::Bool=false)
+function incidence(constraints::C.ConstraintTree; return_ids::Bool=false)
     balance_constraints = haskey(constraints, :balance) ? constraints.balance : constraints
 
     # Get reaction names from the balance constraints
@@ -322,7 +428,7 @@ function A_matrix_from_constraints(constraints::C.ConstraintTree; return_ids::Bo
 
     # Get complex IDs from activities constraints
     if !haskey(constraints, :activities)
-        throw(ArgumentError("Constraints must have activities to build A matrix"))
+        throw(ArgumentError("Constraints must have activities to build incidence matrix"))
     end
     complex_ids = sort!(collect(keys(constraints.activities)); by=string)
 
@@ -382,21 +488,19 @@ function A_matrix_from_constraints(constraints::C.ConstraintTree; return_ids::Bo
     # Build A matrix from activities constraints
     # Activities are defined as: activity = sum of reaction fluxes where complex is produced - consumed
     # So coefficient in activity constraint tells us the incidence
-    if haskey(constraints, :activities)
-        for (complex_id, constraint) in constraints.activities
-            if haskey(complex_to_idx, complex_id)
-                i = complex_to_idx[complex_id]
+    for (complex_id, constraint) in constraints.activities
+        if haskey(complex_to_idx, complex_id)
+            i = complex_to_idx[complex_id]
 
-                var_indices = constraint.value.idxs
-                coefficients = constraint.value.weights
+            var_indices = constraint.value.idxs
+            coefficients = constraint.value.weights
 
-                for (var_idx, coeff) in zip(var_indices, coefficients)
-                    if haskey(var_to_reaction_idx, var_idx)
-                        j = var_to_reaction_idx[var_idx]
-                        push!(I, i)
-                        push!(J, j)
-                        push!(V, Int(coeff))  # -1 for consumed, +1 for produced
-                    end
+            for (var_idx, coeff) in zip(var_indices, coefficients)
+                if haskey(var_to_reaction_idx, var_idx)
+                    j = var_to_reaction_idx[var_idx]
+                    push!(I, i)
+                    push!(J, j)
+                    push!(V, Int(coeff))  # -1 for consumed, +1 for produced
                 end
             end
         end
@@ -411,12 +515,8 @@ function A_matrix_from_constraints(constraints::C.ConstraintTree; return_ids::Bo
     end
 end
 
-# ========================================================================================
-# Direct Matrix Extraction from AbstractFBCModels (similar to A.stoichiometry pattern)
-# ========================================================================================
-
 """
-    A_matrix_from_model(model::A.AbstractFBCModel; return_ids::Bool=false, use_unidirectional::Bool=true)
+    incidence(model::A.AbstractFBCModel; return_ids::Bool=false, use_unidirectional::Bool=true)
 
 Build complex-reaction incidence matrix A directly from an AbstractFBCModel.
 
@@ -430,32 +530,23 @@ logic as `extract_complexes` to ensure consistency.
 - `use_unidirectional::Bool=true`: If true, split reactions into forward/reverse (matches concordance analysis)
 
 # Returns
-- If `return_ids=false`: `SparseMatrixCSC{Int,Int}` - The incidence matrix A
-- If `return_ids=true`: `Tuple` containing:
-  - `A_matrix::SparseMatrixCSC{Int,Int}`: Incidence matrix (complexes × reactions)
-  - `complex_ids::Vector{Symbol}`: Ordered vector of complex identifiers  
-  - `reaction_ids::Vector{Symbol}`: Ordered vector of reaction identifiers
-
-# Matrix Structure
-- Rows: complexes (ordered alphabetically)
-- Columns: reactions (ordered alphabetically)
-- Values: -1 (substrate), +1 (product), 0 (no participation)
+Same as `incidence(::C.ConstraintTree)`
 
 # Examples
 ```julia
 model = load_model("model.xml")
-A = A_matrix_from_model(model)
-A, complexes, reactions = A_matrix_from_model(model; return_ids=true)
+A = incidence(model)
+A, complexes, reactions = incidence(model; return_ids=true)
 
 # Without unidirectional splitting (may give different complexes)
-A = A_matrix_from_model(model; use_unidirectional=false)
+A = incidence(model; use_unidirectional=false)
 ```
 
 # Notes
 To ensure complex IDs match those from concordance analysis, use `use_unidirectional=true` (default).
 This will build constraints and extract complexes using the same logic as `extract_complexes`.
 """
-function A_matrix_from_model(model::A.AbstractFBCModel; return_ids::Bool=false, use_unidirectional::Bool=true)
+function incidence(model::A.AbstractFBCModel; return_ids::Bool=false, use_unidirectional::Bool=true)
     # Build constraints to extract complexes consistently
     if use_unidirectional
         constraints, _ = create_unidirectional_constraints(model)
@@ -463,58 +554,21 @@ function A_matrix_from_model(model::A.AbstractFBCModel; return_ids::Bool=false, 
         constraints = COBREXA.flux_balance_constraints(model)
     end
 
-    # Use the same extraction logic as constraints.jl
-    return A_matrix_from_constraints(constraints; return_ids=return_ids)
+    return incidence(constraints; return_ids=return_ids)
 end
 
-"""
-    Y_matrix_from_model(model::A.AbstractFBCModel; return_ids::Bool=false, use_unidirectional::Bool=true)
+# ========================================================================================
+# Legacy Aliases (for backward compatibility)
+# ========================================================================================
 
-Build metabolite-complex stoichiometric matrix Y directly from an AbstractFBCModel.
+"""Alias for `stoichiometry(::C.ConstraintTree)`"""
+const S_from_constraints = stoichiometry
 
-This function constructs the Y matrix by first building a constraint tree
-(optionally with unidirectional reactions), then extracting complexes using the same
-logic as `extract_complexes` to ensure consistency.
+"""Alias for `complex_stoichiometry(::C.ConstraintTree)`"""
+const Y_matrix_from_constraints = complex_stoichiometry
 
-# Arguments
-- `model::A.AbstractFBCModel`: FBC model containing reactions and metabolites
-- `return_ids::Bool=false`: If true, also return metabolite and complex ID vectors
-- `use_unidirectional::Bool=true`: If true, split reactions into forward/reverse (matches concordance analysis)
+"""Alias for `incidence(::C.ConstraintTree)`"""
+const A_matrix_from_constraints = incidence
 
-# Returns
-- If `return_ids=false`: `SparseMatrixCSC{Float64,Int}` - The Y matrix
-- If `return_ids=true`: `Tuple` containing:
-  - `Y_matrix::SparseMatrixCSC{Float64,Int}`: Stoichiometric matrix (metabolites × complexes)
-  - `metabolite_ids::Vector{Symbol}`: Ordered vector of metabolite identifiers
-  - `complex_ids::Vector{Symbol}`: Ordered vector of complex identifiers
-
-# Matrix Structure
-- Rows: metabolites (ordered alphabetically)
-- Columns: complexes (ordered alphabetically)
-- Values: stoichiometric coefficients in complex composition
-
-# Examples
-```julia
-model = load_model("model.xml")
-Y = Y_matrix_from_model(model)
-Y, metabolites, complexes = Y_matrix_from_model(model; return_ids=true)
-
-# Without unidirectional splitting (may give different complexes)
-Y = Y_matrix_from_model(model; use_unidirectional=false)
-```
-
-# Notes
-To ensure complex IDs match those from concordance analysis, use `use_unidirectional=true` (default).
-This will build constraints and extract complexes using the same logic as `extract_complexes`.
-"""
-function Y_matrix_from_model(model::A.AbstractFBCModel; return_ids::Bool=false, use_unidirectional::Bool=true)
-    # Build constraints to extract complexes consistently
-    if use_unidirectional
-        constraints, _ = create_unidirectional_constraints(model)
-    else
-        constraints = COBREXA.flux_balance_constraints(model)
-    end
-
-    # Use the same extraction logic as constraints.jl
-    return Y_matrix_from_constraints(constraints; return_ids=return_ids)
-end
+"""Alias for `incidence(::A.AbstractFBCModel)`"""
+const A_matrix_from_model = incidence

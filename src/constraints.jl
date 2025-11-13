@@ -126,7 +126,7 @@ function concordance_constraints(
     model::A.AbstractFBCModel;
     return_complexes::Bool=false,
     interface=nothing,
-    use_unidirectional_constraints::Bool=true,
+    use_unidirectional_constraints::Bool=false,
 )
     if use_unidirectional_constraints
         constraints, split_indices = create_unidirectional_constraints(model)
