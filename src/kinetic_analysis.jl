@@ -125,7 +125,7 @@ function find_strongly_connected_components(
     orig_to_working = Dict(working_complexes[i] => i for i in 1:n_working)
 
     # Tarjan's algorithm state
-    index = 0
+    index_ref = Ref{Int}(0)
     indices = fill(-1, n_working)
     lowlinks = zeros(Int, n_working)
     on_stack = falses(n_working)
@@ -154,8 +154,8 @@ function find_strongly_connected_components(
 
     # Tarjan's DFS
     function strongconnect(v::Int)
-        indices[v] = lowlinks[v] = index
-        index += 1
+        indices[v] = lowlinks[v] = index_ref[]
+        index_ref[] += 1
         push!(stack, v)
         on_stack[v] = true
 

@@ -172,63 +172,6 @@ function check_memory!(monitor::MemoryMonitor)::Float64
     return current
 end
 
-const DEFAULT_SOLVER_TOLERANCE = 1e-6
-const MAX_VALID_TOLERANCE = 1e-3
-
-const TOLERANCE_ATTRIBUTES = (
-    "primal_feasibility_tolerance",  # HiGHS, Gurobi
-    "dual_feasibility_tolerance",    # HiGHS, Gurobi
-    "feasibility_tolerance",         # Some solvers
-    "FeasibilityTol",               # Gurobi
-    "OptimalityTol",                # Gurobi
-    "primal_tolerance",             # CPLEX-style
-    "dual_tolerance"                # CPLEX-style
-)
-
-"""
-Extract numerical tolerance from JuMP optimizer using const arrays for performance.
-"""
-function extract_solver_tolerance(optimizer, settings=())::Float64
-    temp_model = create_temp_model(optimizer, settings)
-    temp_model === nothing && return DEFAULT_SOLVER_TOLERANCE
-
-    tolerances = extract_tolerances(temp_model)
-    return isempty(tolerances) ? DEFAULT_SOLVER_TOLERANCE : minimum(tolerances)
-end
-
-function create_temp_model(optimizer, settings)
-    try
-        model = J.Model(optimizer)
-        for setting in [COBREXA.configuration.default_solver_settings; settings]
-            setting(model)
-        end
-        return model
-    catch e
-        @debug "Could not create temporary model" exception = e
-        return nothing
-    end
-end
-
-function extract_tolerances(model)::Vector{Float64}
-    tolerances = Float64[]
-    sizehint!(tolerances, length(TOLERANCE_ATTRIBUTES))
-
-    for attr in TOLERANCE_ATTRIBUTES
-        tol = get_tolerance_attribute(model, attr)
-        !isnan(tol) && push!(tolerances, tol)
-    end
-    return tolerances
-end
-
-function get_tolerance_attribute(model, attr::String)::Float64
-    try
-        tol = J.get_optimizer_attribute(model, attr)
-        return (tol isa Real && 0 < tol < MAX_VALID_TOLERANCE) ? Float64(tol) : NaN
-    catch
-        return NaN
-    end
-end
-
 """
 Categorize JuMP termination status into failure mode categories.
 Returns symbol indicating the category of termination status.
@@ -1535,9 +1478,9 @@ function activity_concordance_analysis(
     optimizer,
     settings=[],
     workers=D.workers(),
-    concordance_tolerance::Float64=NaN,
-    balanced_tolerance::Float64=NaN,
-    cv_threshold::Float64=NaN,
+    balanced_tolerance::Float64=1e-8,
+    concordance_tolerance::Float64=1e-7,
+    cv_threshold::Float64=1e-7,
     cv_epsilon::Float64=1e-16,
     sample_size::Int=100,
     batch_size::Int=50_000,
@@ -1552,15 +1495,7 @@ function activity_concordance_analysis(
 )
     start_time = time()
 
-    # Detect solver tolerance for consistent numerical thresholds
-    solver_tolerance = extract_solver_tolerance(optimizer, settings)
-
-    # Set default values based on solver tolerance if not provided (NaN indicates default should be used)
-    actual_concordance_tolerance = !isnan(concordance_tolerance) ? concordance_tolerance : max(solver_tolerance * 100, 1e-2)
-    actual_balanced_tolerance = !isnan(balanced_tolerance) ? balanced_tolerance : solver_tolerance
-    actual_cv_threshold = !isnan(cv_threshold) ? cv_threshold : max(solver_tolerance * 100, 1e-2)
-
-    @info "Starting concordance analysis" n_workers = length(workers) concordance_tolerance = actual_concordance_tolerance balanced_tolerance = actual_balanced_tolerance cv_threshold = actual_cv_threshold sample_size use_unidirectional_constraints batch_size solver_tolerance
+    @info "Starting concordance analysis" n_workers = length(workers) concordance_tolerance balanced_tolerance cv_threshold sample_size use_unidirectional_constraints batch_size
 
     constraints, complexes =
         concordance_constraints(model; modifications, use_unidirectional_constraints, return_complexes=true)
@@ -1648,7 +1583,7 @@ function activity_concordance_analysis(
     end
 
     # Use the separated AVA function with warmup point generation and external timing
-    ava_digits = max(1, -floor(Int, log10(solver_tolerance)))
+    ava_digits = max(1, -floor(Int, log10(concordance_tolerance)))
     ava_output_func = (dir, om) -> ava_output_with_warmup(dir, om; digits=ava_digits)
     @info "Running Activity Variability Analysis (AVA)"
     ava_time = @elapsed ava_results = activity_variability_analysis(
@@ -1721,9 +1656,6 @@ function activity_concordance_analysis(
     positive_complexes = get_mask(concordance_tracker, :positive)
     negative_complexes = get_mask(concordance_tracker, :negative)
     unrestricted_complexes = get_mask(concordance_tracker, :unrestricted)
-
-    # Use balanced tolerance for balanced complex detection - ensures consistency with optimization
-    balanced_threshold = actual_balanced_tolerance
 
     # Build BitVector mask for trivially balanced complexes for O(1) lookups
     trivially_balanced_mask = falses(n_complexes)
@@ -1813,7 +1745,7 @@ function activity_concordance_analysis(
     end
     @info "Generating candidate pairs via coefficient of variance..."
 
-    decimals = max(0, -floor(Int, log10(solver_tolerance)))
+    decimals = max(0, -floor(Int, log10(concordance_tolerance)))
     aggregate = rows -> round.(vec(hcat(rows...)), digits=decimals)
     @info "Sampling schedule"
 
@@ -1956,9 +1888,9 @@ function activity_concordance_analysis(
         StreamingCandidateFilter(
             complexes_vector,
             trivial_pairs_indices,
-            samples_tree, # Pass the collected samples  
+            samples_tree, # Pass the collected samples
             concordance_tracker;
-            cv_threshold=actual_cv_threshold,
+            cv_threshold=cv_threshold,
             cv_epsilon=cv_epsilon,
             min_valid_samples=min_valid_samples,
             use_transitivity=use_transitivity
@@ -1975,7 +1907,7 @@ function activity_concordance_analysis(
     # Create configuration object for type-stable processing
     config = BatchProcessingConfig(
         batch_size,
-        actual_concordance_tolerance,
+        concordance_tolerance,
         use_transitivity,
         optimizer,
         settings,
@@ -2022,11 +1954,10 @@ function activity_concordance_analysis(
         "elapsed_time" => elapsed,
 
         # Algorithm parameters
-        "concordance_tolerance" => actual_concordance_tolerance,
-        "balanced_tolerance" => actual_balanced_tolerance,
-        "cv_threshold" => actual_cv_threshold,
+        "concordance_tolerance" => concordance_tolerance,
+        "balanced_tolerance" => balanced_tolerance,
+        "cv_threshold" => cv_threshold,
         "cv_epsilon" => cv_epsilon,
-        "solver_tolerance" => solver_tolerance,
 
         # Sampling parameters
         "sample_size" => sample_size,
