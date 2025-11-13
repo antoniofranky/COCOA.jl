@@ -1432,7 +1432,7 @@ results = activity_concordance_analysis(
 
 ## Analysis Parameters
 - `concordance_tolerance::Float64=NaN`: Tolerance for concordance detection
-- `balanced_tolerance::Float64=NaN`: Tolerance for balanced complex detection  
+- `balanced_threshold::Float64=NaN`: Threshold for balanced complex detection
 - `cv_threshold::Float64=NaN`: Coefficient of variation threshold for filtering
 - `cv_epsilon::Float64=1e-16`: Small value added to avoid division by zero in CV calculation
 - `sample_size::Int=100`: Number of samples for coefficient of variation estimation
@@ -1491,7 +1491,7 @@ function activity_concordance_analysis(
     optimizer,
     settings=[],
     workers=D.workers(),
-    balanced_tolerance::Float64=1e-8,
+    balanced_threshold::Float64=1e-8,
     concordance_tolerance::Float64=1e-7,
     cv_threshold::Float64=1e-7,
     cv_epsilon::Float64=1e-16,
@@ -1507,7 +1507,7 @@ function activity_concordance_analysis(
 )
     start_time = time()
 
-    @info "Starting concordance analysis" n_workers = length(workers) concordance_tolerance balanced_tolerance cv_threshold sample_size use_unidirectional_constraints batch_size
+    @info "Starting concordance analysis" n_workers = length(workers) concordance_tolerance balanced_threshold cv_threshold sample_size use_unidirectional_constraints batch_size
 
     constraints, complexes =
         concordance_constraints(model; use_unidirectional_constraints, return_complexes=true)
@@ -1962,7 +1962,7 @@ function activity_concordance_analysis(
 
         # Algorithm parameters
         "concordance_tolerance" => concordance_tolerance,
-        "balanced_tolerance" => balanced_tolerance,
+        "balanced_threshold" => balanced_threshold,
         "cv_threshold" => cv_threshold,
         "cv_epsilon" => cv_epsilon,
 
