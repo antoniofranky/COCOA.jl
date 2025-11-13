@@ -11,10 +11,10 @@
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=schaffran1@uni-potsdam.de
 #SBATCH --hint=nomultithread
-#SBATCH --array=1-ARRAY_SIZE
+#SBATCH --array=1-343
 # Parameters to modify
 MODELS_DIR="/work/schaffran1/Yeast-Species-GEMs"  # Directory containing models
-RESULTS_BASE_DIR="/work/schaffran1/jobresults/random_0"       # Base directory for results
+RESULTS_BASE_DIR="/work/schaffran1/jobresults/no_split"       # Base directory for results
 
 # Use single results directory
 RESULTS_DIR="$RESULTS_BASE_DIR"

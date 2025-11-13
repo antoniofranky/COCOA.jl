@@ -18,7 +18,9 @@ seed = 42
 cv_threshold = 0.01
 batch_size = 100_000
 use_transitivity = true
-balanced_tolerance = 1e-
+balanced_tolerance = 1e-8
+concordance_tolerance = 1e-7
+
 # HiGHS solver settings
 highs_settings = [
     COBREXA.set_optimizer_attribute("primal_feasibility_tolerance", 1e-9),
@@ -86,6 +88,8 @@ try
             settings=highs_settings,
             sample_size=sample_size,
             seed=seed,
+            concordance_tolerance=concordance_tolerance,
+            balanced_tolerance=balanced_tolerance,
             cv_threshold=cv_threshold,
             batch_size=batch_size,
             use_transitivity=use_transitivity,
@@ -116,6 +120,8 @@ try
             "sample_size" => sample_size,
             "seed" => seed,
             "cv_threshold" => cv_threshold,
+            "concordance_tolerance" => concordance_tolerance,
+            "balanced_tolerance" => balanced_tolerance,
             "batch_size" => batch_size,
             "use_transitivity" => use_transitivity
         ),
