@@ -183,8 +183,9 @@ function split_into_elementary(
         has_gpr_or_ec = haskey(reactions_with_fallback, rid)
 
         if !has_gpr_or_ec || length(substrate_ids) > 4 || length(product_ids) > 4
-            # MATLAB line 63-70: Keep original reaction (strip R_ prefix to match MATLAB)
-            rid_clean = replace(rid, r"^R_" => "")
+            # MATLAB line 63-70: Keep original reaction
+            # FIX: Keep R_ prefix for SBML compatibility (prevents objective reference issues)
+            rid_clean = startswith(rid, "R_") ? rid : "R_" * rid
             elem_model.reactions[rid_clean] = deepcopy(rxn)
         else
             # MATLAB line 77-78: Extract enzyme indices for this reaction
@@ -206,8 +207,8 @@ function split_into_elementary(
             substrates = [(mid, -coeff) for (mid, coeff) in rxn.stoichiometry if coeff < 0]
             products = [(mid, coeff) for (mid, coeff) in rxn.stoichiometry if coeff > 0]
 
-            # Strip R_ prefix from reaction ID to match MATLAB naming
-            rid_clean = replace(rid, r"^R_" => "")
+            # FIX: Keep R_ prefix for SBML compatibility (prevents objective reference issues)
+            rid_clean = startswith(rid, "R_") ? rid : "R_" * rid
 
             if !use_random
                 # MATLAB line 72-215: Ordered mechanism

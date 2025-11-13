@@ -87,11 +87,44 @@ end
 $(TYPEDSIGNATURES)
 
 Memory-efficient concordance constraints that work with large models.
+
+Builds constraint trees for concordance analysis following COBREXA patterns.
+For custom constraints (like objective bounds), build constraints with this function
+then merge additional constraints using the `*` operator before passing to analysis.
+
+# Arguments
+- `model::A.AbstractFBCModel`: Metabolic model to analyze
+- `return_complexes::Bool=false`: Return complex information along with constraints
+- `interface=nothing`: Interface specification (forwarded to COBREXA)
+- `use_unidirectional_constraints::Bool=true`: Use unidirectional flux splitting
+
+# Returns
+- Constraint tree with balance, activities, and Charnes-Cooper templates
+- Optionally: complex information (if `return_complexes=true`)
+
+# Examples
+```julia
+# Basic usage
+constraints = concordance_constraints(model)
+
+# With objective bound (COBREXA pattern with * merge)
+constraints = concordance_constraints(model)
+obj_flux = COBREXA.optimized_values(
+    constraints.balance;
+    objective=constraints.balance.objective.value,
+    output=constraints.balance.objective,
+    optimizer=HiGHS.Optimizer
+)
+constraints.balance *= :objective_bound^COBREXA.C.Constraint(
+    constraints.balance.objective.value,
+    COBREXA.relative_tolerance_bound(0.999)(obj_flux)
+)
+# Now pass modified constraints to analysis...
+```
 """
 function concordance_constraints(
     model::A.AbstractFBCModel;
     return_complexes::Bool=false,
-    modifications=Function[],
     interface=nothing,
     use_unidirectional_constraints::Bool=true,
 )
@@ -100,11 +133,6 @@ function concordance_constraints(
     else
         constraints = COBREXA.flux_balance_constraints(model; interface)
         split_indices = Set{Int}()
-    end
-
-    # Apply modifications
-    for mod in modifications
-        constraints = mod(constraints)
     end
 
     balance_constraints = constraints

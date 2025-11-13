@@ -473,7 +473,7 @@ function add_random_reactions!(
 
                         # Systematic reaction ID for level > 1
                         enz_num = replace(enzyme_id, "E" => "")
-                        rxn_id = "$(original_rid)_E$(enz_num)_SBR$(level)_S$(new_sub_idx)_from_" * join(string.(prev_complex), "-")
+                        rxn_id = "$(original_rid)_E$(enz_num)_SBR$(level)_S$(new_sub_idx)_via_" * join(string.(prev_complex), "_")
 
                         # Build annotations for random binding (level > 1, all new metadata goes here)
                         rand_annotations = deepcopy(original_rxn.annotations)
@@ -656,7 +656,7 @@ function add_random_reactions!(
 
                         # Systematic reaction ID for level > 1
                         enz_num = replace(enzyme_id, "E" => "")
-                        rxn_id = "$(original_rid)_E$(enz_num)_PRR$(level)_P$(prod_idx_to_release)_from_" * join(string.(prev_complex), "-")
+                        rxn_id = "$(original_rid)_E$(enz_num)_PRR$(level)_P$(prod_idx_to_release)_via_" * join(string.(prev_complex), "_")
 
                         # Build annotations for product release (level > 1, all new metadata goes here)
                         prod_annotations = deepcopy(original_rxn.annotations)

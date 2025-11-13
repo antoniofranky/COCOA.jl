@@ -4,8 +4,6 @@ Concordance Analysis for COCOA.jl
 Main algorithms for identifying concordant complex pairs in metabolic networks.
 """
 
-# Note: All imports are handled via the main COCOA.jl module
-
 # ========================================================================================
 # Memory-Efficient Result Accumulator
 # ========================================================================================
@@ -1418,13 +1416,15 @@ end
 
 
 """
-    activity_concordance_analysis(model; optimizer, kwargs...)
+    activity_concordance_analysis(model; optimizer, objective_bound=nothing, kwargs...)
 
 Perform comprehensive concordance analysis to identify concordant complex pairs in metabolic networks.
 
 This is the main function for concordance analysis in COCOA.jl. It systematically identifies
 pairs of complexes that can maintain the same activity ratio across the feasible flux space,
 which is fundamental for understanding concentration robustness in biochemical networks.
+
+Follows COBREXA.jl patterns for constraint building and modification.
 
 # Result Overview
 Returns a `ConcordanceResults` with:
@@ -1443,9 +1443,49 @@ Returns a `ConcordanceResults` with:
 # Optional Keyword Arguments
 
 ## Model Processing
-- `modifications=Function[]`: Model modifications to apply before analysis
+- `objective_bound=nothing`: Objective bound function (e.g., `relative_tolerance_bound(0.999)`), or `nothing` to skip
 - `use_unidirectional_constraints::Bool=true`: Use unidirectional flux constraints
-- `objective_bound=nothing`: Function to constrain objective value (takes optimal value, returns bound)
+
+# Objective Bound Pattern
+The `objective_bound` parameter follows COBREXA's pattern from `flux_variability_analysis`.
+Pass a bound function like `relative_tolerance_bound(0.999)` or `absolute_tolerance_bound(1e-5)`,
+or `nothing` to perform analysis without objective bounding.
+
+# Examples
+```julia
+using HiGHS
+import COBREXA
+
+# Basic concordance analysis (no objective bound)
+results = activity_concordance_analysis(
+    model;
+    optimizer=HiGHS.Optimizer
+)
+
+# With 99.9% objective bound (following COBREXA FVA pattern)
+results = activity_concordance_analysis(
+    model;
+    optimizer=HiGHS.Optimizer,
+    objective_bound=COBREXA.relative_tolerance_bound(0.999)
+)
+
+# With absolute tolerance bound
+results = activity_concordance_analysis(
+    model;
+    optimizer=HiGHS.Optimizer,
+    objective_bound=COBREXA.absolute_tolerance_bound(1e-5)
+)
+
+# With custom tolerances and batch size
+results = activity_concordance_analysis(
+    model;
+    optimizer=HiGHS.Optimizer,
+    objective_bound=COBREXA.relative_tolerance_bound(0.95),
+    concordance_tolerance=1e-5,
+    batch_size=100_000,
+    seed=1234
+)
+```
 
 ## Analysis Parameters
 - `concordance_tolerance::Float64=NaN`: Tolerance for concordance detection
@@ -1457,7 +1497,7 @@ Returns a `ConcordanceResults` with:
 - `seed::Int=0`: Random seed for reproducible sampling (0 uses global RNG)
 
 ## Performance Settings
-- `batch_size::Int=50_000`: Number of candidate pairs processed per batch, after a batch the newly identified concordant/non-concordant pairs are used to filter remaining candidates
+- `batch_size::Int=50_000`: Number of candidate pairs processed per batch
 - `workers=D.workers()`: Worker processes for parallel computation
 - `settings=[]`: Solver-specific settings vector
 - `use_transitivity::Bool=true`: Use transitivity relationships to reduce computation
@@ -1495,33 +1535,6 @@ The `stats` field contains detailed analysis metrics:
 - `n_balanced`: Balanced complexes
 - `n_modules`: Concordance modules found
 
-# Examples
-```julia
-# Basic concordance analysis
-results = activity_concordance_analysis(model; optimizer=HiGHS.Optimizer)
-
-# With custom tolerances and batch size
-results = activity_concordance_analysis(
-    model;
-    optimizer=HiGHS.Optimizer,
-    concordance_tolerance=1e-5,
-    batch_size=100_000,
-    seed=1234
-)
-
-# With model modifications and objective bound
-modifications = [change_bound("EX_glc__D_e", lower=-10.0)]
-obj_bound = x -> (x * 0.9, x * 1.1)  # 10% tolerance around optimum
-
-results = activity_concordance_analysis(
-    model;
-    optimizer=HiGHS.Optimizer,
-    modifications=modifications,
-    objective_bound=obj_bound,
-    kinetic_analysis=true
-)
-```
-
 # Notes
 - SBML models are automatically processed for compatibility
 - Tolerances are auto-detected from solver settings if not specified
@@ -1531,7 +1544,7 @@ results = activity_concordance_analysis(
 """
 function activity_concordance_analysis(
     model;
-    modifications=Function[],
+    objective_bound=nothing,
     optimizer,
     settings=[],
     workers=D.workers(),
@@ -1544,7 +1557,6 @@ function activity_concordance_analysis(
     min_valid_samples::Int=10,
     seed::Int=0,
     use_unidirectional_constraints::Bool=false,
-    objective_bound=nothing,
     use_transitivity::Bool=true,
     n_burnin::Int=50,
     n_chains::Int=1,
@@ -1563,15 +1575,10 @@ function activity_concordance_analysis(
     @info "Starting concordance analysis" n_workers = length(workers) concordance_tolerance = actual_concordance_tolerance balanced_tolerance = actual_balanced_tolerance cv_threshold = actual_cv_threshold sample_size use_unidirectional_constraints batch_size solver_tolerance
 
     constraints, complexes =
-        concordance_constraints(model; modifications, use_unidirectional_constraints, return_complexes=true)
+        concordance_constraints(model; use_unidirectional_constraints, return_complexes=true)
 
-    # Add objective constraint if specified
-    if objective_bound !== nothing
-        # Validate objective_bound is callable
-        if !isa(objective_bound, Function)
-            throw(ArgumentError("objective_bound must be a function that takes optimal objective value and returns a constraint bound"))
-        end
-
+    # Add objective bound constraint if specified (COBREXA pattern)
+    if !isnothing(objective_bound)
         # Get optimal objective value first
         objective_flux = COBREXA.optimized_values(
             constraints.balance;
@@ -1581,9 +1588,9 @@ function activity_concordance_analysis(
             settings,
         )
 
-        if objective_flux !== nothing
+        if !isnothing(objective_flux)
             @info "Objective flux determined" objective_flux
-            # Add objective bound constraint to limit feasible space
+            # Add objective bound constraint to limit feasible space (COBREXA way with *)
             constraints.balance *= :objective_bound^C.Constraint(
                 constraints.balance.objective.value,
                 objective_bound(objective_flux)
@@ -1598,7 +1605,7 @@ function activity_concordance_analysis(
             )
             @info "Added objective bound constraint" optimal_value = objective_flux bound_value = objective_bound(objective_flux)
         else
-            @warn "Could not determine optimal objective value, skipping objective constraint"
+            @warn "Could not determine optimal objective value, skipping objective bound"
         end
     end
 
