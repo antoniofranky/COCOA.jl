@@ -3,8 +3,6 @@ Irreversible reaction splitting for model preprocessing.
 
 This module converts reversible reactions into irreversible forward/backward pairs,
 following COBRA Toolbox conventions while optimized for Julia performance.
-
-Based on MATLAB COBRA Toolbox `convertToIrreversible` function.
 =#
 
 

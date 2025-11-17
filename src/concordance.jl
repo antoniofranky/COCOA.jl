@@ -430,9 +430,719 @@ mutable struct PairConcordanceState
     PairConcordanceState() = new(NaN, NaN, NaN, NaN, false, false, false, false, NaN)
 end
 
+
+"""
+    activity_concordance_analysis(model; optimizer, kwargs...)
+
+Perform comprehensive concordance analysis to identify concordant complex pairs in metabolic networks.
+
+This is the main function for concordance analysis in COCOA.jl. It systematically identifies
+pairs of complexes that can maintain the same activity ratio across the feasible flux space,
+which is fundamental for understanding concentration robustness in biochemical networks.
+
+Follows COBREXA.jl patterns for constraint building and modification.
+
+# Result Overview
+Returns a `ConcordanceResults` with:
+- **Concordance matrix**: Binary relationships between all complex pairs
+    - 0 = non-concordant, 1 = concordant,   2 = trivially concordant, 3 = balanced, 4 = trivally balanced 
+- **Activity ranges**: Min/max activity values for each complex  
+- **Concordance modules**: Groups of mutually concordant complexes
+- **Analysis statistics**: Comprehensive metrics and processing information
+- **Optional kinetic data**: Kinetic modules and interface reactions (if requested)
+
+# Arguments
+- `model`: Metabolic model (supports COBREXA.jl compatible formats)
+
+# Required Keyword Arguments
+- `optimizer`: Optimization solver (e.g., HiGHS.Optimizer)
+
+# Optional Keyword Arguments
+
+## Model Processing
+- `objective_bound=nothing`: Objective bound function (e.g., `relative_tolerance_bound(0.999)`), or `nothing` to skip
+- `use_unidirectional_constraints::Bool=true`: Use unidirectional flux constraints
+
+# Objective Bound Pattern
+The `objective_bound` parameter follows COBREXA's pattern from `flux_variability_analysis`.
+Pass a bound function like `relative_tolerance_bound(0.999)` or `absolute_tolerance_bound(1e-5)`,
+or `nothing` to perform analysis without objective bounding.
+
+# Examples
+```julia
+using HiGHS
+import COBREXA
+
+# Basic concordance analysis (no objective bound)
+results = activity_concordance_analysis(
+    model;
+    optimizer=HiGHS.Optimizer
+)
+
+# With 99.9% objective bound (following COBREXA FVA pattern)
+results = activity_concordance_analysis(
+    model;
+    optimizer=HiGHS.Optimizer,
+    objective_bound=COBREXA.relative_tolerance_bound(0.999)
+)
+
+# With absolute tolerance bound
+results = activity_concordance_analysis(
+    model;
+    optimizer=HiGHS.Optimizer,
+    objective_bound=COBREXA.absolute_tolerance_bound(1e-5)
+)
+
+# With custom tolerances and batch size
+results = activity_concordance_analysis(
+    model;
+    optimizer=HiGHS.Optimizer,
+    objective_bound=COBREXA.relative_tolerance_bound(0.95),
+    concordance_tolerance=1e-5,
+    batch_size=100_000,
+    seed=1234
+)
+```
+
+## Analysis Parameters
+- `concordance_tolerance::Float64=NaN`: Tolerance for concordance detection
+- `balanced_threshold::Float64=NaN`: Threshold for balanced complex detection
+- `cv_threshold::Float64=NaN`: Coefficient of variation threshold for filtering
+- `cv_epsilon::Float64=1e-16`: Small value added to avoid division by zero in CV calculation
+- `sample_size::Int=100`: Number of samples for coefficient of variation estimation
+- `min_valid_samples::Int=10`: Minimum valid samples required for CV calculation
+- `seed::Int=0`: Random seed for reproducible sampling (0 uses global RNG)
+
+## Performance Settings
+- `batch_size::Int=50_000`: Number of candidate pairs processed per batch
+- `workers=D.workers()`: Worker processes for parallel computation
+- `settings=[]`: Solver-specific settings vector
+- `use_transitivity::Bool=true`: Use transitivity relationships to reduce computation
+
+## Sampling Options  
+- `n_burnin::Int=50`: Burnin samples for warmup point generation
+- `n_chains::Int=1`: Number of parallel chains (for future use)
+- `kinetic_analysis::Bool=false`: Apply kinetic module analysis to results
+
+# Returns
+`ConcordanceResults` containing:
+- `concordance_matrix`: Sparse boolean matrix of concordant pairs
+- `activity_ranges`: Activity variability ranges for each complex
+- `concordance_modules`: Concordance modules (connected components)
+- `stats`: Comprehensive analysis statistics
+- Additional fields for kinetic analysis (if enabled)
+
+# Statistics Dictionary
+The `stats` field contains detailed analysis metrics:
+
+## Core Results
+- `n_concordant_pairs`: Total concordant pairs found
+- `n_candidate_pairs`: Candidate pairs after filtering  
+- `n_computed_pairs`: Pairs found via optimization
+- `n_trivial_pairs`: Trivially concordant pairs
+- `n_non_concordant_pairs`: Non-concordant pairs
+
+## Processing Statistics
+- `batches_completed`: Number of optimization batches
+- `elapsed_time`: Total analysis time (seconds)
+- `n_candidates_skipped_by_transitivity`: Pairs skipped via transitivity
+
+## Model Information
+- `n_complexes`: Total complexes in model
+- `n_balanced`: Balanced complexes
+- `n_modules`: Concordance modules found
+"""
+function activity_concordance_analysis(
+    model;
+    optimizer,
+    settings=[],
+    objective_bound=nothing,
+    workers=D.workers(),
+    balanced_threshold::Float64=1e-8,
+    concordance_tolerance::Float64=1e-7,
+    cv_threshold::Float64=1e-7,
+    cv_epsilon::Float64=1e-16,
+    sample_size::Int=100,
+    batch_size::Int=50_000,
+    min_valid_samples::Int=10,
+    seed::UInt=rand(UInt),
+    use_unidirectional_constraints::Bool=false,
+    use_transitivity::Bool=true,
+    n_burnin::Int=50,
+    n_chains::Int=1,
+    kinetic_analysis::Bool=true,
+)
+    start_time = time()
+
+    @info "Starting concordance analysis" n_workers = length(workers) concordance_tolerance balanced_threshold cv_threshold sample_size use_unidirectional_constraints batch_size
+
+    constraints, complexes =
+        concordance_constraints(model; use_unidirectional_constraints, return_complexes=true)
+
+    # Add objective bound constraint if specified (COBREXA pattern)
+    if !isnothing(objective_bound)
+        # Get optimal objective value first
+        objective_flux = COBREXA.optimized_values(
+            constraints.balance;
+            objective=constraints.balance.objective.value,
+            output=constraints.balance.objective,
+            optimizer,
+            settings,
+        )
+
+        if !isnothing(objective_flux)
+            @info "Objective flux determined" objective_flux
+            # Add objective bound constraint to limit feasible space (COBREXA way with *)
+            constraints.balance *= :objective_bound^C.Constraint(
+                constraints.balance.objective.value,
+                objective_bound(objective_flux)
+            )
+            constraints.charnes_cooper.positive *= :objective_bound^C.Constraint(
+                constraints.charnes_cooper.positive.objective.value,
+                objective_bound(objective_flux)
+            )
+            constraints.charnes_cooper.negative *= :objective_bound^C.Constraint(
+                constraints.charnes_cooper.negative.objective.value,
+                objective_bound(objective_flux)
+            )
+            @info "Added objective bound constraint" optimal_value = objective_flux bound_value = objective_bound(objective_flux)
+        else
+            @warn "Could not determine optimal objective value, skipping objective bound"
+        end
+    end
+
+    n_complexes = length(complexes)
+    # Get sorted complex IDs for fully deterministic ConcordanceTracker initialization
+    # Sort by string representation to ensure consistent ordering across platforms
+    complex_ids = sort!(collect(keys(complexes)); by=string)
+
+    # Get correct reaction count from constraints (accounts for reaction splitting)
+    n_reactions = C.var_count(constraints.balance)
+    n_metabolites = length(constraints.balance.flux_stoichiometry)
+
+    @info "Model statistics" n_complexes n_reactions n_metabolites
+
+    # Get canonical metabolite ordering
+    all_metabolites = Set{Symbol}()
+    for complex in values(complexes)
+        for (met_id, _) in complex
+            push!(all_metabolites, met_id)
+        end
+    end
+    metabolite_ids = sort!(collect(all_metabolites); by=string)
+
+    # Construct Y matrix once for all trivial relationship detection
+    @info "Building Y matrix for trivial relationship detection"
+    Y_matrix, Y_metabolite_ids, Y_complex_ids = Y_matrix_from_constraints(constraints; return_ids=true)
+
+    @info "Finding trivially balanced complexes"
+    initial_balanced = find_trivially_balanced_complexes_sparse(Y_matrix, Y_metabolite_ids, Y_complex_ids)
+    trivially_balanced = extend_trivially_balanced_complexes_sparse(Y_matrix, Y_metabolite_ids, Y_complex_ids, initial_balanced)
+    @info "Found trivially balanced complexes" n_trivivally_balanced = length(trivially_balanced)
+
+    @info "Finding trivially concordant pairs"
+    trivial_pairs = find_trivially_concordant_pairs_sparse(Y_matrix, Y_metabolite_ids, Y_complex_ids)
+    @info "Found trivially concordant pairs" n_trivially_concordant = length(trivial_pairs)
+
+    # Initialize basic matrix structure - we'll build the complete matrix later
+    n_complexes = length(complex_ids)
+    complex_idx = Dict(id => idx for (idx, id) in enumerate(complex_ids))
+
+
+    # Set up RNG early for deterministic sampling
+    rng = StableRNGs.StableRNG(seed)
+
+    # Use the separated AVA function with warmup point generation and external timing
+    ava_digits = max(1, -floor(Int, log10(concordance_tolerance)))
+    ava_output_func = (dir, om) -> ava_output_with_warmup(dir, om; digits=ava_digits)
+    @info "Running Activity Variability Analysis (AVA)"
+    ava_time = @elapsed ava_results = activity_variability_analysis(
+        constraints,
+        complex_ids;
+        optimizer=optimizer,
+        settings=settings,
+        workers=workers,
+        output=ava_output_func,
+        output_type=Tuple{Float64,Vector{Float64}},
+        return_warmup_points=true
+    )
+
+    ava_time_str = Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, ava_time * 1000)), "HH:MM:SS.s")
+    @info "AVA processing complete [$ava_time_str]"
+
+    concordance_tracker = ConcordanceTracker(complex_ids)
+
+    # Extract results from AVA (now returns a named tuple when return_warmup_points=true)
+    activity_ranges = ava_results.activity_ranges
+    warmup = ava_results.warmup_points
+
+    # # Check feasibility of warmup points if objective bound is applied
+    # if objective_bound !== nothing && !isempty(warmup_points) && haskey(constraints.balance, :objective_bound)
+    #     @info "Checking feasibility of warmup points with objective bound"
+    #     n_feasible = 0
+    #     n_infeasible = 0
+
+    #     obj_constraint = constraints.balance.objective_bound
+
+    #     for (i, point) in enumerate(warmup_points)
+    #         # Check if point satisfies the objective bound constraint
+    #         obj_value = sum(obj_constraint.value.weights[j] * point[obj_constraint.value.idxs[j]] for j in 1:length(obj_constraint.value.idxs) if obj_constraint.value.idxs[j] <= length(point))
+
+    #         bound = obj_constraint.bound
+    #         is_feasible = if bound isa C.Between
+    #             bound.lower <= obj_value <= bound.upper
+    #         elseif bound isa C.EqualTo
+    #             abs(obj_value - bound.equal_to) < 1e-9
+    #         else
+    #             true  # Unknown bound type, assume feasible
+    #         end
+
+    #         if is_feasible
+    #             n_feasible += 1
+    #         else
+    #             n_infeasible += 1
+    #             @debug "Infeasible warmup point" point_idx = i obj_value = obj_value bound = bound
+    #         end
+    #     end
+
+    #     @info "Warmup point feasibility check" n_total = length(warmup_points) n_feasible = n_feasible n_infeasible = n_infeasible
+
+    #     if n_infeasible > 0
+    #         @warn "$(n_infeasible) warmup points are infeasible with objective bound - this may cause sampling issues"
+    #     end
+    # end
+
+    # Use BitVectors consistently for optimal performance with large models (50K+ reactions)
+    n_complexes = length(concordance_tracker.idx_to_id)
+
+    # Initialize BitVector masks in the ConcordanceTracker
+    ensure_mask_allocated!(concordance_tracker, :balanced)
+    ensure_mask_allocated!(concordance_tracker, :positive)
+    ensure_mask_allocated!(concordance_tracker, :negative)
+    ensure_mask_allocated!(concordance_tracker, :unrestricted)
+
+    # Get references to the BitVector masks for efficient access
+    balanced_complexes = get_mask(concordance_tracker, :balanced)
+    positive_complexes = get_mask(concordance_tracker, :positive)
+    negative_complexes = get_mask(concordance_tracker, :negative)
+    unrestricted_complexes = get_mask(concordance_tracker, :unrestricted)
+
+    # Build BitVector mask for trivially balanced complexes for O(1) lookups
+    trivially_balanced_mask = falses(n_complexes)
+    for (i, cid) in enumerate(concordance_tracker.idx_to_id)
+        if cid in trivially_balanced
+            trivially_balanced_mask[i] = true
+        end
+    end
+
+    # Optimized complex classification with minimal branching
+    @inbounds for i in eachindex(activity_ranges)
+        # Fast BitVector lookup with early exit
+        if trivially_balanced_mask[i]
+            balanced_complexes[i] = true
+            continue
+        end
+
+        min_val, max_val = activity_ranges[i]
+
+        # Branchless classification using boolean arithmetic
+        is_inactive = isnan(min_val) || isnan(max_val)
+
+        if is_inactive
+            unrestricted_complexes[i] = true
+        else
+            @fastmath begin
+                abs_min = abs(min_val)
+                abs_max = abs(max_val)
+
+                is_balanced = (abs_min < balanced_threshold) & (abs_max < balanced_threshold)
+                is_positive = !is_balanced & (min_val >= -balanced_threshold)
+                is_negative = !is_balanced & !is_positive & (max_val <= balanced_threshold)
+
+                balanced_complexes[i] = is_balanced
+                positive_complexes[i] = is_positive
+                negative_complexes[i] = is_negative
+                unrestricted_complexes[i] = !(is_balanced | is_positive | is_negative)
+            end
+        end
+    end
+
+    @info "Complex classification" balanced = count(balanced_complexes) trivially_balanced = length(trivially_balanced) positive = count(positive_complexes) negative = count(negative_complexes) unrestricted = count(unrestricted_complexes)
+
+    # Capture counts for statistics before any potential variable changes
+    n_balanced_complexes = count(balanced_complexes)
+    n_trivially_balanced_complexes = length(trivially_balanced)
+
+    for (c1_id, c2_id) in trivial_pairs
+        union_sets!(concordance_tracker, concordance_tracker.id_to_idx[c1_id], concordance_tracker.id_to_idx[c2_id])
+    end
+
+    # Note: Balanced complexes are handled separately in the matrix construction
+    # They should not be added to the concordance tracker as they don't participate
+    # in flux ratio concordance analysis (zero flux = undefined ratios)
+
+    # Create filtered activities constraint tree excluding balanced complexes for memory efficiency
+    active_complex_ids = [
+        concordance_tracker.idx_to_id[i]
+        for i in eachindex(concordance_tracker.idx_to_id)
+        if !balanced_complexes[i]
+    ]
+
+    filtered_activities = C.ConstraintTree(
+        id => constraints.activities[id]
+        for id in active_complex_ids
+        if haskey(constraints.activities, id)
+    )
+
+    # Use tracker's idx_to_id directly as complexes_vector (it's already a Vector{Symbol})
+    complexes_vector = concordance_tracker.idx_to_id
+
+    # Process trivial pairs into indices set with pre-allocated capacity
+    trivial_pairs_indices = Set{Tuple{Int,Int}}()
+    sizehint!(trivial_pairs_indices, length(trivial_pairs))
+
+    # Cache lookups for better performance
+    id_to_idx = concordance_tracker.id_to_idx
+
+    for (c1_id, c2_id) in trivial_pairs
+        if haskey(id_to_idx, c1_id) && haskey(id_to_idx, c2_id)
+            c1_idx = id_to_idx[c1_id]
+            c2_idx = id_to_idx[c2_id]
+            canonical_pair = c1_idx < c2_idx ? (c1_idx, c2_idx) : (c2_idx, c1_idx)
+            push!(trivial_pairs_indices, canonical_pair)
+        end
+    end
+    @info "Generating candidate pairs via coefficient of variance..."
+
+    decimals = max(0, -floor(Int, log10(concordance_tolerance)))
+    aggregate = rows -> round.(vec(hcat(rows...)), digits=decimals)
+    @info "Sampling schedule"
+
+    # Sampling strategy for concordance analysis
+    # Formula: n_samples_collected = n_chains × n_starting_points × n_iterations_collected
+
+    # 1. Configure to produce exactly sample_size samples
+    n_iterations_to_collect = 1  # Single sample per starting point
+    n_starting_points = sample_size  # Exactly sample_size starting points for sample_size samples
+
+    # 2. Minimal burn-in since each starting point is already diverse
+    spacing = 1   # No spacing needed since each starting point is independent
+
+    # 3. Calculate expected total
+    expected_samples = n_chains * n_starting_points * n_iterations_to_collect
+
+    @info "Sampling configuration" n_chains n_starting_points n_iterations_to_collect n_burnin spacing target = sample_size expected = expected_samples warmup_size = size(warmup, 1)
+
+    # 4. Define single iteration to collect after burn-in
+    iterations_to_collect = [n_burnin]  # Single well-converged sample per starting point
+
+    # 5. Generate exactly sample_size starting points using stratified approach
+    # Distribute across strategies to ensure comprehensive coverage
+    n_extreme_points = min(sample_size ÷ 3, size(warmup, 1))  # 1/3 from extremes
+    n_center_points = min(1, sample_size - n_extreme_points)  # 1 center point if space allows
+    n_random_points = sample_size - n_extreme_points - n_center_points  # Rest as random combinations
+
+    # Ensure we don't exceed sample_size
+    total_planned = n_extreme_points + n_center_points + n_random_points
+    if total_planned != sample_size
+        @warn "Starting point allocation mismatch" planned = total_planned target = sample_size
+        n_random_points = sample_size - n_extreme_points - n_center_points
+    end
+
+    # Pre-allocate start_variables_list with exact size for better performance
+    start_variables_list = Vector{Vector{Float64}}()
+    sizehint!(start_variables_list, sample_size)
+
+    # Strategy 1: Use extreme boundary points for maximum activity ranges
+    if n_extreme_points > 0 && !isempty(warmup)
+        # Select most diverse extreme points (max distance from each other)
+        extreme_indices = Random.rand(rng, 1:size(warmup, 1), n_extreme_points)
+        for idx in extreme_indices
+            push!(start_variables_list, warmup[idx, :])
+        end
+    end
+
+    # Strategy 2: Use center point for balanced exploration
+    if n_center_points > 0 && !isempty(warmup)
+        # Create center point as average of all warmup points
+        center_point = vec(Statistics.mean(warmup, dims=1))
+        push!(start_variables_list, center_point)
+    end
+
+    # Strategy 3: Generate diverse random points as convex combinations
+    # Optimized with pre-allocated buffers to minimize allocations
+    if n_random_points > 0 && size(warmup, 1) >= 2
+        # Pre-allocate reusable buffers
+        max_base_points = min(4, size(warmup, 1))
+        weights = Vector{Float64}(undef, max_base_points)
+        base_indices = Vector{Int}(undef, max_base_points)
+        random_flux = Vector{Float64}(undef, size(warmup, 2))
+
+        @inbounds for i in 1:n_random_points
+            # Use varying numbers of base points for different exploration depths
+            n_base_points = 2 + (i % 3)  # Alternate between 2, 3, 4 base points
+            n_base_points = min(n_base_points, size(warmup, 1))
+
+            # Reuse pre-allocated arrays
+            Random.rand!(rng, view(base_indices, 1:n_base_points), 1:size(warmup, 1))
+            Random.rand!(rng, view(weights, 1:n_base_points))
+
+            # Normalize weights in-place
+            weight_sum = sum(view(weights, 1:n_base_points))
+            @simd for j in 1:n_base_points
+                weights[j] /= weight_sum
+            end
+
+            # Create convex combination with pre-allocated buffer
+            fill!(random_flux, 0.0)
+            @simd for j in 1:n_base_points
+                @. random_flux += weights[j] * warmup[base_indices[j], :]
+            end
+
+            push!(start_variables_list, copy(random_flux))  # Copy to avoid aliasing
+        end
+    end
+
+    start_variables = if isempty(start_variables_list)
+        warmup  # Fallback to all warmup points
+    else
+        # Use more efficient matrix construction with vectorized copying
+        n_points = length(start_variables_list)
+        n_vars = length(start_variables_list[1])
+
+        # Pre-allocate matrix and use column-major filling for better cache performance
+        start_matrix = Matrix{Float64}(undef, n_points, n_vars)
+
+        # Vectorized copy for better performance
+        @inbounds for (i, point) in enumerate(start_variables_list)
+            # Use copyto! for vectorized copy instead of element-wise assignment
+            copyto!(view(start_matrix, i, :), point)
+        end
+        start_matrix
+    end
+
+    @info "Starting point composition" extreme_points = n_extreme_points center_points = n_center_points random_combinations = n_random_points total = size(start_variables, 1)    # 6. Run the sampler with deterministic seeding for reproducible results
+
+    @info "Sampling..."
+    samples_tree = COBREXA.sample_constraints(
+        COBREXA.sample_chain_achr,
+        constraints.balance;
+        output=filtered_activities,
+        start_variables=start_variables,
+        workers=workers,
+        seed=seed,
+        n_chains=n_chains,
+        collect_iterations=iterations_to_collect,
+        aggregate=aggregate,
+        aggregate_type=Vector{Float64}
+    )
+
+    n_samples_collected = length(first(samples_tree)[2])
+    @info "Sampling complete." n_samples_collected
+    @debug "First 5 samples collected" first_samples = collect(Iterators.take(samples_tree, 5))
+    @debug "Number of samples per activity variable" n_samples = length(first(samples_tree)[2])
+
+    # @debug "type of samples_tree" typeof(samples_tree)
+    @info "Creating chunked streaming filter for memory-efficient processing..."
+
+    @info "Using fixed batch size" batch_size = batch_size n_complexes = length(complexes_vector)
+
+    # Create direct streaming filter (eliminates redundant chunking layer)
+    streaming_filter = try
+        StreamingCandidateFilter(
+            complexes_vector,
+            trivial_pairs_indices,
+            samples_tree, # Pass the collected samples
+            concordance_tracker;
+            cv_threshold=cv_threshold,
+            cv_epsilon=cv_epsilon,
+            min_valid_samples=min_valid_samples,
+            use_transitivity=use_transitivity
+        )
+    catch e
+        @error "Failed to create streaming filter." exception = e
+        rethrow(e)
+    end
+
+    @info "Direct streaming filter created"
+
+    @info "Processing concordance tests with direct streaming (deterministic batch processing)"
+
+    # Create configuration object for type-stable processing
+    config = BatchProcessingConfig(
+        batch_size,
+        concordance_tolerance,
+        use_transitivity,
+        optimizer,
+        settings,
+        workers
+    )
+
+    concordance_time = @elapsed batch_results = process_streaming_batches(
+        constraints,
+        streaming_filter,
+        concordance_tracker,
+        config;
+        track_direct_pairs=!use_transitivity
+    )
+
+    concordance_time_str = Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, concordance_time * 1000)), "HH:MM:SS.s")
+    @info "Building concordance modules [$concordance_time_str]"
+    modules = extract_modules(concordance_tracker)
+
+    elapsed = time() - start_time
+
+    # Store intermediate processing statistics (but not final concordance counts yet)
+    intermediate_stats = Dict(
+        # Model information
+        "n_reactions" => n_reactions,
+        "n_metabolites" => n_metabolites,
+        "n_complexes" => n_complexes,
+        "n_balanced" => n_balanced_complexes,
+        "n_trivially_balanced" => n_trivially_balanced_complexes,
+        "n_trivial_pairs" => length(trivial_pairs),
+
+        # Processing statistics (keep the useful logging info)
+        "n_candidate_pairs" => batch_results.pairs_processed,
+        "n_non_concordant_pairs" => batch_results.non_concordant_pairs,
+        "n_candidates_skipped_by_transitivity" => streaming_filter.pairs_transitivity_concordant_filtered + streaming_filter.pairs_transitivity_non_concordant_filtered,
+        "n_timeout_pairs" => batch_results.timeout_pairs,
+        "n_infeasible_pairs" => batch_results.infeasible_pairs,
+        "n_unbounded_pairs" => batch_results.unbounded_pairs,
+        "n_infeasible_or_unbounded_pairs" => batch_results.infeasible_or_unbounded_pairs,
+        "n_resource_limit_pairs" => batch_results.resource_limit_pairs,
+        "n_numerical_error_pairs" => batch_results.numerical_error_pairs,
+        "n_other_error_pairs" => batch_results.other_error_pairs,
+        "n_total_optimizations" => batch_results.total_optimizations,
+        "batches_completed" => batch_results.batches_completed,
+        "elapsed_time" => elapsed,
+
+        # Algorithm parameters
+        "concordance_tolerance" => concordance_tolerance,
+        "balanced_threshold" => balanced_threshold,
+        "cv_threshold" => cv_threshold,
+        "cv_epsilon" => cv_epsilon,
+
+        # Sampling parameters
+        "sample_size" => sample_size,
+        "n_burnin" => n_burnin,
+        "n_chains" => n_chains,
+        "seed" => seed,
+
+        # Processing parameters 
+        "batch_size" => batch_size,
+        "min_valid_samples" => min_valid_samples,
+        "use_transitivity" => use_transitivity,
+        "use_unidirectional_constraints" => use_unidirectional_constraints,
+
+        # Model parameters
+        "n_workers" => length(workers),
+        "objective_bound" => objective_bound !== nothing ? "applied" : "none",
+
+        # Store batch processing results for reference
+        "batch_results_concordant_count" => batch_results.concordant_count,
+    )
+
+    # Add processing statistics if processed_mask is available
+    if concordance_tracker.processed_mask !== nothing
+        n_processed = count(concordance_tracker.processed_mask)
+        intermediate_stats["n_processed_complexes"] = n_processed
+        intermediate_stats["processing_completion_percent"] = round(n_processed / n_complexes * 100, digits=1)
+    end
+
+    @info "Building complete concordance matrix with all relationships"
+    concordance_matrix = build_complete_concordance_matrix(
+        n_complexes, complex_idx, trivially_balanced, trivial_pairs,
+        concordance_tracker, balanced_complexes, use_transitivity, batch_results
+    )
+
+    # Build ConcordanceResults using canonical ordering established earlier
+    # complex_ids already canonical from concordance_tracker
+    # metabolite_ids already canonical from earlier in function
+    # Get reaction names directly from constraints
+    feasible_reaction_names = get_reaction_names_from_constraints(constraints.balance)
+    reaction_ids = Symbol.(sort!(feasible_reaction_names; by=string))
+
+    # Create module mapping with balanced complexes as 0 and consecutive module IDs
+    module_mapping = fill(-1, length(complex_ids))  # Default: -1 for singleton complexes
+
+    # Create mapping from root representative to consecutive module ID
+    root_to_consecutive = Dict{Int,Int}()
+    next_module_id = 1
+
+    for (module_root, complex_list) in modules
+        if length(complex_list) > 1  # Only assign IDs to modules with multiple complexes
+            root_to_consecutive[module_root] = next_module_id
+            next_module_id += 1
+        end
+    end
+
+    # Assign module IDs to complexes
+    for (module_root, complex_list) in modules
+        for complex_id in complex_list
+            idx = concordance_tracker.id_to_idx[complex_id]
+            if balanced_complexes[idx]
+                # Balanced complexes get module_id = 0 (highest priority)
+                module_mapping[idx] = 0
+            elseif length(complex_list) > 1
+                # Regular concordance modules get consecutive positive IDs
+                module_mapping[idx] = root_to_consecutive[module_root]
+            else
+                # Singleton modules remain -1 (no concordance module)
+                module_mapping[idx] = -1
+            end
+        end
+    end
+
+    # Process lambda results into dict
+    lambda_dict = Dict{Tuple{Int,Int},Float64}()
+    for ((c1_idx, c2_idx, direction), lambda_val) in batch_results.optimization_results
+        if c1_idx <= length(complex_ids) && c2_idx <= length(complex_ids)
+            canonical_pair = c1_idx < c2_idx ? (c1_idx, c2_idx) : (c2_idx, c1_idx)
+            lambda_dict[canonical_pair] = lambda_val
+        end
+    end
+
+    # Build coordinate vectors for efficient concordance matrix construction
+    # All concordance relationships are now populated directly in the concordance_matrix
+    # via populate_trivial_relationships! and populate_discovered_relationships!
+
+    # Use the constructor with pre-built concordance matrix (more efficient than coordinate vectors)
+    complete_model = ConcordanceResults(
+        complex_ids,
+        reaction_ids,
+        Symbol.(metabolite_ids);
+        concordance_matrix=concordance_matrix,  # Pass pre-built matrix
+        activity_ranges=activity_ranges,
+        concordance_modules=module_mapping,
+        interface_reactions=falses(length(reaction_ids)),
+        acr_metabolites=Symbol[],
+        lambda_dict=lambda_dict,
+        stats=intermediate_stats  # Use intermediate stats for now
+    )
+
+    # NOW calculate the final concordance statistics from the actual concordance matrix
+    final_stats = calculate_final_concordance_statistics!(
+        complete_model,
+        intermediate_stats,
+        use_transitivity
+    )
+
+    # Update the complete model with the final statistics
+    complete_model.stats = final_stats
+
+    # Apply kinetic analysis if requested
+    if kinetic_analysis
+        apply_kinetic_analysis!(complete_model, constraints)
+    end
+
+    return complete_model
+end
+
+
 """
 Update pair concordance state with new solver result.
-Returns true if pair is still potentially concordant, false if definitely non-concordant.
+Returns true if pair is still potentially concordant, false if non-concordant.
 """
 @inline function update_pair_concordance!(
     state::PairConcordanceState,
@@ -1355,731 +2065,6 @@ function find_trivially_concordant_pairs_sparse(
     end
 
     return concordant_pairs
-end
-
-
-"""
-    activity_concordance_analysis(model; optimizer, objective_bound=nothing, kwargs...)
-
-Perform comprehensive concordance analysis to identify concordant complex pairs in metabolic networks.
-
-This is the main function for concordance analysis in COCOA.jl. It systematically identifies
-pairs of complexes that can maintain the same activity ratio across the feasible flux space,
-which is fundamental for understanding concentration robustness in biochemical networks.
-
-Follows COBREXA.jl patterns for constraint building and modification.
-
-# Result Overview
-Returns a `ConcordanceResults` with:
-- **Concordance matrix**: Binary relationships between all complex pairs
-- **Activity ranges**: Min/max activity values for each complex  
-- **Concordance modules**: Groups of mutually concordant complexes
-- **Analysis statistics**: Comprehensive metrics and processing information
-- **Optional kinetic data**: Kinetic modules and interface reactions (if requested)
-
-# Arguments
-- `model`: Metabolic model (supports COBREXA.jl compatible formats)
-
-# Required Keyword Arguments
-- `optimizer`: Optimization solver (e.g., HiGHS.Optimizer)
-
-# Optional Keyword Arguments
-
-## Model Processing
-- `objective_bound=nothing`: Objective bound function (e.g., `relative_tolerance_bound(0.999)`), or `nothing` to skip
-- `use_unidirectional_constraints::Bool=true`: Use unidirectional flux constraints
-
-# Objective Bound Pattern
-The `objective_bound` parameter follows COBREXA's pattern from `flux_variability_analysis`.
-Pass a bound function like `relative_tolerance_bound(0.999)` or `absolute_tolerance_bound(1e-5)`,
-or `nothing` to perform analysis without objective bounding.
-
-# Examples
-```julia
-using HiGHS
-import COBREXA
-
-# Basic concordance analysis (no objective bound)
-results = activity_concordance_analysis(
-    model;
-    optimizer=HiGHS.Optimizer
-)
-
-# With 99.9% objective bound (following COBREXA FVA pattern)
-results = activity_concordance_analysis(
-    model;
-    optimizer=HiGHS.Optimizer,
-    objective_bound=COBREXA.relative_tolerance_bound(0.999)
-)
-
-# With absolute tolerance bound
-results = activity_concordance_analysis(
-    model;
-    optimizer=HiGHS.Optimizer,
-    objective_bound=COBREXA.absolute_tolerance_bound(1e-5)
-)
-
-# With custom tolerances and batch size
-results = activity_concordance_analysis(
-    model;
-    optimizer=HiGHS.Optimizer,
-    objective_bound=COBREXA.relative_tolerance_bound(0.95),
-    concordance_tolerance=1e-5,
-    batch_size=100_000,
-    seed=1234
-)
-```
-
-## Analysis Parameters
-- `concordance_tolerance::Float64=NaN`: Tolerance for concordance detection
-- `balanced_threshold::Float64=NaN`: Threshold for balanced complex detection
-- `cv_threshold::Float64=NaN`: Coefficient of variation threshold for filtering
-- `cv_epsilon::Float64=1e-16`: Small value added to avoid division by zero in CV calculation
-- `sample_size::Int=100`: Number of samples for coefficient of variation estimation
-- `min_valid_samples::Int=10`: Minimum valid samples required for CV calculation
-- `seed::Int=0`: Random seed for reproducible sampling (0 uses global RNG)
-
-## Performance Settings
-- `batch_size::Int=50_000`: Number of candidate pairs processed per batch
-- `workers=D.workers()`: Worker processes for parallel computation
-- `settings=[]`: Solver-specific settings vector
-- `use_transitivity::Bool=true`: Use transitivity relationships to reduce computation
-
-## Advanced Options  
-- `n_burnin::Int=50`: Burnin samples for warmup point generation
-- `n_chains::Int=1`: Number of parallel chains (for future use)
-- `kinetic_analysis::Bool=false`: Apply kinetic module analysis to results
-
-# Returns
-`ConcordanceResults` containing:
-- `concordance_matrix`: Sparse boolean matrix of concordant pairs
-- `activity_ranges`: Activity variability ranges for each complex
-- `concordance_modules`: Concordance modules (connected components)
-- `stats`: Comprehensive analysis statistics
-- Additional fields for kinetic analysis (if enabled)
-
-# Statistics Dictionary
-The `stats` field contains detailed analysis metrics:
-
-## Core Results
-- `n_concordant_pairs`: Total concordant pairs found
-- `n_candidate_pairs`: Candidate pairs after filtering  
-- `n_computed_pairs`: Pairs found via optimization
-- `n_trivial_pairs`: Trivially concordant pairs
-- `n_non_concordant_pairs`: Non-concordant pairs
-
-## Processing Statistics
-- `batches_completed`: Number of optimization batches
-- `elapsed_time`: Total analysis time (seconds)
-- `n_candidates_skipped_by_transitivity`: Pairs skipped via transitivity
-
-## Model Information
-- `n_complexes`: Total complexes in model
-- `n_balanced`: Balanced complexes
-- `n_modules`: Concordance modules found
-
-# Notes
-- SBML models are automatically processed for compatibility
-- Tolerances are auto-detected from solver settings if not specified
-- Uses activity variability analysis internally for warmup point generation
-- Supports parallel processing across multiple workers
-- Results include comprehensive validation and consistency checks
-"""
-function activity_concordance_analysis(
-    model;
-    objective_bound=nothing,
-    optimizer,
-    settings=[],
-    workers=D.workers(),
-    balanced_threshold::Float64=1e-8,
-    concordance_tolerance::Float64=1e-7,
-    cv_threshold::Float64=1e-7,
-    cv_epsilon::Float64=1e-16,
-    sample_size::Int=100,
-    batch_size::Int=50_000,
-    min_valid_samples::Int=10,
-    seed::Int=0,
-    use_unidirectional_constraints::Bool=false,
-    use_transitivity::Bool=true,
-    n_burnin::Int=50,
-    n_chains::Int=1,
-    kinetic_analysis::Bool=true,
-)
-    start_time = time()
-
-    @info "Starting concordance analysis" n_workers = length(workers) concordance_tolerance balanced_threshold cv_threshold sample_size use_unidirectional_constraints batch_size
-
-    constraints, complexes =
-        concordance_constraints(model; use_unidirectional_constraints, return_complexes=true)
-
-    # Add objective bound constraint if specified (COBREXA pattern)
-    if !isnothing(objective_bound)
-        # Get optimal objective value first
-        objective_flux = COBREXA.optimized_values(
-            constraints.balance;
-            objective=constraints.balance.objective.value,
-            output=constraints.balance.objective,
-            optimizer,
-            settings,
-        )
-
-        if !isnothing(objective_flux)
-            @info "Objective flux determined" objective_flux
-            # Add objective bound constraint to limit feasible space (COBREXA way with *)
-            constraints.balance *= :objective_bound^C.Constraint(
-                constraints.balance.objective.value,
-                objective_bound(objective_flux)
-            )
-            constraints.charnes_cooper.positive *= :objective_bound^C.Constraint(
-                constraints.charnes_cooper.positive.objective.value,
-                objective_bound(objective_flux)
-            )
-            constraints.charnes_cooper.negative *= :objective_bound^C.Constraint(
-                constraints.charnes_cooper.negative.objective.value,
-                objective_bound(objective_flux)
-            )
-            @info "Added objective bound constraint" optimal_value = objective_flux bound_value = objective_bound(objective_flux)
-        else
-            @warn "Could not determine optimal objective value, skipping objective bound"
-        end
-    end
-
-    n_complexes = length(complexes)
-    # Get sorted complex IDs for fully deterministic ConcordanceTracker initialization
-    # Sort by string representation to ensure consistent ordering across platforms
-    complex_ids = sort!(collect(keys(complexes)); by=string)
-
-    # Get correct reaction count from constraints (accounts for reaction splitting)
-    n_reactions = C.var_count(constraints.balance)
-    n_metabolites = length(constraints.balance.flux_stoichiometry)
-
-    @info "Model statistics" n_complexes n_reactions n_metabolites
-
-    # Get canonical metabolite ordering
-    all_metabolites = Set{Symbol}()
-    for complex in values(complexes)
-        for (met_id, _) in complex
-            push!(all_metabolites, met_id)
-        end
-    end
-    metabolite_ids = sort!(collect(all_metabolites); by=string)
-
-    # Construct Y matrix once for all trivial relationship detection
-    @info "Building Y matrix for trivial relationship detection"
-    Y_matrix, Y_metabolite_ids, Y_complex_ids = Y_matrix_from_constraints(constraints; return_ids=true)
-
-    @info "Finding trivially balanced complexes"
-    initial_balanced = find_trivially_balanced_complexes_sparse(Y_matrix, Y_metabolite_ids, Y_complex_ids)
-    trivially_balanced = extend_trivially_balanced_complexes_sparse(Y_matrix, Y_metabolite_ids, Y_complex_ids, initial_balanced)
-    @info "Found trivially balanced complexes" n_trivivally_balanced = length(trivially_balanced)
-
-    @info "Finding trivially concordant pairs"
-    trivial_pairs = find_trivially_concordant_pairs_sparse(Y_matrix, Y_metabolite_ids, Y_complex_ids)
-    @info "Found trivially concordant pairs" n_trivially_concordant = length(trivial_pairs)
-
-    # Initialize basic matrix structure - we'll build the complete matrix later
-    n_complexes = length(complex_ids)
-    complex_idx = Dict(id => idx for (idx, id) in enumerate(complex_ids))
-
-
-    # Set up RNG early for deterministic sampling
-    rng = if seed == 0
-        Random.GLOBAL_RNG
-    else
-        StableRNGs.StableRNG(seed)
-    end
-
-    # Use the separated AVA function with warmup point generation and external timing
-    ava_digits = max(1, -floor(Int, log10(concordance_tolerance)))
-    ava_output_func = (dir, om) -> ava_output_with_warmup(dir, om; digits=ava_digits)
-    @info "Running Activity Variability Analysis (AVA)"
-    ava_time = @elapsed ava_results = activity_variability_analysis(
-        constraints,
-        complex_ids;
-        optimizer=optimizer,
-        settings=settings,
-        workers=workers,
-        output=ava_output_func,
-        output_type=Tuple{Float64,Vector{Float64}},
-        return_warmup_points=true
-    )
-
-    ava_time_str = Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, ava_time * 1000)), "HH:MM:SS.s")
-    @info "AVA processing complete [$ava_time_str]"
-
-    concordance_tracker = ConcordanceTracker(complex_ids)
-
-    # Extract results from AVA (now returns a named tuple when return_warmup_points=true)
-    activity_ranges = ava_results.activity_ranges
-    warmup = ava_results.warmup_points
-
-    # # Check feasibility of warmup points if objective bound is applied
-    # if objective_bound !== nothing && !isempty(warmup_points) && haskey(constraints.balance, :objective_bound)
-    #     @info "Checking feasibility of warmup points with objective bound"
-    #     n_feasible = 0
-    #     n_infeasible = 0
-
-    #     obj_constraint = constraints.balance.objective_bound
-
-    #     for (i, point) in enumerate(warmup_points)
-    #         # Check if point satisfies the objective bound constraint
-    #         obj_value = sum(obj_constraint.value.weights[j] * point[obj_constraint.value.idxs[j]] for j in 1:length(obj_constraint.value.idxs) if obj_constraint.value.idxs[j] <= length(point))
-
-    #         bound = obj_constraint.bound
-    #         is_feasible = if bound isa C.Between
-    #             bound.lower <= obj_value <= bound.upper
-    #         elseif bound isa C.EqualTo
-    #             abs(obj_value - bound.equal_to) < 1e-9
-    #         else
-    #             true  # Unknown bound type, assume feasible
-    #         end
-
-    #         if is_feasible
-    #             n_feasible += 1
-    #         else
-    #             n_infeasible += 1
-    #             @debug "Infeasible warmup point" point_idx = i obj_value = obj_value bound = bound
-    #         end
-    #     end
-
-    #     @info "Warmup point feasibility check" n_total = length(warmup_points) n_feasible = n_feasible n_infeasible = n_infeasible
-
-    #     if n_infeasible > 0
-    #         @warn "$(n_infeasible) warmup points are infeasible with objective bound - this may cause sampling issues"
-    #     end
-    # end
-
-    # Use BitVectors consistently for optimal performance with large models (50K+ reactions)
-    n_complexes = length(concordance_tracker.idx_to_id)
-
-    # Initialize BitVector masks in the ConcordanceTracker
-    ensure_mask_allocated!(concordance_tracker, :balanced)
-    ensure_mask_allocated!(concordance_tracker, :positive)
-    ensure_mask_allocated!(concordance_tracker, :negative)
-    ensure_mask_allocated!(concordance_tracker, :unrestricted)
-
-    # Get references to the BitVector masks for efficient access
-    balanced_complexes = get_mask(concordance_tracker, :balanced)
-    positive_complexes = get_mask(concordance_tracker, :positive)
-    negative_complexes = get_mask(concordance_tracker, :negative)
-    unrestricted_complexes = get_mask(concordance_tracker, :unrestricted)
-
-    # Build BitVector mask for trivially balanced complexes for O(1) lookups
-    trivially_balanced_mask = falses(n_complexes)
-    for (i, cid) in enumerate(concordance_tracker.idx_to_id)
-        if cid in trivially_balanced
-            trivially_balanced_mask[i] = true
-        end
-    end
-
-    # Optimized complex classification with minimal branching
-    @inbounds for i in eachindex(activity_ranges)
-        # Fast BitVector lookup with early exit
-        if trivially_balanced_mask[i]
-            balanced_complexes[i] = true
-            continue
-        end
-
-        min_val, max_val = activity_ranges[i]
-
-        # Branchless classification using boolean arithmetic
-        is_inactive = isnan(min_val) || isnan(max_val)
-
-        if is_inactive
-            unrestricted_complexes[i] = true
-        else
-            # Use @fastmath for performance-critical comparisons
-            @fastmath begin
-                abs_min = abs(min_val)
-                abs_max = abs(max_val)
-
-                is_balanced = (abs_min < balanced_threshold) & (abs_max < balanced_threshold)
-                is_positive = !is_balanced & (min_val >= -balanced_threshold)
-                is_negative = !is_balanced & !is_positive & (max_val <= balanced_threshold)
-
-                balanced_complexes[i] = is_balanced
-                positive_complexes[i] = is_positive
-                negative_complexes[i] = is_negative
-                unrestricted_complexes[i] = !(is_balanced | is_positive | is_negative)
-            end
-        end
-    end
-
-    @info "Complex classification" balanced = count(balanced_complexes) trivially_balanced = length(trivially_balanced) positive = count(positive_complexes) negative = count(negative_complexes) unrestricted = count(unrestricted_complexes)
-
-    # Capture counts for statistics before any potential variable changes
-    n_balanced_complexes = count(balanced_complexes)
-    n_trivially_balanced_complexes = length(trivially_balanced)
-
-    for (c1_id, c2_id) in trivial_pairs
-        union_sets!(concordance_tracker, concordance_tracker.id_to_idx[c1_id], concordance_tracker.id_to_idx[c2_id])
-    end
-
-    # Note: Balanced complexes are handled separately in the matrix construction
-    # They should not be added to the concordance tracker as they don't participate
-    # in flux ratio concordance analysis (zero flux = undefined ratios)
-
-    # Create filtered activities constraint tree excluding balanced complexes for memory efficiency
-    active_complex_ids = [
-        concordance_tracker.idx_to_id[i]
-        for i in eachindex(concordance_tracker.idx_to_id)
-        if !balanced_complexes[i]
-    ]
-
-    filtered_activities = C.ConstraintTree(
-        id => constraints.activities[id]
-        for id in active_complex_ids
-        if haskey(constraints.activities, id)
-    )
-
-    # Use tracker's idx_to_id directly as complexes_vector (it's already a Vector{Symbol})
-    complexes_vector = concordance_tracker.idx_to_id
-
-    # Process trivial pairs into indices set with pre-allocated capacity
-    trivial_pairs_indices = Set{Tuple{Int,Int}}()
-    sizehint!(trivial_pairs_indices, length(trivial_pairs))
-
-    # Cache lookups for better performance
-    id_to_idx = concordance_tracker.id_to_idx
-
-    for (c1_id, c2_id) in trivial_pairs
-        if haskey(id_to_idx, c1_id) && haskey(id_to_idx, c2_id)
-            c1_idx = id_to_idx[c1_id]
-            c2_idx = id_to_idx[c2_id]
-            canonical_pair = c1_idx < c2_idx ? (c1_idx, c2_idx) : (c2_idx, c1_idx)
-            push!(trivial_pairs_indices, canonical_pair)
-        end
-    end
-    @info "Generating candidate pairs via coefficient of variance..."
-
-    decimals = max(0, -floor(Int, log10(concordance_tolerance)))
-    aggregate = rows -> round.(vec(hcat(rows...)), digits=decimals)
-    @info "Sampling schedule"
-
-    # Sampling strategy for concordance analysis
-    # Formula: n_samples_collected = n_chains × n_starting_points × n_iterations_collected
-
-    # 1. Configure to produce exactly sample_size samples
-    n_iterations_to_collect = 1  # Single sample per starting point
-    n_starting_points = sample_size  # Exactly sample_size starting points for sample_size samples
-
-    # 2. Minimal burn-in since each starting point is already diverse
-    spacing = 1   # No spacing needed since each starting point is independent
-
-    # 3. Calculate expected total
-    expected_samples = n_chains * n_starting_points * n_iterations_to_collect
-
-    @info "Sampling configuration" n_chains n_starting_points n_iterations_to_collect n_burnin spacing target = sample_size expected = expected_samples warmup_size = size(warmup, 1)
-
-    # 4. Define single iteration to collect after burn-in
-    iterations_to_collect = [n_burnin]  # Single well-converged sample per starting point
-
-    # 5. Generate exactly sample_size starting points using stratified approach
-    # Distribute across strategies to ensure comprehensive coverage
-    n_extreme_points = min(sample_size ÷ 3, size(warmup, 1))  # 1/3 from extremes
-    n_center_points = min(1, sample_size - n_extreme_points)  # 1 center point if space allows
-    n_random_points = sample_size - n_extreme_points - n_center_points  # Rest as random combinations
-
-    # Ensure we don't exceed sample_size
-    total_planned = n_extreme_points + n_center_points + n_random_points
-    if total_planned != sample_size
-        @warn "Starting point allocation mismatch" planned = total_planned target = sample_size
-        n_random_points = sample_size - n_extreme_points - n_center_points
-    end
-
-    # Pre-allocate start_variables_list with exact size for better performance
-    start_variables_list = Vector{Vector{Float64}}()
-    sizehint!(start_variables_list, sample_size)
-
-    # Strategy 1: Use extreme boundary points for maximum activity ranges
-    if n_extreme_points > 0 && !isempty(warmup)
-        # Select most diverse extreme points (max distance from each other)
-        extreme_indices = Random.rand(rng, 1:size(warmup, 1), n_extreme_points)
-        for idx in extreme_indices
-            push!(start_variables_list, warmup[idx, :])
-        end
-    end
-
-    # Strategy 2: Use center point for balanced exploration
-    if n_center_points > 0 && !isempty(warmup)
-        # Create center point as average of all warmup points
-        center_point = vec(Statistics.mean(warmup, dims=1))
-        push!(start_variables_list, center_point)
-    end
-
-    # Strategy 3: Generate diverse random points as convex combinations
-    # Optimized with pre-allocated buffers to minimize allocations
-    if n_random_points > 0 && size(warmup, 1) >= 2
-        # Pre-allocate reusable buffers
-        max_base_points = min(4, size(warmup, 1))
-        weights = Vector{Float64}(undef, max_base_points)
-        base_indices = Vector{Int}(undef, max_base_points)
-        random_flux = Vector{Float64}(undef, size(warmup, 2))
-
-        @inbounds for i in 1:n_random_points
-            # Use varying numbers of base points for different exploration depths
-            n_base_points = 2 + (i % 3)  # Alternate between 2, 3, 4 base points
-            n_base_points = min(n_base_points, size(warmup, 1))
-
-            # Reuse pre-allocated arrays
-            Random.rand!(rng, view(base_indices, 1:n_base_points), 1:size(warmup, 1))
-            Random.rand!(rng, view(weights, 1:n_base_points))
-
-            # Normalize weights in-place
-            weight_sum = sum(view(weights, 1:n_base_points))
-            @simd for j in 1:n_base_points
-                weights[j] /= weight_sum
-            end
-
-            # Create convex combination with pre-allocated buffer
-            fill!(random_flux, 0.0)
-            @simd for j in 1:n_base_points
-                @. random_flux += weights[j] * warmup[base_indices[j], :]
-            end
-
-            push!(start_variables_list, copy(random_flux))  # Copy to avoid aliasing
-        end
-    end
-
-    start_variables = if isempty(start_variables_list)
-        warmup  # Fallback to all warmup points
-    else
-        # Use more efficient matrix construction with vectorized copying
-        n_points = length(start_variables_list)
-        n_vars = length(start_variables_list[1])
-
-        # Pre-allocate matrix and use column-major filling for better cache performance
-        start_matrix = Matrix{Float64}(undef, n_points, n_vars)
-
-        # Vectorized copy for better performance
-        @inbounds for (i, point) in enumerate(start_variables_list)
-            # Use copyto! for vectorized copy instead of element-wise assignment
-            copyto!(view(start_matrix, i, :), point)
-        end
-        start_matrix
-    end
-
-    @info "Starting point composition" extreme_points = n_extreme_points center_points = n_center_points random_combinations = n_random_points total = size(start_variables, 1)    # 6. Run the sampler with deterministic seeding for reproducible results
-    # Use a fixed offset from the main seed to ensure deterministic but different sampling
-    sampling_seed = if seed == 0
-        UInt64(12345)  # Fixed fallback seed for deterministic behavior even without user seed
-    else
-        UInt64(seed + 1000)  # Deterministic offset from main seed
-    end
-    @info "Sampling..."
-    samples_tree = COBREXA.sample_constraints(
-        COBREXA.sample_chain_achr,
-        constraints.balance;
-        output=filtered_activities,
-        start_variables=start_variables,
-        workers=workers,
-        seed=sampling_seed,
-        n_chains=n_chains,
-        collect_iterations=iterations_to_collect,
-        aggregate=aggregate,
-        aggregate_type=Vector{Float64}
-    )
-
-    n_samples_collected = length(first(samples_tree)[2])
-    @info "Sampling complete." n_samples_collected
-    @debug "First 5 samples collected" first_samples = collect(Iterators.take(samples_tree, 5))
-    @debug "Number of samples per activity variable" n_samples = length(first(samples_tree)[2])
-
-    # @debug "type of samples_tree" typeof(samples_tree)
-    @info "Creating chunked streaming filter for memory-efficient processing..."
-
-    @info "Using fixed batch size" batch_size = batch_size n_complexes = length(complexes_vector)
-
-    # Create direct streaming filter (eliminates redundant chunking layer)
-    streaming_filter = try
-        StreamingCandidateFilter(
-            complexes_vector,
-            trivial_pairs_indices,
-            samples_tree, # Pass the collected samples
-            concordance_tracker;
-            cv_threshold=cv_threshold,
-            cv_epsilon=cv_epsilon,
-            min_valid_samples=min_valid_samples,
-            use_transitivity=use_transitivity
-        )
-    catch e
-        @error "Failed to create streaming filter." exception = e
-        rethrow(e)
-    end
-
-    @info "Direct streaming filter created"
-
-    @info "Processing concordance tests with direct streaming (deterministic batch processing)"
-
-    # Create configuration object for type-stable processing
-    config = BatchProcessingConfig(
-        batch_size,
-        concordance_tolerance,
-        use_transitivity,
-        optimizer,
-        settings,
-        workers
-    )
-
-    concordance_time = @elapsed batch_results = process_streaming_batches(
-        constraints,
-        streaming_filter,
-        concordance_tracker,
-        config;
-        track_direct_pairs=!use_transitivity
-    )
-
-    concordance_time_str = Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, concordance_time * 1000)), "HH:MM:SS.s")
-    @info "Building concordance modules [$concordance_time_str]"
-    modules = extract_modules(concordance_tracker)
-
-    elapsed = time() - start_time
-
-    # Store intermediate processing statistics (but not final concordance counts yet)
-    intermediate_stats = Dict(
-        # Model information
-        "n_reactions" => n_reactions,
-        "n_metabolites" => n_metabolites,
-        "n_complexes" => n_complexes,
-        "n_balanced" => n_balanced_complexes,
-        "n_trivially_balanced" => n_trivially_balanced_complexes,
-        "n_trivial_pairs" => length(trivial_pairs),
-
-        # Processing statistics (keep the useful logging info)
-        "n_candidate_pairs" => batch_results.pairs_processed,
-        "n_non_concordant_pairs" => batch_results.non_concordant_pairs,
-        "n_candidates_skipped_by_transitivity" => streaming_filter.pairs_transitivity_concordant_filtered + streaming_filter.pairs_transitivity_non_concordant_filtered,
-        "n_timeout_pairs" => batch_results.timeout_pairs,
-        "n_infeasible_pairs" => batch_results.infeasible_pairs,
-        "n_unbounded_pairs" => batch_results.unbounded_pairs,
-        "n_infeasible_or_unbounded_pairs" => batch_results.infeasible_or_unbounded_pairs,
-        "n_resource_limit_pairs" => batch_results.resource_limit_pairs,
-        "n_numerical_error_pairs" => batch_results.numerical_error_pairs,
-        "n_other_error_pairs" => batch_results.other_error_pairs,
-        "n_total_optimizations" => batch_results.total_optimizations,
-        "batches_completed" => batch_results.batches_completed,
-        "elapsed_time" => elapsed,
-
-        # Algorithm parameters
-        "concordance_tolerance" => concordance_tolerance,
-        "balanced_threshold" => balanced_threshold,
-        "cv_threshold" => cv_threshold,
-        "cv_epsilon" => cv_epsilon,
-
-        # Sampling parameters
-        "sample_size" => sample_size,
-        "n_burnin" => n_burnin,
-        "n_chains" => n_chains,
-        "seed" => seed,
-
-        # Processing parameters 
-        "batch_size" => batch_size,
-        "min_valid_samples" => min_valid_samples,
-        "use_transitivity" => use_transitivity,
-        "use_unidirectional_constraints" => use_unidirectional_constraints,
-
-        # Model parameters
-        "n_workers" => length(workers),
-        "objective_bound" => objective_bound !== nothing ? "applied" : "none",
-
-        # Store batch processing results for reference
-        "batch_results_concordant_count" => batch_results.concordant_count,
-    )
-
-    # Add processing statistics if processed_mask is available
-    if concordance_tracker.processed_mask !== nothing
-        n_processed = count(concordance_tracker.processed_mask)
-        intermediate_stats["n_processed_complexes"] = n_processed
-        intermediate_stats["processing_completion_percent"] = round(n_processed / n_complexes * 100, digits=1)
-    end
-
-    @info "Building complete concordance matrix with all relationships"
-    concordance_matrix = build_complete_concordance_matrix(
-        n_complexes, complex_idx, trivially_balanced, trivial_pairs,
-        concordance_tracker, balanced_complexes, use_transitivity, batch_results
-    )
-
-    # Build ConcordanceResults using canonical ordering established earlier
-    # complex_ids already canonical from concordance_tracker
-    # metabolite_ids already canonical from earlier in function
-    # Get reaction names directly from constraints
-    feasible_reaction_names = get_reaction_names_from_constraints(constraints.balance)
-    reaction_ids = Symbol.(sort!(feasible_reaction_names; by=string))
-
-    # Create module mapping with balanced complexes as 0 and consecutive module IDs
-    module_mapping = fill(-1, length(complex_ids))  # Default: -1 for singleton complexes
-
-    # Create mapping from root representative to consecutive module ID
-    root_to_consecutive = Dict{Int,Int}()
-    next_module_id = 1
-
-    for (module_root, complex_list) in modules
-        if length(complex_list) > 1  # Only assign IDs to modules with multiple complexes
-            root_to_consecutive[module_root] = next_module_id
-            next_module_id += 1
-        end
-    end
-
-    # Assign module IDs to complexes
-    for (module_root, complex_list) in modules
-        for complex_id in complex_list
-            idx = concordance_tracker.id_to_idx[complex_id]
-            if balanced_complexes[idx]
-                # Balanced complexes get module_id = 0 (highest priority)
-                module_mapping[idx] = 0
-            elseif length(complex_list) > 1
-                # Regular concordance modules get consecutive positive IDs
-                module_mapping[idx] = root_to_consecutive[module_root]
-            else
-                # Singleton modules remain -1 (no concordance module)
-                module_mapping[idx] = -1
-            end
-        end
-    end
-
-    # Process lambda results into dict
-    lambda_dict = Dict{Tuple{Int,Int},Float64}()
-    for ((c1_idx, c2_idx, direction), lambda_val) in batch_results.optimization_results
-        if c1_idx <= length(complex_ids) && c2_idx <= length(complex_ids)
-            canonical_pair = c1_idx < c2_idx ? (c1_idx, c2_idx) : (c2_idx, c1_idx)
-            lambda_dict[canonical_pair] = lambda_val
-        end
-    end
-
-    # Build coordinate vectors for efficient concordance matrix construction
-    # All concordance relationships are now populated directly in the concordance_matrix
-    # via populate_trivial_relationships! and populate_discovered_relationships!
-
-    # Use the constructor with pre-built concordance matrix (more efficient than coordinate vectors)
-    complete_model = ConcordanceResults(
-        complex_ids,
-        reaction_ids,
-        Symbol.(metabolite_ids);
-        concordance_matrix=concordance_matrix,  # Pass pre-built matrix
-        activity_ranges=activity_ranges,
-        concordance_modules=module_mapping,
-        interface_reactions=falses(length(reaction_ids)),
-        acr_metabolites=Symbol[],
-        lambda_dict=lambda_dict,
-        stats=intermediate_stats  # Use intermediate stats for now
-    )
-
-    # NOW calculate the final concordance statistics from the actual concordance matrix
-    final_stats = calculate_final_concordance_statistics!(
-        complete_model,
-        intermediate_stats,
-        use_transitivity
-    )
-
-    # Update the complete model with the final statistics
-    complete_model.stats = final_stats
-
-    # Apply kinetic analysis if requested
-    if kinetic_analysis
-        apply_kinetic_analysis!(complete_model, constraints)
-    end
-
-    return complete_model
 end
 
 """

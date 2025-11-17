@@ -1,16 +1,12 @@
 """
-EXACT line-by-line replication of split_into_elementary_rxns_v1.m
+Elementary reaction splitting implementation.
 
-This follows the MATLAB code structure precisely to ensure identical results.
-Use for validation only - not optimized for Julia performance.
-
-NOTE: Uses Dict-based complex registry instead of MATLAB's matrix approach for efficiency.
+Uses Dict-based complex registry for efficient complex management.
 
 ## EC Code Fallback
 
 Reactions without GPR rules but with EC code annotations (e.g., "ec-code" => ["1.7.1.3"])
-will use the EC code as an artificial gene identifier for splitting. This matches MATLAB's
-behavior (lines 23-27 in split_into_elementary_rxns_v1.m).
+will use the EC code as an artificial gene identifier for splitting.
 
 EC (Enzyme Commission) numbers classify enzymes by the reactions they catalyze:
 - Format: EC X.Y.Z.W (e.g., EC 1.7.1.3 = nitrate reductase)
@@ -56,22 +52,63 @@ end
 """
     split_into_elementary(
         model::CM.Model;
+        split_reactions::Vector{String}=String[],
+        random_reactions::Vector{String}=String[],
         random::Float64=0.0,
-        seed::Union{Int,Nothing}=nothing
+        seed::UInt=rand(UInt)
     ) -> CM.Model
+
 Split reactions into elementary steps using ordered or random mechanisms.
+
+# Arguments
+- `model::CM.Model`: Model to split
+- `split_reactions::Vector{String}`: Specific reactions to split (empty = all eligible reactions)
+- `random_reactions::Vector{String}`: Reactions to split using random mechanism
+- `random::Float64`: Fraction of remaining reactions to split randomly (0.0-1.0)
+- `seed::UInt`: Random seed for reproducible mechanism assignment
+
+# Splitting Logic
+1. Reactions in `random_reactions` are split using random mechanism
+2. If `split_reactions` is empty, all eligible reactions are considered for splitting
+3. If `split_reactions` is provided, only those reactions are split
+4. The `random` parameter applies to reactions not in `random_reactions`
+
+# Examples
+```julia
+# Split all eligible reactions with ordered mechanism
+model_elem = split_into_elementary(model)
+
+# Split only specific reactions
+model_elem = split_into_elementary(model; split_reactions=["R_PGI", "R_PFK"])
+
+# Split specific reactions, some with random mechanism
+model_elem = split_into_elementary(
+    model;
+    split_reactions=["R_PGI", "R_PFK", "R_FBA"],
+    random_reactions=["R_FBA"]
+)
+
+# Split all, with 50% using random mechanism
+model_elem = split_into_elementary(model; random=0.5, seed=1234)
+```
 """
 function split_into_elementary(
     model::CM.Model;
+    split_reactions::Vector{String}=String[],
+    random_reactions::Vector{String}=String[],
     random::Float64=0.0,
-    seed::Union{Int,Nothing}=nothing
+    seed::UInt=rand(UInt)
 )
     @assert 0.0 <= random <= 1.0 "random must be between 0.0 and 1.0"
 
     # Initialize RNG for reproducible mechanism assignment
-    rng = isnothing(seed) ? Random.default_rng() : StableRNGs.StableRNG(seed)
+    rng = StableRNGs.StableRNG(seed)
 
-    # MATLAB line 23-27: Use EC codes as fallback for missing GPR rules
+    # Convert to sets for O(1) lookup
+    split_reactions_set = isempty(split_reactions) ? nothing : Set(split_reactions)
+    random_reactions_set = Set(random_reactions)
+
+    # Use EC codes as fallback for missing GPR rules
     # Create a modified model where EC codes fill in for empty GPR rules
     reactions_with_fallback = Dict{String,Vector{Vector{String}}}()
     for (rid, rxn) in model.reactions
@@ -92,11 +129,11 @@ function split_into_elementary(
         else
             reactions_with_fallback[rid] = gpr
         end
-        # If neither GPR nor EC code exists, reaction won't be split (matching MATLAB)
+        # If neither GPR nor EC code exists, reaction won't be split
     end
 
-    # MATLAB line 29-34: Build enzyme list from GPR rules (including EC code fallbacks)
-    # FIX: Only include enzymes from reactions that will actually be split
+    # Build enzyme list from GPR rules (including EC code fallbacks)
+    # Only include enzymes from reactions that will actually be split
     enzyme_list = String[]
     enzyme_to_reactions = Dict{String,Vector{String}}()  # Track which reactions use each enzyme
 
@@ -118,14 +155,14 @@ function split_into_elementary(
         end
     end
 
-    # Create ordered list of metabolite IDs (MATLAB uses array indices)
+    # Create ordered list of metabolite IDs
     met_ids = sort(collect(keys(model.metabolites)))
     NMET = length(met_ids)
     NENZ = length(enzyme_list)
 
-    println("MATLAB-exact: $NMET metabolites, $NENZ enzymes, $(length(model.reactions)) reactions")
+    println("Processing: $NMET metabolites, $NENZ enzymes, $(length(model.reactions)) reactions")
 
-    # MATLAB line 40-55: Initialize elementary model
+    # Initialize elementary model
     elem_model = CM.Model()
 
     # Copy metabolites
@@ -133,7 +170,7 @@ function split_into_elementary(
         elem_model.metabolites[mid] = deepcopy(model.metabolites[mid])
     end
 
-    # Add enzyme metabolites (MATLAB line 44-46: E1, E2, ...)
+    # Add enzyme metabolites (E1, E2, ...)
     for e_idx in 1:NENZ
         enz_id = "E$e_idx"
         elem_model.metabolites[enz_id] = CM.Metabolite(
@@ -146,7 +183,7 @@ function split_into_elementary(
     # mechanisms.jl uses Vector{String} as key (sorted list of metabolites + enzyme)
     intermediate_registry = Dict{Vector{String},String}()
 
-    # Compute global bounds (MATLAB: min([-1000, min(model.lb)]))
+    # Compute global bounds
     all_lbs = [rxn.lower_bound for (_, rxn) in model.reactions]
     all_ubs = [rxn.upper_bound for (_, rxn) in model.reactions]
     reversible_lb = min(-1000.0, minimum(all_lbs))
@@ -161,34 +198,68 @@ function split_into_elementary(
         substrate_ids = [mid for (mid, coeff) in rxn.stoichiometry if coeff < 0]
         product_ids = [mid for (mid, coeff) in rxn.stoichiometry if coeff > 0]
 
-        if length(substrate_ids) <= 4 && length(product_ids) <= 4
-            push!(reactions_to_expand, rid)
+        # Check if reaction is eligible (size constraints)
+        is_eligible = length(substrate_ids) <= 4 && length(product_ids) <= 4
+
+        # Apply split_reactions filter if provided
+        if isnothing(split_reactions_set)
+            # No filter - include all eligible reactions
+            if is_eligible
+                push!(reactions_to_expand, rid)
+            end
+        else
+            # Only include reactions in the split_reactions list
+            if is_eligible && rid in split_reactions_set
+                push!(reactions_to_expand, rid)
+            end
         end
     end
 
-    # Assign random mechanism to a fraction of expandable reactions
-    n_random = round(Int, length(reactions_to_expand) * random)
-    random_rxns = Set(Random.shuffle(rng, reactions_to_expand)[1:n_random])
+    # Determine which reactions use random mechanism
+    # Priority: explicit random_reactions > random fraction parameter
+    random_rxns = Set{String}()
 
-    @info "Mechanism assignment" total_expandable = length(reactions_to_expand) random = n_random ordered = length(reactions_to_expand) - n_random
+    # Add explicitly specified random reactions
+    for rid in random_reactions_set
+        if rid in reactions_to_expand
+            push!(random_rxns, rid)
+        elseif !isnothing(split_reactions_set) && rid in split_reactions_set
+            @warn "Reaction $rid specified in random_reactions but not eligible for splitting (check size constraints or GPR)"
+        end
+    end
 
-    # MATLAB line 57: Process each reaction
+    # Apply random fraction to remaining reactions not already assigned
+    remaining_reactions = [rid for rid in reactions_to_expand if !(rid in random_rxns)]
+    n_random_additional = round(Int, length(remaining_reactions) * random)
+    if n_random_additional > 0
+        additional_random = Random.shuffle(rng, remaining_reactions)[1:n_random_additional]
+        union!(random_rxns, additional_random)
+    end
+
+    @info "Mechanism assignment" total_expandable = length(reactions_to_expand) explicit_random = length(random_reactions_set ∩ Set(reactions_to_expand)) fraction_random = n_random_additional total_random = length(random_rxns) ordered = length(reactions_to_expand) - length(random_rxns)
+
+    # Process each reaction
     for (rid, rxn) in model.reactions
-        # MATLAB line 59-60: Get substrate/product indices
+        # Get substrate/product indices
         substrate_ids = [mid for (mid, coeff) in rxn.stoichiometry if coeff < 0]
         product_ids = [mid for (mid, coeff) in rxn.stoichiometry if coeff > 0]
 
-        # MATLAB line 62: Check if should remain unexpanded
-        # Use fallback GPR if available, otherwise check original
-        has_gpr_or_ec = haskey(reactions_with_fallback, rid)
+        # Check if reaction should be split based on user-specified filters
+        should_split = if isnothing(split_reactions_set)
+            # No filter - check standard criteria (GPR/EC and size)
+            haskey(reactions_with_fallback, rid) && length(substrate_ids) <= 4 && length(product_ids) <= 4
+        else
+            # User specified split list - only split if in the list AND eligible
+            rid in split_reactions_set && haskey(reactions_with_fallback, rid) && length(substrate_ids) <= 4 && length(product_ids) <= 4
+        end
 
-        if !has_gpr_or_ec || length(substrate_ids) > 4 || length(product_ids) > 4
-            # MATLAB line 63-70: Keep original reaction
-            # FIX: Keep R_ prefix for SBML compatibility (prevents objective reference issues)
+        if !should_split
+            # Keep original reaction
+            # Keep R_ prefix for SBML compatibility (prevents objective reference issues)
             rid_clean = startswith(rid, "R_") ? rid : "R_" * rid
             elem_model.reactions[rid_clean] = deepcopy(rxn)
         else
-            # MATLAB line 77-78: Extract enzyme indices for this reaction
+            # Extract enzyme indices for this reaction
             # Use fallback GPR (includes EC codes) instead of original GPR
             rxn_gpr = reactions_with_fallback[rid]
             rxn_enzymes = Int[]
@@ -211,7 +282,7 @@ function split_into_elementary(
             rid_clean = startswith(rid, "R_") ? rid : "R_" * rid
 
             if !use_random
-                # MATLAB line 72-215: Ordered mechanism
+                # Ordered mechanism
                 for e_idx in rxn_enzymes
                     enzyme_id = "E$e_idx"
                     add_ordered_reactions!(
@@ -222,7 +293,7 @@ function split_into_elementary(
                     )
                 end
             else
-                # MATLAB line 216-524: Random mechanism (generates ALL binding orders, deterministic)
+                # Random mechanism (generates ALL binding orders, deterministic)
                 for e_idx in rxn_enzymes
                     enzyme_id = "E$e_idx"
                     add_random_reactions!(
@@ -239,8 +310,22 @@ function split_into_elementary(
     # Copy genes
     elem_model.genes = deepcopy(model.genes)
 
-    println("Created $(length(elem_model.reactions)) elementary reactions, $(length(intermediate_registry)) intermediates")
+    # Validate user-specified reactions
+    if !isnothing(split_reactions_set)
+        not_found = setdiff(split_reactions_set, keys(model.reactions))
+        if !isempty(not_found)
+            @warn "Reactions specified in split_reactions not found in model" reactions = collect(not_found)
+        end
 
+        not_expanded = setdiff(split_reactions_set, reactions_to_expand)
+        # Filter out reactions that weren't found
+        not_expanded = setdiff(not_expanded, not_found)
+        if !isempty(not_expanded)
+            @warn "Reactions specified in split_reactions were not split (check GPR/EC and size constraints)" reactions = collect(not_expanded)
+        end
+    end
+
+    println("Created $(length(elem_model.reactions)) elementary reactions, $(length(intermediate_registry)) intermediates")
 
     return elem_model
 end

@@ -208,13 +208,12 @@ function add_ordered_reactions!(
     # Assigning objective to all steps artificially inflates the objective value
     objective_coefficient = original_rxn.objective_coefficient
 
-    # Get global bounds for reversible steps (matching MATLAB logic)
+    # Get global bounds for reversible steps
     # Since bounds are already normalized, this will typically be -1000 and 1000
     reversible_lb = -1000.0  # Could use min(-1000, minimum_model_lb) if needed
     reversible_ub = 1000.0   # Could use max(1000, maximum_model_ub) if needed
 
-    # Use deterministic order (matching MATLAB fixed mechanism)
-    # MATLAB uses order from stoichiometric matrix (find(model.S(:,i)<0))
+    # Use deterministic order for substrate binding
     substrates_ordered = substrates
     products_ordered = products
 
@@ -275,7 +274,7 @@ function add_ordered_reactions!(
     enz_num = replace(enzyme_id, "E" => "")
     cat_rxn_id = "$(original_rid)_E$(enz_num)_CAT"
 
-    # Match MATLAB logic for catalytic step bounds
+    # Set catalytic step bounds based on reaction reversibility
     cat_lower = if original_rxn.lower_bound >= 0
         0.0  # Keep irreversible if original was forward-only
     else
@@ -295,18 +294,18 @@ function add_ordered_reactions!(
         lower_bound=cat_lower,
         upper_bound=reversible_ub,  # Always use max bound
         gene_association_dnf=original_rxn.gene_association_dnf,
-        objective_coefficient=objective_coefficient,  # Copy original objective (MATLAB behavior)
+        objective_coefficient=objective_coefficient,  # Copy original objective
         annotations=cat_annotations,
         notes=original_rxn.notes  # Keep original notes unchanged
     )
 
-    # Add stoichiometry - matching MATLAB behavior for exchange reactions
-    # MATLAB line 129: Use enzyme directly when no substrates
+    # Add stoichiometry - handle exchange reactions
+    # Use enzyme directly when no substrates
     if !isempty(current_intermediate_metabolites)
         substrate_intermediate = get_or_create_intermediate!(elementary_model, intermediate_registry, current_intermediate_metabolites, enzyme_id, reaction_compartment)
         cat_rxn.stoichiometry[substrate_intermediate] = -1.0
     else
-        # No substrates - consume enzyme directly (MATLAB line 129)
+        # No substrates - consume enzyme directly
         cat_rxn.stoichiometry[enzyme_id] = -1.0
     end
 
@@ -370,9 +369,8 @@ end
 """
 Add elementary reactions for random binding mechanism.
 
-Follows MATLAB nchoosek logic: generates ALL possible binding combinations
-at each level (not sampling). For n substrates with k bound at each level,
-creates C(n,k) reactions per level.
+Generates ALL possible binding combinations at each level (not sampling).
+For n substrates with k bound at each level, creates C(n,k) reactions per level.
 
 This is deterministic - generates all C(n,k) combinations at each binding level.
 """
@@ -392,22 +390,22 @@ function add_random_reactions!(
     # Assigning objective to all steps artificially inflates the objective value
     objective_coefficient = original_rxn.objective_coefficient
 
-    # ALL steps in random mechanism are fully reversible (matching MATLAB)
+    # ALL steps in random mechanism are fully reversible
     reversible_lb = -1000.0
     reversible_ub = 1000.0
 
     n_substrates = length(substrates)
     n_products = length(products)
 
-    # Track complexes at each level (MATLAB: complex_formed_old)
+    # Track complexes at each level
     # Each element is a set of substrate indices bound at that level
     current_level_complexes = Vector{Vector{Int}}[]
 
     # Substrate binding - level by level using nchoosek
     for level in 1:n_substrates
         if level == 1
-            # Level 1: All single substrates (MATLAB line 228)
-            # nchoosek(1:n_substrates, 1) gives [[1], [2], ..., [n]]
+            # Level 1: All single substrates
+            # C(n,1) gives [[1], [2], ..., [n]]
             substrate_combos = collect(Combinatorics.combinations(1:n_substrates, 1))
 
             for combo in substrate_combos
@@ -454,11 +452,10 @@ function add_random_reactions!(
             current_level_complexes = [[i] for i in 1:n_substrates]
         else
             # Level > 1: Expand each previous complex by adding one more substrate
-            # (MATLAB lines 277-330)
             next_level_complexes = Vector{Int}[]
 
             for prev_complex in current_level_complexes
-                # Find substrates not yet in this complex (MATLAB: setdiff)
+                # Find substrates not yet in this complex
                 available_substrates = setdiff(1:n_substrates, prev_complex)
 
                 # Add each available substrate to form new complexes
@@ -518,8 +515,8 @@ function add_random_reactions!(
         end
     end
 
-    # Catalytic step (MATLAB lines 334-382)
-    # MATLAB insight: ALL binding paths converge to ONE unique final complex (E + all substrates)
+    # Catalytic step
+    # ALL binding paths converge to ONE unique final complex (E + all substrates)
     # After unique(), current_level_complexes should contain only [1,2,...,n_substrates]
     # So there"s only ONE catalytic reaction
     # Systematic reaction ID: <original>_E<enzyme>_CAT_RND (random mechanism)
@@ -572,8 +569,8 @@ function add_random_reactions!(
 
     elementary_model.reactions[cat_rxn_id] = cat_rxn
 
-    # Product release - level by level (matching MATLAB lines 385-522)
-    # MATLAB logic: Start with full complex, release products one at a time
+    # Product release - level by level
+    # Start with full complex, release products one at a time
     # Track which complexes were created, then expand from those
     if !isempty(products)
         # Start with full product complex from catalytic step
@@ -581,7 +578,7 @@ function add_random_reactions!(
 
         for level in 1:n_products
             if level == 1
-                # Level 1: Release one product from FULL complex (MATLAB line 388)
+                # Level 1: Release one product from FULL complex
                 # ls = products(nchoosek(1:length(products),1)) - all products
 
                 new_complexes = Vector{Int}[]
@@ -643,11 +640,10 @@ function add_random_reactions!(
                 complex_formed_old = new_complexes
             else
                 # Level > 1: For each complex from previous level, release one more product
-                # (MATLAB lines 449-521)
                 new_complexes = Vector{Int}[]
 
                 for prev_complex in complex_formed_old
-                    # Products still in this complex (MATLAB: isec = intersect(...))
+                    # Products still in this complex
                     products_in_complex = prev_complex
 
                     # Release each product that"s still in the complex

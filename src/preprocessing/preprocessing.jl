@@ -4,12 +4,10 @@ Model preprocessing utilities for COCOA.jl.
 This module provides modular, immutable preprocessing functions following COBREXA patterns.
 All functions return modified copies of the model, preserving the original using `deepcopy`.
 
-Based on MATLAB preprocessing pipeline from run_preprocessing.m (Langary et al. 2025).
-
 # Available Functions
 
-- `normalize_bounds` - MATLAB-style bounds normalization
-- `remove_orphans` - Remove unused metabolites and reactions  
+- `normalize_bounds` - Bounds normalization
+- `remove_orphans` - Remove unused metabolites and reactions
 - `find_blocked_reactions` - Identify blocked reactions via FVA
 - `remove_blocked_reactions` - Find and remove blocked reactions
 - `split_into_elementary_steps` - Decompose reactions into elementary steps
@@ -38,7 +36,7 @@ model_processed = model |>
 @assert model !== model_processed
 ```
 
-# Correct Preprocessing Order (per Langary et al. 2025)
+# Correct Preprocessing Order
 
 1. Normalize bounds
 2. Remove blocked reactions (via FVA at 99.9% optimal)
@@ -60,7 +58,7 @@ if preprocessing time becomes a bottleneck (profile first!), you can manually wo
         normalize_objective_bounds::Bool=true
     ) -> typeof(model)
 
-Normalize model bounds following MATLAB preprocessing logic (immutable).
+Normalize model bounds (immutable).
 
 Creates a deep copy of the model before applying transformations, preserving the original.
 
@@ -71,8 +69,6 @@ Creates a deep copy of the model before applying transformations, preserving the
 - All negative upper bounds → 0 (irreversible reverse)
 - All positive upper bounds → `upper_bound` (default: 1000, forward unlimited)
 - Objective reactions: lb = 0, ub = `upper_bound` (force forward only)
-
-This matches the MATLAB preprocessing in run_preprocessing.m lines 40-46.
 
 # Arguments
 - `model::A.AbstractFBCModel`: Model to normalize (will NOT be modified)
@@ -91,16 +87,6 @@ model_normalized = normalize_bounds(model)
 # With custom bounds
 model_normalized = normalize_bounds(model, lower_bound=-500.0, upper_bound=500.0)
 ```
-
-# MATLAB Reference
-```matlab
-model.lb(model.lb<0) = -1000;
-model.lb(model.lb>0) = 0;
-model.ub(model.ub<0) = 0;
-model.ub(model.ub>0) = 1000;
-model.lb(model.c~=0) = 0;
-model.ub(model.c~=0) = 1000;
-```
 """
 function normalize_bounds(
     model::A.AbstractFBCModel;
@@ -112,27 +98,27 @@ function normalize_bounds(
     model_copy = deepcopy(model)
 
     for (_, rxn) in model_copy.reactions
-        # MATLAB: model.lb(model.lb<0) = -1000;
+        # Normalize negative lower bounds
         if rxn.lower_bound < 0
             rxn.lower_bound = lower_bound
         end
 
-        # MATLAB: model.lb(model.lb>0) = 0;
+        # Normalize positive lower bounds
         if rxn.lower_bound > 0
             rxn.lower_bound = 0.0
         end
 
-        # MATLAB: model.ub(model.ub<0) = 0;
+        # Normalize negative upper bounds
         if rxn.upper_bound < 0
             rxn.upper_bound = 0.0
         end
 
-        # MATLAB: model.ub(model.ub>0) = 1000;
+        # Normalize positive upper bounds
         if rxn.upper_bound > 0
             rxn.upper_bound = upper_bound
         end
 
-        # MATLAB: model.lb(model.c~=0) = 0; model.ub(model.c~=0) = 1000;
+        # Force objective reactions to be forward-only
         if normalize_objective_bounds && abs(rxn.objective_coefficient) > 1e-12
             rxn.lower_bound = 0.0
             rxn.upper_bound = upper_bound
@@ -153,7 +139,6 @@ end
 Remove metabolites and/or reactions with zero stoichiometry (immutable).
 
 Creates a deep copy of the model before removing orphans, preserving the original.
-This matches MATLAB's removeRxns and removeMetabolites for empty elements.
 
 # Arguments
 - `model::A.AbstractFBCModel`: Model to clean (will NOT be modified)
@@ -170,12 +155,6 @@ model_cleaned = remove_orphans(model)
 
 # Only remove unused reactions
 model_cleaned = remove_orphans(model, remove_mets=false)
-```
-
-# MATLAB Reference
-```matlab
-model = removeRxns(model, model.rxns(find(all(model.S==0))));
-model = removeMetabolites(model, model.mets(find(all(model.S'==0))));
 ```
 """
 function remove_orphans(
@@ -227,8 +206,6 @@ are below the flux tolerance threshold. Follows COBREXA.jl patterns by accepting
 pre-built constraint trees, allowing users to add objective bounds via constraint
 tree merging before calling this function.
 
-This matches MATLAB's FVA-based blocking detection in run_preprocessing.m lines 58-62.
-
 # Arguments
 - `constraints::COBREXA.C.ConstraintTree`: Pre-built constraint system (from `flux_balance_constraints`)
 - `optimizer`: Optimization solver (e.g., HiGHS.Optimizer)
@@ -269,13 +246,6 @@ blocked = find_blocked_reactions(
     optimizer=HiGHS.Optimizer,
     objective_bound=COBREXA.relative_tolerance_bound(0.999)
 )
-```
-
-# MATLAB Reference
-```matlab
-[mini, maxi] = linprog_FVA(model, 0.001);  % 0.001 = 0.1% below optimal = 99.9%
-thr = 1e-9;
-BLK = model.rxns(find(abs(mini)<thr & abs(maxi)<thr));
 ```
 """
 function find_blocked_reactions(
@@ -336,7 +306,7 @@ import COBREXA
 # Without objective bound
 blocked = find_blocked_reactions(model; optimizer=HiGHS.Optimizer)
 
-# With 99.9% objective bound (MATLAB-style preprocessing)
+# With 99.9% objective bound
 blocked = find_blocked_reactions(
     model;
     optimizer=HiGHS.Optimizer,
@@ -355,11 +325,11 @@ function find_blocked_reactions(
     workers=D.workers()
 )
     constraints = COBREXA.flux_balance_constraints(model)
-    
+
     # Add objective bound if specified (COBREXA pattern)
     if !isnothing(objective_bound)
         objective = constraints.objective.value
-        
+
         objective_flux = COBREXA.optimized_values(
             constraints;
             objective=constraints.objective.value,
@@ -367,16 +337,16 @@ function find_blocked_reactions(
             optimizer,
             settings,
         )
-        
+
         isnothing(objective_flux) && return String[]
-        
+
         # Merge objective bound constraint (COBREXA way with *)
         constraints *= :objective_bound^COBREXA.C.Constraint(
             objective,
             objective_bound(objective_flux)
         )
     end
-    
+
     return find_blocked_reactions(
         constraints;
         optimizer,
@@ -425,7 +395,7 @@ model_unblocked, blocked_ids = remove_blocked_reactions(
     optimizer=HiGHS.Optimizer
 )
 
-# With 99.9% objective bound (MATLAB-style preprocessing)
+# With 99.9% objective bound
 model_unblocked, blocked_ids = remove_blocked_reactions(
     model;
     optimizer=HiGHS.Optimizer,
@@ -460,5 +430,5 @@ function remove_blocked_reactions(
     end
 
     @info "Removed $(length(blocked)) blocked reactions."
-    return model_copy, blocked
+    return model_copy
 end
