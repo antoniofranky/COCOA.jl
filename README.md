@@ -36,12 +36,12 @@ model = COBREXA.load_model("ecoli_core.xml")
 
 model_canon = convert(A.CanonicalModel.Model,model)
 
-# Recommended preprocessing pipeline (immutable - preserves original)
+# Recommended preprocessing pipeline for kinetic module analysis (immutable - preserves original)
 model_processed = model |>
     normalize_bounds |>
     m -> remove_blocked_reactions(m; optimizer=HiGHS.Optimizer) |>
     remove_orphans |>
-    split_into_elementary |>
+    split_into_elementary |> # This ensures mass action kinetics. Skip this step, if you only want concordance modules
     split_into_irreversible
 
 # Run concordance analysis on preprocessed model
@@ -49,6 +49,7 @@ results = activity_concordance_analysis(
     model_processed;
     optimizer=HiGHS.Optimizer,
     objective_bound=COBREXA.relative_tolerance_bound(0.999)
+    kinetic_analysis=true # false, if you only want concordance modules
 )
 ```
 
@@ -57,7 +58,7 @@ results = activity_concordance_analysis(
 1. **`normalize_bounds`** - Standardize reaction bounds (-1000/1000 for reversible/irreversible)
 2. **`remove_orphans`** - Remove unused metabolites and reactions
 3. **`remove_blocked_reactions`** - Identify and remove reactions with zero flux via Flux Variabiltiy Analysis (FVA)
-4. **`split_into_elementary`** - Decompose reactions into elementary steps with either ordered or random mechanisms
+4. **`split_into_elementary`** - Decompose reactions into elementary steps with either ordered or random mechanisms, to ensure mass action kinetics
 5. **`split_into_irreversible`** - Convert reversible reactions into forward/reverse pairs
 
 
