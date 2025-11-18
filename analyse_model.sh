@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=bmtest
+#SBATCH --job-name=ecoli
 #SBATCH --chdir=/work/schaffran1/results_testjobs
 #SBATCH --output=results_testjobs/iJO1366_%j.out
 #SBATCH --time=2-00:00:00
