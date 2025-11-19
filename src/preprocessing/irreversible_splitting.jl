@@ -159,7 +159,9 @@ function split_into_irreversible(
     if flip_pure_backward && !isempty(pure_backward_rxns)
         for rid in pure_backward_rxns
             rxn = model.reactions[rid]
-            new_rid = rid * "_r"
+            # Add R_ prefix for SBML compatibility (prevents objective reference issues)
+            rid_prefixed = startswith(rid, "R_") ? rid : "R_" * rid
+            new_rid = rid_prefixed * "_r"
 
             # Create flipped reaction
             flipped_rxn = CM.Reaction(
@@ -188,7 +190,9 @@ function split_into_irreversible(
     else
         # Keep pure backward reactions as-is (don't flip)
         for rid in pure_backward_rxns
-            model_irrev.reactions[rid] = deepcopy(model.reactions[rid])
+            # Add R_ prefix for SBML compatibility
+            rid_prefixed = startswith(rid, "R_") ? rid : "R_" * rid
+            model_irrev.reactions[rid_prefixed] = deepcopy(model.reactions[rid])
         end
     end
 
@@ -196,9 +200,12 @@ function split_into_irreversible(
     for rid in reversible_rxns
         rxn = model.reactions[rid]
 
+        # Add R_ prefix for SBML compatibility (prevents objective reference issues)
+        rid_prefixed = startswith(rid, "R_") ? rid : "R_" * rid
+
         # Create forward reaction ID
-        fwd_rid = rid * "_f"
-        bwd_rid = rid * "_b"
+        fwd_rid = rid_prefixed * "_f"
+        bwd_rid = rid_prefixed * "_b"
 
         # Forward reaction: max(0, lb) ≤ v_f ≤ max(0, ub)
         fwd_rxn = CM.Reaction(
@@ -262,8 +269,9 @@ function split_into_irreversible(
 
     for (rid, rxn) in model.reactions
         if !(rid in reversible_set) && !(rid in backward_set)
-            # This reaction wasn't processed - copy as-is
-            model_irrev.reactions[rid] = deepcopy(rxn)
+            # This reaction wasn't processed - copy as-is with R_ prefix
+            rid_prefixed = startswith(rid, "R_") ? rid : "R_" * rid
+            model_irrev.reactions[rid_prefixed] = deepcopy(rxn)
         end
     end
 
