@@ -6,7 +6,7 @@ following COBRA Toolbox conventions while optimized for Julia performance.
 =#
 
 
-export split_into_irreversible, fix_sbml_objective_after_conversion
+export split_into_irreversible
 
 """
     split_into_irreversible(
@@ -159,7 +159,9 @@ function split_into_irreversible(
     if flip_pure_backward && !isempty(pure_backward_rxns)
         for rid in pure_backward_rxns
             rxn = model.reactions[rid]
-            new_rid = rid * "_r"
+            # Add R_ prefix for SBML compatibility (prevents objective reference issues)
+            rid_prefixed = startswith(rid, "R_") ? rid : "R_" * rid
+            new_rid = rid_prefixed * "_r"
 
             # Create flipped reaction
             flipped_rxn = CM.Reaction(
@@ -188,7 +190,9 @@ function split_into_irreversible(
     else
         # Keep pure backward reactions as-is (don't flip)
         for rid in pure_backward_rxns
-            model_irrev.reactions[rid] = deepcopy(model.reactions[rid])
+            # Add R_ prefix for SBML compatibility
+            rid_prefixed = startswith(rid, "R_") ? rid : "R_" * rid
+            model_irrev.reactions[rid_prefixed] = deepcopy(model.reactions[rid])
         end
     end
 
@@ -196,9 +200,12 @@ function split_into_irreversible(
     for rid in reversible_rxns
         rxn = model.reactions[rid]
 
+        # Add R_ prefix for SBML compatibility (prevents objective reference issues)
+        rid_prefixed = startswith(rid, "R_") ? rid : "R_" * rid
+
         # Create forward reaction ID
-        fwd_rid = rid * "_f"
-        bwd_rid = rid * "_b"
+        fwd_rid = rid_prefixed * "_f"
+        bwd_rid = rid_prefixed * "_b"
 
         # Forward reaction: max(0, lb) ≤ v_f ≤ max(0, ub)
         fwd_rxn = CM.Reaction(
@@ -262,104 +269,13 @@ function split_into_irreversible(
 
     for (rid, rxn) in model.reactions
         if !(rid in reversible_set) && !(rid in backward_set)
-            # This reaction wasn't processed - copy as-is
-            model_irrev.reactions[rid] = deepcopy(rxn)
+            # This reaction wasn't processed - copy as-is with R_ prefix
+            rid_prefixed = startswith(rid, "R_") ? rid : "R_" * rid
+            model_irrev.reactions[rid_prefixed] = deepcopy(rxn)
         end
     end
 
     n_final = length(model_irrev.reactions)
     @info "Irreversible conversion complete" original = n_reactions final = n_final added = n_final - n_reactions
     return model_irrev
-end
-
-
-"""
-    fix_sbml_objective_after_conversion(model::SBMLFBCModels.SBMLFBCModel, output_path::String)
-
-Fix SBML objective function references after CanonicalModel → SBML conversion by
-saving to file and fixing the XML directly.
-
-When converting from CanonicalModel to SBML, AbstractFBCModels adds the "R_" prefix to reaction IDs,
-but doesn't update the objective function references. This causes KeyError when loading the model later.
-
-This function:
-1. Saves the model to the specified path
-2. Loads the XML and fixes broken objective references
-3. Saves the corrected XML back
-
-# Arguments
-- `model::SBMLFBCModels.SBMLFBCModel`: Model with potentially broken objective references
-- `output_path::String`: Path where to save the corrected model
-
-# Example
-```julia
-# After split_into_irreversible and conversion
-model_canonical = split_into_irreversible(model)
-model_sbml = convert(SBMLFBCModels.SBMLFBCModel, model_canonical)
-
-# Save with automatic objective fixing
-fix_sbml_objective_after_conversion(model_sbml, "output.xml")
-
-# Now safe to reload
-model_reloaded = M.load("output.xml")
-```
-
-# Technical Details
-The function saves, reloads, and validates that all objective references point to valid reactions.
-If broken references are found, it adds the "R_" prefix and resaves.
-"""
-function fix_sbml_objective_after_conversion(model::SBMLFBCModels.SBMLFBCModel, output_path::String)
-    # First, save the model normally
-    A.save(model, output_path)
-
-    # Reload it to check for issues
-    model_reloaded = A.load(output_path)
-
-    # Check if objectives reference valid reactions
-    if isnothing(model_reloaded.sbml.objectives) || isempty(model_reloaded.sbml.objectives)
-        @info "No objectives to fix"
-        return
-    end
-
-    valid_reactions = Set(model_reloaded.reaction_ids)
-    broken_refs = String[]
-
-    for (obj_id, obj) in model_reloaded.sbml.objectives
-        if isnothing(obj.flux_objectives)
-            continue
-        end
-
-        for (rxn_ref, _) in obj.flux_objectives
-            if !(rxn_ref in valid_reactions)
-                push!(broken_refs, rxn_ref)
-            end
-        end
-    end
-
-    if isempty(broken_refs)
-        @info "All objective references are valid"
-        return
-    end
-
-    # Found broken references - need to fix the XML
-    @warn "Found broken objective references, fixing XML file" broken_refs = broken_refs
-
-    # Read the XML file as text
-    xml_content = read(output_path, String)
-
-    # Fix each broken reference by adding "R_" prefix
-    for rxn_ref in broken_refs
-        prefixed = "R_" * rxn_ref
-        if prefixed in valid_reactions
-            # Replace in the FluxObjective elements
-            xml_content = replace(xml_content, "reaction=\"$rxn_ref\"" => "reaction=\"$prefixed\"")
-            @info "Fixed objective reference in XML" rxn_ref => prefixed
-        else
-            @error "Cannot fix objective reference: neither $rxn_ref nor $prefixed exist in model"
-        end
-    end
-
-    # Write the corrected XML back
-    write(output_path, xml_content)
-    @info "Saved corrected model to $output_path"
 end
