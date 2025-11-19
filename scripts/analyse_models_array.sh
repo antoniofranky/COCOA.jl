@@ -2,13 +2,12 @@
 #SBATCH --job-name=cocoa_array
 #SBATCH --chdir=RESULTS_DIR_PLACEHOLDER
 #SBATCH --output=RESULTS_DIR_PLACEHOLDER/cocoa_model_%A_%a.out
-#SBATCH --error=RESULTS_DIR_PLACEHOLDER/cocoa_model_%A_%a.out
 #SBATCH --time=48:00:00
 #SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=92
-#SBATCH --mem=500G
+#SBATCH --cpus-per-task=64
+#SBATCH --mem=150G
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=schaffran1@uni-potsdam.de
 #SBATCH --hint=nomultithread

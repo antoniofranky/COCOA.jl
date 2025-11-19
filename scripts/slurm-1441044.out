@@ -1,0 +1,8 @@
+grep: /var/spool/slurmd/job1441044/analyse_models_array.sh: No such file or directory
+grep: /var/spool/slurmd/job1441044/analyse_models_array.sh: No such file or directory
+COCOA Array Job Submission Script
+==================================
+Configuration read from: analyse_models_array.sh
+Models directory: 
+Results directory: 
+ERROR: Models directory does not exist: 

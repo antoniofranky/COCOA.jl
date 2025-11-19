@@ -5,8 +5,8 @@
 #SBATCH --time=2-00:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=128
-#SBATCH --mem=300G
+#SBATCH --cpus-per-task=64
+#SBATCH --mem=150G
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=schaffran1@uni-potsdam.de
 #SBATCH --hint=nomultithread
@@ -37,7 +37,7 @@ JULIA_OPTS="$JULIA_OPTS --history-file=no"
 # JULIA_OPTS="$JULIA_OPTS --optimize=2"
 # JULIA_OPTS="$JULIA_OPTS --check-bounds=no"
 
-cd /work/schaffran1/COCOA.jl
+cd /work/schaffran1/COCOA.jl/scripts
 
 # Force consistent package precompilation
 # echo "Precompiling packages..."

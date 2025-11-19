@@ -5,8 +5,8 @@
 #SBATCH --time=24:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=94
-#SBATCH --mem=600G
+#SBATCH --cpus-per-task=64
+#SBATCH --mem=150G
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=schaffran1@uni-potsdam.de
 #SBATCH --hint=nomultithread
@@ -34,7 +34,7 @@ JULIA_OPTS="$JULIA_OPTS --compiled-modules=yes"
 JULIA_OPTS="$JULIA_OPTS --optimize=2"
 JULIA_OPTS="$JULIA_OPTS --check-bounds=no"
 
-cd /work/schaffran1/scripts
+cd /work/schaffran1/COCOA.jl/scripts
 
 echo "Processing model array task ${SLURM_ARRAY_TASK_ID}/343..."
 echo "Preprocessing pipeline: remove_orphans -> normalize_bounds -> remove_blocked_reactions -> remove_orphans -> split_into_elementary -> split_into_irreversible"

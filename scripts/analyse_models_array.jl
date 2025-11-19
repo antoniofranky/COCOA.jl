@@ -15,11 +15,11 @@ model_name = ARGS[3]
 # Modify these parameters as needed
 sample_size = 1000
 seed = 42
-cv_threshold = 0.01
+cv_threshold = 1e-2
 batch_size = 100_000
 use_transitivity = true
 balanced_threshold = 1e-8
-concordance_tolerance = 1e-7
+concordance_tolerance = 1e-2
 
 # HiGHS solver settings
 highs_settings = [
@@ -87,7 +87,7 @@ try
             optimizer=HiGHS.Optimizer,
             settings=highs_settings,
             sample_size=sample_size,
-            seed=UInt64(seed),
+            seed=UInt(seed),
             concordance_tolerance=concordance_tolerance,
             balanced_threshold=balanced_threshold,
             cv_threshold=cv_threshold,
@@ -133,7 +133,7 @@ try
             "gc_time_fraction" => gc_time / analysis_duration
         ),
         "timestamp", Dates.now();
-        compress=true)
+        compress = true)
 
     # Print robustness results if available
     println("\nRobustness Results:")

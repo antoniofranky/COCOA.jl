@@ -12,7 +12,7 @@ batch_size = 500_000
 use_transitivity = true
 # Construct output path based on parameters
 output_path =
-    "/work/schaffran1/results_testjobs/E_coli_K12_iJO1366_result_reversible" *
+    "/work/schaffran1/results_testjobs/for_babak/E_coli_K12_iJO1366_result_reversible" *
     lpad(string(seed), 2, "0") * "_" *
     string(batch_size) * "_cv" *
     replace(string(cv_threshold), "." => "p") * "_samples" *
@@ -39,7 +39,7 @@ results = COCOA.activity_concordance_analysis(
     optimizer=HiGHS.Optimizer,
     settings=highs_settings,
     sample_size=sample_size,
-    seed=seed,
+    seed=UInt(seed),
     cv_threshold=cv_threshold,
     concordance_tolerance=0.01,
     batch_size=batch_size,
