@@ -8,9 +8,6 @@ This module contains:
 - Concordance test constraint building
 """
 
-
-
-
 """
 $(TYPEDSIGNATURES)
 
