@@ -1,0 +1,17 @@
+{
+    "n_complexes": 3015,
+    "Y_shape": [
+        1155,
+        3015
+    ],
+    "S_shape": [
+        1155,
+        2098
+    ],
+    "n_reactions": 2098,
+    "n_metabolites": 1155,
+    "A_shape": [
+        3015,
+        2098
+    ]
+}

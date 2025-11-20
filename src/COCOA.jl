@@ -96,7 +96,7 @@ export remove_orphans!, remove_orphans
 export concordance_constraints, activity_variability_analysis, activity_concordance_analysis
 
 # Export matrix building functions
-export S_from_constraints, Y_matrix_from_constraints, A_matrix_from_constraints
+export incidence, stoichiometry, complex_stoichiometry
 
 
 # Export kinetic analysis function

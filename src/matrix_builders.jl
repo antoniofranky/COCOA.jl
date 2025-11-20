@@ -116,15 +116,28 @@ S = stoichiometry(constraints)
 S, metabolites, reactions = stoichiometry(constraints; return_ids=true)
 ```
 """
-function stoichiometry(constraints::C.ConstraintTree; return_ids::Bool=false)
+function stoichiometry(constraints::C.ConstraintTree; return_ids::Bool=false, model::Union{A.AbstractFBCModel,Nothing}=nothing)
     balance_constraints = haskey(constraints, :balance) ? constraints.balance : constraints
 
-    # Get metabolite IDs from flux_stoichiometry keys (already sorted)
-    metabolite_ids = sort!(collect(keys(balance_constraints.flux_stoichiometry)); by=string)
+    # Get metabolite IDs - preserve original model order if model provided
+    if model !== nothing
+        metabolite_ids = Symbol.(A.metabolites(model))
+    else
+        # Fallback to insertion order from ConstraintTree keys
+        metabolite_ids = collect(keys(balance_constraints.flux_stoichiometry))
+    end
 
     # Get reaction names from the balance constraints
     reaction_names = get_reaction_names_from_constraints(balance_constraints)
-    reaction_ids = sort!(Symbol.(reaction_names); by=string)
+    if model !== nothing
+        # Preserve original model reaction order, filtering to only those present in constraints
+        original_rxn_ids = Symbol.(A.reactions(model))
+        reaction_name_set = Set(Symbol.(reaction_names))
+        reaction_ids = filter(id -> id in reaction_name_set, original_rxn_ids)
+    else
+        # Fallback to insertion order
+        reaction_ids = Symbol.(reaction_names)
+    end
 
     n_metabolites = length(metabolite_ids)
     n_reactions = length(reaction_ids)
@@ -239,7 +252,7 @@ function stoichiometry(model::A.AbstractFBCModel; return_ids::Bool=false, use_un
         constraints = COBREXA.flux_balance_constraints(model)
     end
 
-    return stoichiometry(constraints; return_ids=return_ids)
+    return stoichiometry(constraints; return_ids=return_ids, model=model)
 end
 
 # ========================================================================================
@@ -281,12 +294,13 @@ Y = complex_stoichiometry(constraints)
 Y, metabolites, complexes = complex_stoichiometry(constraints; return_ids=true)
 ```
 """
-function complex_stoichiometry(constraints::C.ConstraintTree; return_ids::Bool=false)
+function complex_stoichiometry(constraints::C.ConstraintTree; return_ids::Bool=false, model::Union{A.AbstractFBCModel,Nothing}=nothing)
     # Extract complexes using the shared function
     complex_info, _ = extract_complexes(constraints)
 
-    # Get complex IDs in canonical order
-    complex_ids = sort!(collect(keys(complex_info)); by=string)
+    # Get complex IDs - preserve insertion order from ConstraintTree
+    # Complexes are generated in a deterministic order by extract_complexes
+    complex_ids = collect(keys(complex_info))
 
     # Get all unique metabolites
     all_metabolites = Set{Symbol}()
@@ -295,7 +309,15 @@ function complex_stoichiometry(constraints::C.ConstraintTree; return_ids::Bool=f
             push!(all_metabolites, met_id)
         end
     end
-    metabolite_ids = sort!(collect(all_metabolites); by=string)
+
+    # Preserve original model order for metabolites if model provided
+    if model !== nothing
+        original_met_ids = Symbol.(A.metabolites(model))
+        metabolite_ids = filter(id -> id in all_metabolites, original_met_ids)
+    else
+        # Fallback to collection order
+        metabolite_ids = collect(all_metabolites)
+    end
 
     n_metabolites = length(metabolite_ids)
     n_complexes = length(complex_ids)
@@ -367,7 +389,7 @@ function complex_stoichiometry(model::A.AbstractFBCModel; return_ids::Bool=false
         constraints = COBREXA.flux_balance_constraints(model)
     end
 
-    return complex_stoichiometry(constraints; return_ids=return_ids)
+    return complex_stoichiometry(constraints; return_ids=return_ids, model=model)
 end
 
 # ========================================================================================
@@ -419,18 +441,26 @@ A, complexes, reactions = incidence(constraints; return_ids=true)
 # Throws
 - `ArgumentError`: If constraints do not contain required `activities` section
 """
-function incidence(constraints::C.ConstraintTree; return_ids::Bool=false)
+function incidence(constraints::C.ConstraintTree; return_ids::Bool=false, model::Union{A.AbstractFBCModel,Nothing}=nothing)
     balance_constraints = haskey(constraints, :balance) ? constraints.balance : constraints
 
     # Get reaction names from the balance constraints
     reaction_names = get_reaction_names_from_constraints(balance_constraints)
-    reaction_ids = sort!(Symbol.(reaction_names); by=string)
+    if model !== nothing
+        # Preserve original model reaction order, filtering to only those present in constraints
+        original_rxn_ids = Symbol.(A.reactions(model))
+        reaction_name_set = Set(Symbol.(reaction_names))
+        reaction_ids = filter(id -> id in reaction_name_set, original_rxn_ids)
+    else
+        # Fallback to insertion order
+        reaction_ids = Symbol.(reaction_names)
+    end
 
-    # Get complex IDs from activities constraints
+    # Get complex IDs from activities constraints - preserve insertion order
     if !haskey(constraints, :activities)
         throw(ArgumentError("Constraints must have activities to build incidence matrix"))
     end
-    complex_ids = sort!(collect(keys(constraints.activities)); by=string)
+    complex_ids = collect(keys(constraints.activities))
 
     n_complexes = length(complex_ids)
     n_reactions = length(reaction_ids)
@@ -546,15 +576,15 @@ A = incidence(model; use_unidirectional=false)
 To ensure complex IDs match those from concordance analysis, use `use_unidirectional=true` (default).
 This will build constraints and extract complexes using the same logic as `extract_complexes`.
 """
-function incidence(model::A.AbstractFBCModel; return_ids::Bool=false, use_unidirectional::Bool=true)
+function incidence(model::A.AbstractFBCModel; return_ids::Bool=false, use_unidirectional::Bool=false)
     # Build constraints to extract complexes consistently
     if use_unidirectional
-        constraints, _ = create_unidirectional_constraints(model)
+        constraints = concordance_constraints(model, use_unidirectional_constraints=true)
     else
-        constraints = COBREXA.flux_balance_constraints(model)
+        constraints = concordance_constraints(model, use_unidirectional_constraints=false)
     end
 
-    return incidence(constraints; return_ids=return_ids)
+    return incidence(constraints; return_ids=return_ids, model=model)
 end
 
 # ========================================================================================

@@ -612,9 +612,8 @@ function activity_concordance_analysis(
     end
 
     n_complexes = length(complexes)
-    # Get sorted complex IDs for fully deterministic ConcordanceTracker initialization
-    # Sort by string representation to ensure consistent ordering across platforms
-    complex_ids = sort!(collect(keys(complexes)); by=string)
+    # Get complex IDs in insertion order (deterministic from extract_complexes)
+    complex_ids = collect(keys(complexes))
 
     # Get correct reaction count from constraints (accounts for reaction splitting)
     n_reactions = C.var_count(constraints.balance)
@@ -622,18 +621,19 @@ function activity_concordance_analysis(
 
     @info "Model statistics" n_complexes n_reactions n_metabolites
 
-    # Get canonical metabolite ordering
+    # Get metabolite ordering - preserve original model order
     all_metabolites = Set{Symbol}()
     for complex in values(complexes)
         for (met_id, _) in complex
             push!(all_metabolites, met_id)
         end
     end
-    metabolite_ids = sort!(collect(all_metabolites); by=string)
+    original_met_ids = Symbol.(A.metabolites(model))
+    metabolite_ids = filter(id -> id in all_metabolites, original_met_ids)
 
     # Construct Y matrix once for all trivial relationship detection
     @info "Building Y matrix for trivial relationship detection"
-    Y_matrix, Y_metabolite_ids, Y_complex_ids = Y_matrix_from_constraints(constraints; return_ids=true)
+    Y_matrix, Y_metabolite_ids, Y_complex_ids = Y_matrix_from_constraints(constraints; return_ids=true, model=model)
 
     @info "Finding trivially balanced complexes"
     initial_balanced = find_trivially_balanced_complexes_sparse(Y_matrix, Y_metabolite_ids, Y_complex_ids)
@@ -1056,12 +1056,14 @@ function activity_concordance_analysis(
         concordance_tracker, balanced_complexes, use_transitivity, batch_results
     )
 
-    # Build ConcordanceResults using canonical ordering established earlier
-    # complex_ids already canonical from concordance_tracker
-    # metabolite_ids already canonical from earlier in function
-    # Get reaction names directly from constraints
+    # Build ConcordanceResults using original model ordering
+    # complex_ids already preserves insertion order from complexes
+    # metabolite_ids already preserves original model order
+    # Get reaction names and preserve original model order
     feasible_reaction_names = get_reaction_names_from_constraints(constraints.balance)
-    reaction_ids = Symbol.(sort!(feasible_reaction_names; by=string))
+    original_rxn_ids = Symbol.(A.reactions(model))
+    reaction_name_set = Set(Symbol.(feasible_reaction_names))
+    reaction_ids = filter(id -> id in reaction_name_set, original_rxn_ids)
 
     # Create module mapping with balanced complexes as 0 and consecutive module IDs
     module_mapping = fill(-1, length(complex_ids))  # Default: -1 for singleton complexes

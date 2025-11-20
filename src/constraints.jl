@@ -293,27 +293,31 @@ function extract_complexes(constraints::C.ConstraintTree)
         reaction_metabolite_map[var_idx] = (substrates, products)
     end
 
-    # Step 3: Identify unique metabolite complexes
-    unique_complexes = Set{Vector{Tuple{Symbol,Float64}}}()
-    for (var_idx, (substrates, products)) in reaction_metabolite_map
-        if !isempty(substrates)
-            push!(unique_complexes, substrates)
+    # Step 3: Identify unique metabolite complexes - preserve insertion order
+    # Use a Dict to track seen complexes while maintaining insertion order (Julia 1.5+)
+    seen_complexes = Dict{Vector{Tuple{Symbol,Float64}},Bool}()
+
+    # Iterate through variable indices in sorted order for deterministic complex ordering
+    for var_idx in sort(collect(keys(reaction_metabolite_map)))
+        substrates, products = reaction_metabolite_map[var_idx]
+        if !isempty(substrates) && !haskey(seen_complexes, substrates)
+            seen_complexes[substrates] = true
         end
-        if !isempty(products)
-            push!(unique_complexes, products)
+        if !isempty(products) && !haskey(seen_complexes, products)
+            seen_complexes[products] = true
         end
     end
 
-    # Step 4: Generate complex IDs
+    # Step 4: Generate complex IDs - preserving insertion order
     complex_info = Dict{Symbol,Vector{Tuple{Symbol,Float64}}}()
-    for metabolite_composition in unique_complexes
+    for metabolite_composition in keys(seen_complexes)
         # Generate readable complex ID
         complex_id = generate_complex_id(metabolite_composition)
         complex_info[complex_id] = metabolite_composition
     end
 
     @info "Complex extraction complete" (
-        unique_complexes=length(unique_complexes),
+        unique_complexes=length(complex_info),
         reactions_analyzed=length(reaction_metabolite_map)
     )
 
@@ -340,10 +344,8 @@ function extract_activities_from_constraints(constraints::C.ConstraintTree)
     # Build activities constraint tree directly using generator
     activity_pairs = Pair{Symbol,C.Constraint}[]
 
-    # Sort complex IDs for consistent ordering
-    sorted_complex_ids = sort!(collect(keys(complex_info)); by=string)
-
-    for complex_id in sorted_complex_ids
+    # Preserve insertion order from complex_info (no sorting)
+    for complex_id in keys(complex_info)
         metabolite_composition = complex_info[complex_id]
         # Build activity as sum of reaction contributions
         reaction_contributions = Dict{Int,Float64}()
