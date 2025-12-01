@@ -60,8 +60,8 @@ Named tuple with:
 - Preserves stoichiometric coefficients exactly as in model
 """
 function _extract_complexes_from_model(model::A.AbstractFBCModel)
-    complex_compositions = Dict{Symbol, Vector{Tuple{Symbol,Float64}}}()
-    reaction_to_complexes = Dict{Symbol, Tuple{Symbol,Symbol}}()
+    complex_compositions = Dict{Symbol,Vector{Tuple{Symbol,Float64}}}()
+    reaction_to_complexes = Dict{Symbol,Tuple{Symbol,Symbol}}()
 
     # Process reactions in model order for deterministic results
     for rxn_id in A.reactions(model)
@@ -512,8 +512,8 @@ function complex_stoichiometry(model::A.AbstractFBCModel; return_ids::Bool=false
     extracted = _extract_complexes_from_model(model)
     complex_info = extracted.complexes
 
-    # Get complex IDs in deterministic order (sorted by first appearance)
-    complex_ids = collect(keys(complex_info))
+    # Get complex IDs in deterministic order (sorted alphabetically for consistency)
+    complex_ids = sort(collect(keys(complex_info)))
 
     # Get all unique metabolites from complexes
     all_metabolites = Set{Symbol}()
@@ -625,11 +625,15 @@ function incidence(constraints::C.ConstraintTree; return_ids::Bool=false, model:
         reaction_ids = Symbol.(reaction_names)
     end
 
-    # Get complex IDs from activities constraints - preserve insertion order
+    # Get complex IDs from extract_complexes for consistency with complex_stoichiometry
+    # This ensures Y and A matrices use the same complex ordering
+    complex_info, _ = extract_complexes(constraints)
+    complex_ids = collect(keys(complex_info))
+
+    # Verify activities exist for all complexes
     if !haskey(constraints, :activities)
         throw(ArgumentError("Constraints must have activities to build incidence matrix"))
     end
-    complex_ids = collect(keys(constraints.activities))
 
     n_complexes = length(complex_ids)
     n_reactions = length(reaction_ids)
@@ -766,8 +770,8 @@ function incidence(model::A.AbstractFBCModel; return_ids::Bool=false)
     complex_info = extracted.complexes
     reaction_complex_map = extracted.reaction_complex_map
 
-    # Get IDs in deterministic order
-    complex_ids = collect(keys(complex_info))
+    # Get IDs in deterministic order (sorted alphabetically to match complex_stoichiometry)
+    complex_ids = sort(collect(keys(complex_info)))
     reaction_ids = Symbol.(A.reactions(model))  # Preserve model order
 
     n_complexes = length(complex_ids)
