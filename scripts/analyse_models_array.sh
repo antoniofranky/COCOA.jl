@@ -1,23 +1,24 @@
 #!/bin/bash
 #SBATCH --job-name=cocoa_array
-#SBATCH --chdir=RESULTS_DIR_PLACEHOLDER
-#SBATCH --output=RESULTS_DIR_PLACEHOLDER/cocoa_model_%A_%a.out
-#SBATCH --time=48:00:00
+#SBATCH --chdir=/work/schaffran1/jobresults/random_25
+#SBATCH --output=/work/schaffran1/jobresults/random_25/ka_cocoa_model_%A_%a.out
+#SBATCH --time=2-00:00:00
 #SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=64
-#SBATCH --mem=150G
+#SBATCH --mem=300G
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=schaffran1@uni-potsdam.de
 #SBATCH --hint=nomultithread
-#SBATCH --array=1-ARRAY_SIZE
+#SBATCH --array=1-13
 
 # ============================================================================
 # CONFIGURATION - Edit these two paths to match your setup
 # ============================================================================
-MODELS_DIR="/work/schaffran1/toolbox/prpd_models/no_split"  # Directory containing model .xml files
-RESULTS_DIR="/work/schaffran1/results_testjobs/no_split"      # Directory where results will be saved
+MODELS_DIR="/work/schaffran1/toolbox/prpd_models/random_25"  # Directory containing model .xml files
+RESULTS_DIR="/work/schaffran1/jobresults/random_50"      # Directory where results will be saved
+CANDIDATES_CSV="/work/schaffran1/toolbox/results/analysis/recommended_candidates.csv"  # CSV file with species to process
 # ============================================================================
 
 # Create results directory
@@ -29,11 +30,8 @@ HEAP_SIZE="${HEAP_SIZE_GB}G"
 
 # HPC optimizations for Julia
 export JULIA_NUM_THREADS=1
-export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
-export MKL_NUM_THREADS=1
-export JULIA_GC_MEASURE_MALLOC=0
-export JULIA_GC_PARALLEL_COLLECT=1
+export OMP_NUM_THREADS=1
 
 # Julia optimization flags
 JULIA_OPTS="--project=/work/schaffran1/COCOA.jl"
@@ -44,8 +42,24 @@ JULIA_OPTS="$JULIA_OPTS --history-file=no"
 
 cd /work/schaffran1/COCOA.jl/scripts
 
-# Get the model file for this array task
-MODEL_FILES=($(find "$MODELS_DIR" -name "*.xml" | sort))
+# Read species IDs from CSV (skip header, get first column)
+RECOMMENDED_SPECIES=($(tail -n +2 "$CANDIDATES_CSV" | cut -d',' -f1))
+
+# Get the model file for this array task - filter to only recommended species
+MODEL_FILES=()
+for species_id in "${RECOMMENDED_SPECIES[@]}"; do
+    model_file="$MODELS_DIR/${species_id}.xml"
+    if [ -f "$model_file" ]; then
+        MODEL_FILES+=("$model_file")
+    else
+        echo "Warning: Model file not found for $species_id: $model_file"
+    fi
+done
+
+# Sort model files for consistent ordering
+IFS=$'\n' MODEL_FILES=($(sort <<<"${MODEL_FILES[*]}"))
+unset IFS
+
 MODEL_COUNT=${#MODEL_FILES[@]}
 
 if [ $MODEL_COUNT -eq 0 ]; then

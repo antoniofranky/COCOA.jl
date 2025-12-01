@@ -23,9 +23,9 @@ concordance_tolerance = 1e-2
 
 # HiGHS solver settings
 highs_settings = [
-    COBREXA.set_optimizer_attribute("primal_feasibility_tolerance", 1e-9),
-    COBREXA.set_optimizer_attribute("dual_feasibility_tolerance", 1e-9),
-    COBREXA.set_optimizer_attribute("mip_feasibility_tolerance", 1e-9),
+    COBREXA.set_optimizer_attribute("primal_feasibility_tolerance", 1e-7),
+    COBREXA.set_optimizer_attribute("dual_feasibility_tolerance", 1e-7),
+    COBREXA.set_optimizer_attribute("mip_feasibility_tolerance", 1e-7),
     COBREXA.set_optimizer_attribute("random_seed", seed),
     COBREXA.set_optimizer_attribute("time_limit", 1200.0),  # 20 minutes per optimization
     COBREXA.set_optimizer_attribute("presolve", "on"),
@@ -93,7 +93,7 @@ try
             cv_threshold=cv_threshold,
             batch_size=batch_size,
             use_transitivity=use_transitivity,
-            kinetic_analysis=false
+            kinetic_analysis=true
         )
     end
 
@@ -133,7 +133,7 @@ try
             "gc_time_fraction" => gc_time / analysis_duration
         ),
         "timestamp", Dates.now();
-        compress = true)
+        compress=true)
 
     # Print robustness results if available
     println("\nRobustness Results:")
