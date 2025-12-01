@@ -32,6 +32,111 @@ efficient sparse matrix construction, and AbstractFBCModels.jl for model interfa
 # ========================================================================================
 
 """
+    _extract_complexes_from_model(model::A.AbstractFBCModel)
+
+Extract unique complexes directly from model reactions without building constraints.
+
+This function analyzes the stoichiometry of each reaction to identify substrate and product
+complexes. It follows COBREXA patterns by using AbstractFBCModels accessors for efficient
+direct model access.
+
+# Arguments
+- `model::A.AbstractFBCModel`: FBC metabolic model
+
+# Returns
+Named tuple with:
+- `complexes::Dict{Symbol, Vector{Tuple{Symbol,Float64}}}`: Complex ID => metabolite composition
+- `reaction_complex_map::Dict{Symbol, Tuple{Symbol,Symbol}}`: Reaction ID => (substrate_id, product_id)
+
+# Algorithm
+1. Iterate through reactions using A.reaction_stoichiometry
+2. Separate substrates (negative coefficients) from products (positive)
+3. Sort metabolite compositions for canonical ordering
+4. Generate complex IDs and build mappings
+
+# Notes
+- Deterministic: same model always produces same complex ordering
+- Memory-efficient: processes reactions one at a time
+- Preserves stoichiometric coefficients exactly as in model
+"""
+function _extract_complexes_from_model(model::A.AbstractFBCModel)
+    complex_compositions = Dict{Symbol, Vector{Tuple{Symbol,Float64}}}()
+    reaction_to_complexes = Dict{Symbol, Tuple{Symbol,Symbol}}()
+
+    # Process reactions in model order for deterministic results
+    for rxn_id in A.reactions(model)
+        stoich = A.reaction_stoichiometry(model, rxn_id)
+
+        # Separate substrates and products
+        substrates = Tuple{Symbol,Float64}[]
+        products = Tuple{Symbol,Float64}[]
+
+        for (met_id, coef) in stoich
+            if coef < 0
+                push!(substrates, (Symbol(met_id), -coef))  # Store as positive
+            elseif coef > 0
+                push!(products, (Symbol(met_id), coef))
+            end
+            # Skip metabolites with zero coefficient (if any)
+        end
+
+        # Sort for canonical ordering (deterministic complex IDs)
+        sort!(substrates, by=x -> x[1])
+        sort!(products, by=x -> x[1])
+
+        # Generate complex IDs
+        substrate_id = _generate_complex_id(substrates)
+        product_id = _generate_complex_id(products)
+
+        # Store unique complexes
+        if !isempty(substrates)
+            complex_compositions[substrate_id] = substrates
+        end
+        if !isempty(products)
+            complex_compositions[product_id] = products
+        end
+
+        # Map reaction to its complexes
+        reaction_to_complexes[Symbol(rxn_id)] = (substrate_id, product_id)
+    end
+
+    return (complexes=complex_compositions, reaction_complex_map=reaction_to_complexes)
+end
+
+"""
+    _generate_complex_id(composition::Vector{Tuple{Symbol,Float64}})
+
+Generate a canonical complex ID from metabolite composition.
+
+# Arguments
+- `composition`: Vector of (metabolite_id, coefficient) tuples
+
+# Returns
+- `Symbol`: Complex ID in format "met1+2_met2+met3" for composition [(met1, 1.0), (met2, 2.0), (met3, 1.0)]
+
+# Notes
+- Empty compositions return :empty
+- Coefficients of 1.0 are omitted for readability
+- Non-unit coefficients are prefixed (e.g., "2_atp" for 2 ATP)
+"""
+function _generate_complex_id(composition::Vector{Tuple{Symbol,Float64}})
+    isempty(composition) && return :empty
+
+    # Composition should already be sorted by caller
+    parts = String[]
+    for (met_id, coef) in composition
+        if coef == 1.0
+            push!(parts, string(met_id))
+        else
+            # Format coefficient to avoid floating point artifacts
+            coef_str = isinteger(coef) ? string(Int(coef)) : string(coef)
+            push!(parts, "$(coef_str)_$(met_id)")
+        end
+    end
+    return Symbol(join(parts, "+"))
+end
+
+"""
     get_reaction_names_from_constraints(balance_constraints::C.ConstraintTree)
 
 Extract reaction names from balance constraints, handling both standard and split flux variables.
@@ -222,37 +327,54 @@ function stoichiometry(constraints::C.ConstraintTree; return_ids::Bool=false, mo
 end
 
 """
-    stoichiometry(model::A.AbstractFBCModel; return_ids::Bool=false, use_unidirectional::Bool=true)
+    stoichiometry(model::A.AbstractFBCModel; return_ids::Bool=false)
 
 Build stoichiometric matrix S directly from an AbstractFBCModel.
 
-This function constructs the stoichiometric matrix by first building a constraint tree
-(optionally with unidirectional reactions), then extracting the stoichiometry.
+Delegates to `AbstractFBCModels.stoichiometry(model)` for consistency with COBREXA ecosystem.
+This ensures the returned matrix matches the model's actual structure without any transformations.
+
+For matrices from preprocessed models (e.g., after `split_into_irreversible`), simply call this
+function on the preprocessed model.
 
 # Arguments
 - `model::A.AbstractFBCModel`: FBC model containing reactions and metabolites
 - `return_ids::Bool=false`: If true, also return metabolite and reaction ID vectors
-- `use_unidirectional::Bool=true`: If true, split reactions into forward/reverse
 
 # Returns
-Same as `stoichiometry(::C.ConstraintTree)`
+- If `return_ids=false`: `SparseMatrixCSC{Float64,Int}` - The stoichiometric matrix S
+- If `return_ids=true`: `(S, metabolite_ids, reaction_ids)`
 
 # Examples
 ```julia
+# Direct extraction from model
 model = load_model("model.xml")
 S = stoichiometry(model)
-S, metabolites, reactions = stoichiometry(model; return_ids=true)
-```
-"""
-function stoichiometry(model::A.AbstractFBCModel; return_ids::Bool=false, use_unidirectional::Bool=true)
-    # Build constraints to extract stoichiometry consistently
-    if use_unidirectional
-        constraints, _ = create_unidirectional_constraints(model)
-    else
-        constraints = COBREXA.flux_balance_constraints(model)
-    end
 
-    return stoichiometry(constraints; return_ids=return_ids, model=model)
+# With ID mappings
+S, metabolites, reactions = stoichiometry(model; return_ids=true)
+
+# From preprocessed model (explicit user control)
+model_split = split_into_irreversible(model)
+S_split = stoichiometry(model_split)  # Includes _f/_b reactions
+```
+
+# Notes
+- Delegates to AbstractFBCModels accessor for consistency
+- To get matrices with unidirectional constraints for concordance analysis, use constraint-based version
+- For model preprocessing, use `split_into_irreversible(model)` first
+"""
+function stoichiometry(model::A.AbstractFBCModel; return_ids::Bool=false)
+    # Delegate to AbstractFBCModels for consistency with COBREXA patterns
+    S = A.stoichiometry(model)
+
+    if return_ids
+        metabolite_ids = Symbol.(A.metabolites(model))
+        reaction_ids = Symbol.(A.reactions(model))
+        return S, metabolite_ids, reaction_ids
+    else
+        return S
+    end
 end
 
 # ========================================================================================
@@ -351,45 +473,92 @@ function complex_stoichiometry(constraints::C.ConstraintTree; return_ids::Bool=f
 end
 
 """
-    complex_stoichiometry(model::A.AbstractFBCModel; return_ids::Bool=false, use_unidirectional::Bool=true)
+    complex_stoichiometry(model::A.AbstractFBCModel; return_ids::Bool=false)
 
 Build species-complex composition matrix Y directly from an AbstractFBCModel.
 
-This function constructs the Y matrix by first building a constraint tree
-(optionally with unidirectional reactions), then extracting complexes using the same
-logic as `extract_complexes` to ensure consistency.
+Extracts complexes directly from reaction stoichiometry without building constraint trees.
+Uses AbstractFBCModels accessors for efficient direct model access, following COBREXA patterns.
 
 # Arguments
 - `model::A.AbstractFBCModel`: FBC model containing reactions and metabolites
 - `return_ids::Bool=false`: If true, also return metabolite and complex ID vectors
-- `use_unidirectional::Bool=true`: If true, split reactions into forward/reverse (matches concordance analysis)
 
 # Returns
-Same as `complex_stoichiometry(::C.ConstraintTree)`
+- If `return_ids=false`: `SparseMatrixCSC{Float64,Int}` - The Y matrix (metabolites × complexes)
+- If `return_ids=true`: `(Y, metabolite_ids, complex_ids)`
 
 # Examples
 ```julia
+# Direct extraction from model
 model = load_model("model.xml")
 Y = complex_stoichiometry(model)
+
+# With ID mappings
 Y, metabolites, complexes = complex_stoichiometry(model; return_ids=true)
 
-# Without unidirectional splitting (may give different complexes)
-Y = complex_stoichiometry(model; use_unidirectional=false)
+# From preprocessed model (explicit control)
+model_split = split_into_irreversible(model)
+Y_split = complex_stoichiometry(model_split)  # Different complexes for _f/_b reactions
 ```
 
 # Notes
-To ensure complex IDs match those from concordance analysis, use `use_unidirectional=true` (default).
-This will build constraints and extract complexes using the same logic as `extract_complexes`.
+- Uses `_extract_complexes_from_model()` for direct model access
+- Preserves original model metabolite order
+- For concordance analysis with constraints, use `complex_stoichiometry(constraints)`
 """
-function complex_stoichiometry(model::A.AbstractFBCModel; return_ids::Bool=false, use_unidirectional::Bool=true)
-    # Build constraints to extract complexes consistently
-    if use_unidirectional
-        constraints, _ = create_unidirectional_constraints(model)
-    else
-        constraints = COBREXA.flux_balance_constraints(model)
+function complex_stoichiometry(model::A.AbstractFBCModel; return_ids::Bool=false)
+    # Extract complexes directly from model structure
+    extracted = _extract_complexes_from_model(model)
+    complex_info = extracted.complexes
+
+    # Get complex IDs in deterministic order (sorted by first appearance)
+    complex_ids = collect(keys(complex_info))
+
+    # Get all unique metabolites from complexes
+    all_metabolites = Set{Symbol}()
+    for composition in values(complex_info)
+        for (met_id, _) in composition
+            push!(all_metabolites, met_id)
+        end
     end
 
-    return complex_stoichiometry(constraints; return_ids=return_ids, model=model)
+    # Preserve original model metabolite order
+    original_met_ids = Symbol.(A.metabolites(model))
+    metabolite_ids = filter(id -> id in all_metabolites, original_met_ids)
+
+    n_metabolites = length(metabolite_ids)
+    n_complexes = length(complex_ids)
+
+    # Build index mappings
+    metabolite_to_idx = Dict(met => i for (i, met) in enumerate(metabolite_ids))
+    complex_to_idx = Dict(comp => j for (j, comp) in enumerate(complex_ids))
+
+    # Pre-allocate triplets for sparse matrix construction
+    I = Int[]
+    J = Int[]
+    V = Float64[]
+
+    # Build Y matrix: Y[i,j] = stoichiometry of metabolite i in complex j
+    for (complex_id, composition) in complex_info
+        j = complex_to_idx[complex_id]
+        for (met_id, coeff) in composition
+            if haskey(metabolite_to_idx, met_id)
+                i = metabolite_to_idx[met_id]
+                push!(I, i)
+                push!(J, j)
+                push!(V, Float64(coeff))
+            end
+        end
+    end
+
+    Y_matrix = SparseArrays.sparse(I, J, V, n_metabolites, n_complexes)
+
+    if return_ids
+        return Y_matrix, metabolite_ids, complex_ids
+    else
+        return Y_matrix
+    end
 end
 
 # ========================================================================================
@@ -546,45 +715,103 @@ function incidence(constraints::C.ConstraintTree; return_ids::Bool=false, model:
 end
 
 """
-    incidence(model::A.AbstractFBCModel; return_ids::Bool=false, use_unidirectional::Bool=true)
+    incidence(model::A.AbstractFBCModel; return_ids::Bool=false)
 
 Build complex-reaction incidence matrix A directly from an AbstractFBCModel.
 
-This function constructs the incidence matrix by first building a constraint tree
-(optionally with unidirectional reactions), then extracting complexes using the same
-logic as `extract_complexes` to ensure consistency.
+Extracts the incidence matrix directly from reaction stoichiometry without building constraint trees.
+Uses AbstractFBCModels accessors for efficient direct model access, following COBREXA patterns.
 
 # Arguments
 - `model::A.AbstractFBCModel`: FBC model containing reactions and metabolites
 - `return_ids::Bool=false`: If true, also return complex and reaction ID vectors
-- `use_unidirectional::Bool=true`: If true, split reactions into forward/reverse (matches concordance analysis)
 
 # Returns
-Same as `incidence(::C.ConstraintTree)`
+- If `return_ids=false`: `SparseMatrixCSC{Int,Int}` - The A matrix (complexes × reactions)
+- If `return_ids=true`: `(A, complex_ids, reaction_ids)`
+
+# Matrix Structure
+- Entry A[i,j] = -1 if complex i is consumed (substrate) in reaction j
+- Entry A[i,j] = +1 if complex i is produced (product) in reaction j
+- Entry A[i,j] = 0 otherwise
 
 # Examples
 ```julia
+# Direct extraction from model
 model = load_model("model.xml")
 A = incidence(model)
+
+# With ID mappings
 A, complexes, reactions = incidence(model; return_ids=true)
 
-# Without unidirectional splitting (may give different complexes)
-A = incidence(model; use_unidirectional=false)
+# Verify mathematical relationship: Y * A ≈ S
+Y = complex_stoichiometry(model)
+S = stoichiometry(model)
+@assert Y * A ≈ S  # Should be true!
+
+# From preprocessed model
+model_split = split_into_irreversible(model)
+A_split = incidence(model_split)  # Includes _f/_b reactions
 ```
 
 # Notes
-To ensure complex IDs match those from concordance analysis, use `use_unidirectional=true` (default).
-This will build constraints and extract complexes using the same logic as `extract_complexes`.
+- Uses `_extract_complexes_from_model()` for direct model access
+- Preserves original model reaction order
+- Guarantees Y * A = S when using same model for all matrices
+- For concordance analysis with constraints, use `incidence(constraints)`
 """
-function incidence(model::A.AbstractFBCModel; return_ids::Bool=false, use_unidirectional::Bool=false)
-    # Build constraints to extract complexes consistently
-    if use_unidirectional
-        constraints = concordance_constraints(model, use_unidirectional_constraints=true)
-    else
-        constraints = concordance_constraints(model, use_unidirectional_constraints=false)
+function incidence(model::A.AbstractFBCModel; return_ids::Bool=false)
+    # Extract complexes and reaction mappings directly from model
+    extracted = _extract_complexes_from_model(model)
+    complex_info = extracted.complexes
+    reaction_complex_map = extracted.reaction_complex_map
+
+    # Get IDs in deterministic order
+    complex_ids = collect(keys(complex_info))
+    reaction_ids = Symbol.(A.reactions(model))  # Preserve model order
+
+    n_complexes = length(complex_ids)
+    n_reactions = length(reaction_ids)
+
+    # Build index mappings
+    complex_to_idx = Dict(comp => i for (i, comp) in enumerate(complex_ids))
+    reaction_to_idx = Dict(rxn => j for (j, rxn) in enumerate(reaction_ids))
+
+    # Pre-allocate triplets for sparse matrix construction
+    I = Int[]
+    J = Int[]
+    V = Int[]
+
+    # Build A matrix: A[i,j] indicates complex i participation in reaction j
+    for (rxn_id, (substrate_id, product_id)) in reaction_complex_map
+        if haskey(reaction_to_idx, rxn_id)
+            j = reaction_to_idx[rxn_id]
+
+            # Substrate complex is consumed (-1)
+            if substrate_id != :empty && haskey(complex_to_idx, substrate_id)
+                i = complex_to_idx[substrate_id]
+                push!(I, i)
+                push!(J, j)
+                push!(V, -1)
+            end
+
+            # Product complex is produced (+1)
+            if product_id != :empty && haskey(complex_to_idx, product_id)
+                i = complex_to_idx[product_id]
+                push!(I, i)
+                push!(J, j)
+                push!(V, +1)
+            end
+        end
     end
 
-    return incidence(constraints; return_ids=return_ids, model=model)
+    A_matrix = SparseArrays.sparse(I, J, V, n_complexes, n_reactions)
+
+    if return_ids
+        return A_matrix, complex_ids, reaction_ids
+    else
+        return A_matrix
+    end
 end
 
 # ========================================================================================
