@@ -42,7 +42,7 @@ JULIA_OPTS="$JULIA_OPTS --heap-size-hint=$HEAP_SIZE"
 JULIA_OPTS="$JULIA_OPTS --startup-file=no"
 JULIA_OPTS="$JULIA_OPTS --history-file=no"
 
-cd /work/schaffran1/COCOA.jl
+cd /work/schaffran1/COCOA.jl/scripts
 
 # Get the model file for this array task
 MODEL_FILES=($(find "$MODELS_DIR" -name "*.xml" | sort))
