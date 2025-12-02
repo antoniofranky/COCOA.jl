@@ -316,11 +316,6 @@ function extract_complexes(constraints::C.ConstraintTree)
         complex_info[complex_id] = metabolite_composition
     end
 
-    @info "Complex extraction complete" (
-        unique_complexes=length(complex_info),
-        reactions_analyzed=length(reaction_metabolite_map)
-    )
-
     return complex_info, reaction_metabolite_map
 end
 
@@ -375,23 +370,8 @@ function extract_activities_from_constraints(constraints::C.ConstraintTree)
 
     activities_tree = C.ConstraintTree(activity_pairs)
 
-    @info "Complex activity extraction complete" (
-        unique_complexes=length(complex_info),
-        activities=length(activities_tree)
-    )
 
     return activities_tree, complex_info
 end
-function generate_complex_id(metabolite_composition)
-    # Sort by metabolite name for canonical ordering
-    sorted_mets = sort(metabolite_composition, by=x -> x[1])
-    parts = String[]
-    for (met_id, coeff) in sorted_mets
-        if coeff == 1.0
-            push!(parts, string(met_id))
-        else
-            push!(parts, "$(coeff)_$(met_id)")
-        end
-    end
-    return Symbol(join(parts, "+"))
-end
+
+# Note: generate_complex_id is defined in matrix_builders.jl and imported

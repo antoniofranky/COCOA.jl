@@ -1135,7 +1135,7 @@ function activity_concordance_analysis(
 
     # Apply kinetic analysis if requested
     if kinetic_analysis
-        apply_kinetic_analysis!(complete_model, constraints)
+        apply_kinetic_analysis!(complete_model, constraints, model)
     end
 
     return complete_model

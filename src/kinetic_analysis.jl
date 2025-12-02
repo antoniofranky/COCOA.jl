@@ -371,7 +371,7 @@ end
 
 
 """
-    apply_kinetic_analysis!(results, constraints; min_module_size, verbose)
+    apply_kinetic_analysis!(results, constraints, model; min_module_size, verbose)
 
 Apply upstream algorithm with coupling detection to identify kinetic modules.
 
@@ -382,6 +382,13 @@ Apply upstream algorithm with coupling detection to identify kinetic modules.
 4. Merge upstream sets that share complexes
 5. Detect ACR/ACRR properties and interface reactions
 
+# Arguments
+- `results`: ConcordanceResults to update
+- `constraints`: Constraint tree from concordance analysis
+- `model`: AbstractFBCModel used to build constraints (required for matrix extraction)
+- `min_module_size`: Minimum module size to report
+- `verbose`: Enable detailed logging
+
 # Updates
 Modifies `results` in-place, setting:
 - `kinetic_modules`: module assignment for each complex
@@ -391,7 +398,8 @@ Modifies `results` in-place, setting:
 """
 function apply_kinetic_analysis!(
     results::ConcordanceResults,
-    constraints::C.ConstraintTree;
+    constraints::C.ConstraintTree,
+    model::A.AbstractFBCModel;
     min_module_size::Int=1,
     verbose::Bool=true
 )
@@ -404,8 +412,9 @@ function apply_kinetic_analysis!(
     results.acrr_pairs = Tuple{Symbol,Symbol}[]
     results.giant_id = 0
 
-    # Build incidence matrix A from constraints
-    A_matrix = incidence(constraints)
+    # Build matrices once and reuse them (pass model for consistency)
+    A_matrix = incidence(constraints; model=model)
+    Y_matrix, _, _ = complex_stoichiometry(constraints; model=model, return_ids=true)
     balanced_complexes = findall(==(0), results.concordance_modules)
 
     verbose && @debug "Setup" n_complexes = length(results.complex_ids) n_balanced = length(balanced_complexes)
@@ -438,7 +447,7 @@ function apply_kinetic_analysis!(
 
     # Step 6: Analyze concentration robustness (ACR/ACRR) and interface reactions
     if kinetic_module_count > 0
-        analyze_robustness_properties!(results, kinetic_modules, constraints, min_module_size, verbose)
+        analyze_robustness_properties!(results, kinetic_modules, Y_matrix, A_matrix, model, min_module_size, verbose)
     end
 
     verbose && @info "Kinetic analysis complete" (
@@ -573,14 +582,16 @@ function identify_giant_module!(
 end
 
 """
-    analyze_robustness_properties!(results, kinetic_modules, constraints, min_module_size, verbose)
+    analyze_robustness_properties!(results, kinetic_modules, Y_matrix, A_matrix, model, min_module_size, verbose)
 
-Detect ACR/ACRR properties and interface reactions.
+Detect ACR/ACRR properties and interface reactions using pre-built matrices.
 """
 function analyze_robustness_properties!(
     results::ConcordanceResults,
     kinetic_modules::Vector{Vector{Int}},
-    constraints::C.ConstraintTree,
+    Y_matrix::AbstractMatrix,
+    A_matrix::AbstractMatrix,
+    model::A.AbstractFBCModel,
     min_module_size::Int,
     verbose::Bool
 )
@@ -592,8 +603,7 @@ function analyze_robustness_properties!(
         length(km) >= min_module_size && (kinetic_groups[i] = km)
     end
 
-    # Build complex composition matrix Y
-    Y_matrix, _, _ = complex_stoichiometry(constraints; return_ids=true)
+    # Use pre-built Y_matrix (already passed in)
 
     # Detect ACR metabolites
     acr_indices = detect_acr_metabolites(kinetic_groups, Y_matrix)
@@ -610,7 +620,7 @@ function analyze_robustness_properties!(
     end
 
     # Detect interface reactions
-    detect_interface_reactions!(results, kinetic_modules, constraints)
+    detect_interface_reactions!(results, kinetic_modules, A_matrix)
 
     # Update stats
     results.stats["n_acr_metabolites"] = length(results.acr_metabolites)
@@ -693,7 +703,7 @@ end
 # ========================================================================================
 
 """
-    detect_interface_reactions!(results, kinetic_modules, constraints)
+    detect_interface_reactions!(results, kinetic_modules, A_matrix)
 
 Detect interface reactions (connect different kinetic modules) vs intra-module reactions.
 Updates `results.interface_reactions` BitVector in-place.
@@ -701,13 +711,12 @@ Updates `results.interface_reactions` BitVector in-place.
 function detect_interface_reactions!(
     results::ConcordanceResults,
     kinetic_modules::Vector{Vector{Int}},
-    constraints::C.ConstraintTree
+    A_matrix::AbstractMatrix
 )
     # Initialize all as interface reactions
     fill!(results.interface_reactions, true)
 
-    # Build incidence matrix A and complex-to-module mapping
-    A_matrix = incidence(constraints)
+    # Use pre-built A_matrix and build complex-to-module mapping
     complex_to_module = Dict{Int,Int}()
     for (mod_id, complexes) in enumerate(kinetic_modules)
         for complex_idx in complexes

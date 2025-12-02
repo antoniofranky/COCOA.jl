@@ -70,8 +70,8 @@ using DocStringExtensions
 
 # Include main modules
 include("data_structures.jl")
+include("matrix_builders.jl")  # Must come before constraints.jl (provides generate_complex_id)
 include("constraints.jl")
-include("matrix_builders.jl")
 include("filter.jl")
 include("variability.jl")
 include("concordance.jl")

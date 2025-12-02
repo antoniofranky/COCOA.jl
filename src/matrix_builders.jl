@@ -62,6 +62,7 @@ Named tuple with:
 function _extract_complexes_from_model(model::A.AbstractFBCModel)
     complex_compositions = Dict{Symbol,Vector{Tuple{Symbol,Float64}}}()
     reaction_to_complexes = Dict{Symbol,Tuple{Symbol,Symbol}}()
+    complex_order = Symbol[]  # Track order complexes are first encountered
 
     # Process reactions in model order for deterministic results
     for rxn_id in A.reactions(model)
@@ -85,31 +86,39 @@ function _extract_complexes_from_model(model::A.AbstractFBCModel)
         sort!(products, by=x -> x[1])
 
         # Generate complex IDs
-        substrate_id = _generate_complex_id(substrates)
-        product_id = _generate_complex_id(products)
+        substrate_id = generate_complex_id(substrates)
+        product_id = generate_complex_id(products)
 
-        # Store unique complexes
+        # Store unique complexes and track order
         if !isempty(substrates)
-            complex_compositions[substrate_id] = substrates
+            if !haskey(complex_compositions, substrate_id)
+                complex_compositions[substrate_id] = substrates
+                push!(complex_order, substrate_id)
+            end
         end
         if !isempty(products)
-            complex_compositions[product_id] = products
+            if !haskey(complex_compositions, product_id)
+                complex_compositions[product_id] = products
+                push!(complex_order, product_id)
+            end
         end
 
         # Map reaction to its complexes
         reaction_to_complexes[Symbol(rxn_id)] = (substrate_id, product_id)
     end
 
-    return (complexes=complex_compositions, reaction_complex_map=reaction_to_complexes)
+    return (complexes=complex_compositions, reaction_complex_map=reaction_to_complexes, complex_order=complex_order)
 end
 
 """
-    _generate_complex_id(composition::Vector{Tuple{Symbol,Float64}})
+    generate_complex_id(composition::Vector{Tuple{Symbol,Float64}})
 
 Generate a canonical complex ID from metabolite composition.
 
+This is the canonical implementation used throughout COCOA for consistent complex naming.
+
 # Arguments
-- `composition`: Vector of (metabolite_id, coefficient) tuples
+- `composition`: Vector of (metabolite_id, coefficient) tuples (should be sorted)
 
 # Returns
 - `Symbol`: Complex ID in format "met1+2_met2+met3" for composition [(met1, 1.0), (met2, 2.0), (met3, 1.0)]
@@ -117,9 +126,11 @@ Generate a canonical complex ID from metabolite composition.
 # Notes
 - Empty compositions return :empty
 - Coefficients of 1.0 are omitted for readability
-- Non-unit coefficients are prefixed (e.g., "2_atp" for 2 ATP)
+- Integer-valued coefficients are formatted without decimals (e.g., "2" not "2.0")
+- Non-integer coefficients preserve decimal representation (e.g., "2.5")
+- This ensures consistent complex IDs across model-based and constraint-based extraction
 """
-function _generate_complex_id(composition::Vector{Tuple{Symbol,Float64}})
+function generate_complex_id(composition::Vector{Tuple{Symbol,Float64}})
     isempty(composition) && return :empty
 
     # Composition should already be sorted by caller
@@ -420,9 +431,33 @@ function complex_stoichiometry(constraints::C.ConstraintTree; return_ids::Bool=f
     # Extract complexes using the shared function
     complex_info, _ = extract_complexes(constraints)
 
-    # Get complex IDs - preserve insertion order from ConstraintTree
-    # Complexes are generated in a deterministic order by extract_complexes
-    complex_ids = collect(keys(complex_info))
+    # Get complex IDs - use model ordering if available for consistency
+    if model !== nothing
+        # Use model's complex ordering for consistency with model-based extraction
+        model_extracted = _extract_complexes_from_model(model)
+        model_complex_order = model_extracted.complex_order
+        constraint_complex_set = Set(keys(complex_info))
+        model_complex_set = Set(model_complex_order)
+
+        # Verify consistency: constraint extraction should give same complexes as model
+        if constraint_complex_set != model_complex_set
+            missing_in_constraints = setdiff(model_complex_set, constraint_complex_set)
+            extra_in_constraints = setdiff(constraint_complex_set, model_complex_set)
+            @warn "Complex mismatch between model and constraints" n_missing=length(missing_in_constraints) n_extra=length(extra_in_constraints)
+            if !isempty(missing_in_constraints)
+                @warn "Complexes in model but not constraints (first 5)" missing=collect(missing_in_constraints)[1:min(5, end)]
+            end
+            if !isempty(extra_in_constraints)
+                @warn "Complexes in constraints but not model (first 5)" extra=collect(extra_in_constraints)[1:min(5, end)]
+            end
+        end
+
+        # Use model order, filtering to only complexes present in both
+        complex_ids = filter(id -> id in constraint_complex_set, model_complex_order)
+    else
+        # Fallback to insertion order from extract_complexes
+        complex_ids = collect(keys(complex_info))
+    end
 
     # Get all unique metabolites
     all_metabolites = Set{Symbol}()
@@ -511,9 +546,7 @@ function complex_stoichiometry(model::A.AbstractFBCModel; return_ids::Bool=false
     # Extract complexes directly from model structure
     extracted = _extract_complexes_from_model(model)
     complex_info = extracted.complexes
-
-    # Get complex IDs in deterministic order (sorted alphabetically for consistency)
-    complex_ids = sort(collect(keys(complex_info)))
+    complex_ids = extracted.complex_order  # Use deterministic order from reaction processing
 
     # Get all unique metabolites from complexes
     all_metabolites = Set{Symbol}()
@@ -625,10 +658,34 @@ function incidence(constraints::C.ConstraintTree; return_ids::Bool=false, model:
         reaction_ids = Symbol.(reaction_names)
     end
 
-    # Get complex IDs from extract_complexes for consistency with complex_stoichiometry
-    # This ensures Y and A matrices use the same complex ordering
+    # Get complex IDs - use model ordering if available for consistency
     complex_info, _ = extract_complexes(constraints)
-    complex_ids = collect(keys(complex_info))
+    if model !== nothing
+        # Use model's complex ordering for consistency with model-based extraction
+        model_extracted = _extract_complexes_from_model(model)
+        model_complex_order = model_extracted.complex_order
+        constraint_complex_set = Set(keys(complex_info))
+        model_complex_set = Set(model_complex_order)
+
+        # Verify consistency: constraint extraction should give same complexes as model
+        if constraint_complex_set != model_complex_set
+            missing_in_constraints = setdiff(model_complex_set, constraint_complex_set)
+            extra_in_constraints = setdiff(constraint_complex_set, model_complex_set)
+            @warn "Complex mismatch between model and constraints" n_missing=length(missing_in_constraints) n_extra=length(extra_in_constraints)
+            if !isempty(missing_in_constraints)
+                @warn "Complexes in model but not constraints (first 5)" missing=collect(missing_in_constraints)[1:min(5, end)]
+            end
+            if !isempty(extra_in_constraints)
+                @warn "Complexes in constraints but not model (first 5)" extra=collect(extra_in_constraints)[1:min(5, end)]
+            end
+        end
+
+        # Use model order, filtering to only complexes present in both
+        complex_ids = filter(id -> id in constraint_complex_set, model_complex_order)
+    else
+        # Fallback to insertion order from extract_complexes
+        complex_ids = collect(keys(complex_info))
+    end
 
     # Verify activities exist for all complexes
     if !haskey(constraints, :activities)
@@ -769,9 +826,7 @@ function incidence(model::A.AbstractFBCModel; return_ids::Bool=false)
     extracted = _extract_complexes_from_model(model)
     complex_info = extracted.complexes
     reaction_complex_map = extracted.reaction_complex_map
-
-    # Get IDs in deterministic order (sorted alphabetically to match complex_stoichiometry)
-    complex_ids = sort(collect(keys(complex_info)))
+    complex_ids = extracted.complex_order  # Use deterministic order from reaction processing
     reaction_ids = Symbol.(A.reactions(model))  # Preserve model order
 
     n_complexes = length(complex_ids)
