@@ -197,10 +197,9 @@ function create_envz_ompr_model()
     )
 
     # Add exchange reactions for boundary conditions (to make system feasible)
-    # Exchange COMPLEXES rather than single metabolites to avoid creating artificial complexes
-    # This matches the biochemical reality that complexes (not isolated metabolites) cross boundaries
+    # These allow for input/output of metabolites at the system boundary
 
-    # Source reactions for initial substrates (import)
+    # Source reactions for initial substrates
     model.reactions["EX_A"] = CM.Reaction(
         name="Exchange A",
         stoichiometry=Dict("A" => 1.0),
@@ -208,35 +207,32 @@ function create_envz_ompr_model()
         upper_bound=10.0
     )
 
-    # Exchange D+E complex (instead of E alone, since E is always used with D)
-    model.reactions["EX_DE"] = CM.Reaction(
-        name="Exchange D+E complex",
-        stoichiometry=Dict("D" => 1.0, "E" => 1.0),
-        lower_bound=-10.0,  # Can import D+E together
+    model.reactions["EX_E"] = CM.Reaction(
+        name="Exchange E",
+        stoichiometry=Dict("E" => 1.0),
+        lower_bound=-10.0,
         upper_bound=10.0
     )
 
-    # Exchange B+G complex (instead of G alone, since G is produced with B in R8)
-    model.reactions["EX_BG"] = CM.Reaction(
-        name="Exchange B+G complex",
-        stoichiometry=Dict("B" => 1.0, "G" => 1.0),
-        lower_bound=-10.0,  # Can import B+G together
+    model.reactions["EX_G"] = CM.Reaction(
+        name="Exchange G",
+        stoichiometry=Dict("G" => 1.0),
+        lower_bound=-10.0,
         upper_bound=10.0
     )
 
-    # Sink reactions for terminal products (export only)
+    # Sink reactions for terminal products
     model.reactions["EX_D"] = CM.Reaction(
         name="Exchange D",
         stoichiometry=Dict("D" => -1.0),
-        lower_bound=0.0,  # Export only
+        lower_bound=0.0,
         upper_bound=10.0
     )
 
-    # Export C+I complex (instead of I alone, since I is produced with C in R11)
-    model.reactions["EX_CI"] = CM.Reaction(
-        name="Exchange C+I complex",
-        stoichiometry=Dict("C" => -1.0, "I" => -1.0),
-        lower_bound=0.0,  # Export only
+    model.reactions["EX_I"] = CM.Reaction(
+        name="Exchange I",
+        stoichiometry=Dict("I" => -1.0),
+        lower_bound=0.0,
         upper_bound=10.0
     )
 

@@ -126,10 +126,7 @@ function concordance_constraints(
     interface=nothing,
     use_unidirectional_constraints::Bool=false,
 )
-    # Apply modifications to the model
-    for mod in modifications
-        mod(model)
-    end
+    # TODO: Apply modifications correctly COBREXA style (not implemented yet)
     if use_unidirectional_constraints
         constraints, split_indices = create_unidirectional_constraints(model)
     else
@@ -192,6 +189,11 @@ function create_charnes_cooper_template(
     if haskey(template_constraints, :fluxes_reverse)
         template_constraints.fluxes_reverse = apply_charnes_cooper_scaling(
             template_constraints.fluxes_reverse, template_constraints.t.value, direction
+        )
+    end
+    if haskey(template_constraints, :fluxes)
+        template_constraints.fluxes = apply_charnes_cooper_scaling(
+            template_constraints.fluxes, template_constraints.t.value, direction
         )
     end
 
