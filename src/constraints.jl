@@ -121,10 +121,15 @@ constraints.balance *= :objective_bound^COBREXA.C.Constraint(
 """
 function concordance_constraints(
     model::A.AbstractFBCModel;
+    modifications=Function[],
     return_complexes::Bool=false,
     interface=nothing,
     use_unidirectional_constraints::Bool=false,
 )
+    # Apply modifications to the model
+    for mod in modifications
+        mod(model)
+    end
     if use_unidirectional_constraints
         constraints, split_indices = create_unidirectional_constraints(model)
     else
@@ -339,7 +344,8 @@ function extract_activities_from_constraints(constraints::C.ConstraintTree)
     # Build activities constraint tree directly using generator
     activity_pairs = Pair{Symbol,C.Constraint}[]
 
-    # Preserve insertion order from complex_info (no sorting)
+    # ConstraintTree will sort keys alphabetically regardless of insertion order
+    # This is fine since activities are accessed by ID, not by index
     for complex_id in keys(complex_info)
         metabolite_composition = complex_info[complex_id]
         # Build activity as sum of reaction contributions

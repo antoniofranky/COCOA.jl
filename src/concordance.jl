@@ -611,37 +611,26 @@ function activity_concordance_analysis(
         end
     end
 
-    n_complexes = length(complexes)
-    # Get complex IDs in insertion order (deterministic from extract_complexes)
-    complex_ids = collect(keys(complexes))
+    # IMPORTANT: Extract complexes and their ordering once as single source of truth
+    # This ensures consistency between Y matrix, concordance matrix, and kinetic analysis
+    # NOTE: Do NOT pass model parameter - use constraint-based extraction only for concordance
+    @info "Building Y matrix for trivial relationship detection"
+    Y_matrix, metabolite_ids, complex_ids = complex_stoichiometry(constraints; return_ids=true)
 
-    # Get correct reaction count from constraints (accounts for reaction splitting)
+    # Get dimensions from the extracted data
+    n_complexes = length(complex_ids)
+    n_metabolites = length(metabolite_ids)
     n_reactions = C.var_count(constraints.balance)
-    n_metabolites = length(constraints.balance.flux_stoichiometry)
 
     @info "Model statistics" n_complexes n_reactions n_metabolites
 
-    # Get metabolite ordering - preserve original model order
-    all_metabolites = Set{Symbol}()
-    for complex in values(complexes)
-        for (met_id, _) in complex
-            push!(all_metabolites, met_id)
-        end
-    end
-    original_met_ids = Symbol.(A.metabolites(model))
-    metabolite_ids = filter(id -> id in all_metabolites, original_met_ids)
-
-    # Construct Y matrix once for all trivial relationship detection
-    @info "Building Y matrix for trivial relationship detection"
-    Y_matrix, Y_metabolite_ids, Y_complex_ids = Y_matrix_from_constraints(constraints; return_ids=true, model=model)
-
     @info "Finding trivially balanced complexes"
-    initial_balanced = find_trivially_balanced_complexes_sparse(Y_matrix, Y_metabolite_ids, Y_complex_ids)
-    trivially_balanced = extend_trivially_balanced_complexes_sparse(Y_matrix, Y_metabolite_ids, Y_complex_ids, initial_balanced)
+    initial_balanced = find_trivially_balanced_complexes_sparse(Y_matrix, metabolite_ids, complex_ids)
+    trivially_balanced = extend_trivially_balanced_complexes_sparse(Y_matrix, metabolite_ids, complex_ids, initial_balanced)
     @info "Found trivially balanced complexes" n_trivivally_balanced = length(trivially_balanced)
 
     @info "Finding trivially concordant pairs"
-    trivial_pairs = find_trivially_concordant_pairs_sparse(Y_matrix, Y_metabolite_ids, Y_complex_ids)
+    trivial_pairs = find_trivially_concordant_pairs_sparse(Y_matrix, metabolite_ids, complex_ids)
     @info "Found trivially concordant pairs" n_trivially_concordant = length(trivial_pairs)
 
     # Initialize basic matrix structure - we'll build the complete matrix later

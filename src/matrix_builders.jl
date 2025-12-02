@@ -13,14 +13,8 @@ identification.
 
 # Functions
 - [`stoichiometry`](@ref): Build metabolite-reaction stoichiometric matrix N
-- [`complex_stoichiometry`](@ref): Build metabolite-complex composition matrix Y  
+- [`complex_stoichiometry`](@ref): Build metabolite-complex composition matrix Y
 - [`incidence`](@ref): Build complex-reaction incidence matrix A
-
-# Legacy Aliases (for backward compatibility)
-- `S_from_constraints` → `stoichiometry`
-- `Y_matrix_from_constraints` → `complex_stoichiometry`
-- `A_matrix_from_constraints` → `incidence`
-- `A_matrix_from_model` → `incidence`
 
 # Dependencies
 Requires ConstraintTrees.jl for constraint tree processing, SparseArrays.jl for
@@ -873,18 +867,3 @@ function incidence(model::A.AbstractFBCModel; return_ids::Bool=false)
     end
 end
 
-# ========================================================================================
-# Legacy Aliases (for backward compatibility)
-# ========================================================================================
-
-"""Alias for `stoichiometry(::C.ConstraintTree)`"""
-const S_from_constraints = stoichiometry
-
-"""Alias for `complex_stoichiometry(::C.ConstraintTree)`"""
-const Y_matrix_from_constraints = complex_stoichiometry
-
-"""Alias for `incidence(::C.ConstraintTree)`"""
-const A_matrix_from_constraints = incidence
-
-"""Alias for `incidence(::A.AbstractFBCModel)`"""
-const A_matrix_from_model = incidence
