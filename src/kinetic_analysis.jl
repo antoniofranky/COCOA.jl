@@ -412,9 +412,9 @@ function apply_kinetic_analysis!(
     results.acrr_pairs = Tuple{Symbol,Symbol}[]
     results.giant_id = 0
 
-    # Build matrices once and reuse them (pass model for consistency)
-    A_matrix = incidence(constraints; model=model)
-    Y_matrix, _, _ = complex_stoichiometry(constraints; model=model, return_ids=true)
+    # Build matrices once and reuse them (use constraint-based extraction for consistency with concordance)
+    A_matrix = incidence(constraints)
+    Y_matrix = complex_stoichiometry(constraints)
     balanced_complexes = findall(==(0), results.concordance_modules)
 
     verbose && @debug "Setup" n_complexes = length(results.complex_ids) n_balanced = length(balanced_complexes)
