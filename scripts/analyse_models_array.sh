@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=cocoa_array
-#SBATCH --chdir=/work/schaffran1/jobresults/random_25
-#SBATCH --output=/work/schaffran1/jobresults/random_25/ka_cocoa_model_%A_%a.out
+#SBATCH --chdir=/work/schaffran1/jobresults/random_100
+#SBATCH --output=/work/schaffran1/jobresults/random_100/ka_cocoa_model_%A_%a.out
 #SBATCH --time=2-00:00:00
 #SBATCH --qos=normal
 #SBATCH --nodes=1
@@ -16,8 +16,8 @@
 # ============================================================================
 # CONFIGURATION - Edit these two paths to match your setup
 # ============================================================================
-MODELS_DIR="/work/schaffran1/toolbox/prpd_models/random_25"  # Directory containing model .xml files
-RESULTS_DIR="/work/schaffran1/jobresults/random_50"      # Directory where results will be saved
+MODELS_DIR="/work/schaffran1/toolbox/prpd_models/random_100"  # Directory containing model .xml files
+RESULTS_DIR="/work/schaffran1/jobresults/random_100"      # Directory where results will be saved
 CANDIDATES_CSV="/work/schaffran1/toolbox/results/analysis/recommended_candidates.csv"  # CSV file with species to process
 # ============================================================================
 
