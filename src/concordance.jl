@@ -613,9 +613,9 @@ function activity_concordance_analysis(
 
     # IMPORTANT: Extract complexes and their ordering once as single source of truth
     # This ensures consistency between Y matrix, concordance matrix, and kinetic analysis
-    # NOTE: Do NOT pass model parameter - use constraint-based extraction only for concordance
+    # Pass model to ensure ordering matches model's reaction/metabolite order for consistency with kinetic analysis
     @info "Building Y matrix for trivial relationship detection"
-    Y_matrix, metabolite_ids, complex_ids = complex_stoichiometry(constraints; return_ids=true)
+    Y_matrix, metabolite_ids, complex_ids = complex_stoichiometry(constraints; return_ids=true, model=model)
 
     # Get dimensions from the extracted data
     n_complexes = length(complex_ids)
@@ -2338,4 +2338,62 @@ function calculate_final_concordance_statistics!(
     @debug "Full concordance analysis statistics" final_stats
 
     return final_stats
+end
+
+"""
+    extract_concordance_modules(results::ConcordanceResults)
+
+Extract concordance modules in the format required for kinetic analysis.
+
+Returns a `Vector{Set{Symbol}}` where:
+- First element: Set of balanced complexes (module ID = 0)
+- Remaining elements: Sets of complexes for each concordance module (module ID > 0)
+- Singleton modules: Each unbalanced complex with no concordant partners (module ID = -1)
+  forms its own singleton concordance module
+
+# Example
+```julia
+results = activity_concordance_analysis(model; optimizer=HiGHS.Optimizer)
+concordance_modules = extract_concordance_modules(results)
+kinetic_modules = kinetic_analysis(concordance_modules, model)
+```
+"""
+function extract_concordance_modules(results::ConcordanceResults)
+    # Group complexes by module ID (except singletons which are handled individually)
+    module_groups = Dict{Int,Set{Symbol}}()
+
+    for (i, module_id) in enumerate(results.concordance_modules)
+        complex_id = results.complex_ids[i]
+
+        # Skip singletons for now - we'll add them individually later
+        if module_id == -1
+            continue
+        end
+
+        if !haskey(module_groups, module_id)
+            module_groups[module_id] = Set{Symbol}()
+        end
+        push!(module_groups[module_id], complex_id)
+    end
+
+    # Build result vector: balanced first, then concordance modules, then singletons
+    concordance_vector = Vector{Set{Symbol}}()
+
+    # First element: balanced complexes (module_id = 0)
+    balanced = get(module_groups, 0, Set{Symbol}())
+    push!(concordance_vector, balanced)
+
+    # Multi-complex concordance modules (module_id > 0) in sorted order
+    for module_id in sort(filter(id -> id > 0, collect(keys(module_groups))))
+        push!(concordance_vector, module_groups[module_id])
+    end
+
+    # Singleton concordance modules: each singleton complex as its own module
+    for (i, module_id) in enumerate(results.concordance_modules)
+        if module_id == -1
+            push!(concordance_vector, Set([results.complex_ids[i]]))
+        end
+    end
+
+    return concordance_vector
 end

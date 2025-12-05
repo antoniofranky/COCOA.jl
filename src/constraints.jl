@@ -190,8 +190,7 @@ function create_charnes_cooper_template(
         template_constraints.fluxes_reverse = apply_charnes_cooper_scaling(
             template_constraints.fluxes_reverse, template_constraints.t.value, direction
         )
-    end
-    if haskey(template_constraints, :fluxes)
+    elseif haskey(template_constraints, :fluxes)
         template_constraints.fluxes = apply_charnes_cooper_scaling(
             template_constraints.fluxes, template_constraints.t.value, direction
         )

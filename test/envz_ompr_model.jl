@@ -29,7 +29,7 @@ function create_envz_ompr_model()
     # Create empty model
     model = CM.Model()
 
-    # Add metabolites (species A through I - J is a complex, not a species)
+    # Add metabolites (species A through J)
     model.metabolites = Dict(
         "A" => CM.Metabolite(name="Species A"),
         "B" => CM.Metabolite(name="Species B"),
@@ -39,13 +39,13 @@ function create_envz_ompr_model()
         "F" => CM.Metabolite(name="Species F"),
         "G" => CM.Metabolite(name="Species G"),
         "H" => CM.Metabolite(name="Species H"),
-        "I" => CM.Metabolite(name="Species I")
+        "I" => CM.Metabolite(name="Species I"),
+        "J" => CM.Metabolite(name="Complex J")
     )
 
     # Add reactions based on Figure 1A
     # The figure shows 14 reactions connecting 13 complexes
-    # Complexes: A, B, C, D, D+E, F, B+G, C+G, H, C+I, A+G, J, A+I
-    # J is a complex formed from A+G, not a separate species
+    # Complexes: A, B, C, D, D+E, F, B+G, C+G, H, C+I, A+G, J, A+I, J
 
     # R1: A → B (forward direction of A ⇄ B)
     model.reactions["R1"] = CM.Reaction(
@@ -154,25 +154,6 @@ function create_envz_ompr_model()
         lower_bound=0.0,
         upper_bound=1000.0
     )
-
-    # R14: J → A + I (irreversible)
-    # Since J is formed from A+G, this effectively transforms G to I while releasing A
-    model.reactions["R14"] = CM.Reaction(
-        name="Reaction 14: complex J to A+I",
-        stoichiometry=Dict("A" => 1.0, "I" => 1.0),
-        lower_bound=0.0,  # Irreversible
-        upper_bound=1000.0
-    )
-
-    # Note: To properly model the J complex, we need to ensure R12, R13, and R14
-    # are properly coupled. In the actual system, J is an intermediate complex
-    # formed from A+G that can either dissociate back (R13) or proceed to form A+I (R14)
-
-    # For a more accurate representation, we could add J as a pseudo-metabolite:
-    # But based on the paper's approach, complexes are handled differently in the kinetic analysis
-
-    # Alternative approach: Add J as a metabolite to properly track the complex
-    model.metabolites["J"] = CM.Metabolite(name="Complex J (A+G bound)")
 
     # Update reactions to properly use J
     model.reactions["R12"] = CM.Reaction(

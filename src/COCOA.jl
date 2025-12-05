@@ -76,6 +76,7 @@ include("filter.jl")
 include("variability.jl")
 include("concordance.jl")
 include("kinetic_analysis.jl")
+include("create_envz_ompr_model.jl")
 
 # Include preprocessing functions
 include("preprocessing/preprocessing.jl")
@@ -93,12 +94,12 @@ export remove_orphans!, remove_orphans
 
 
 # Export main analysis functions
-export concordance_constraints, activity_variability_analysis, activity_concordance_analysis
+export concordance_constraints, activity_variability_analysis, activity_concordance_analysis, extract_concordance_modules
 
 # Export matrix building functions
 export incidence, stoichiometry, complex_stoichiometry
 
 
-# Export kinetic analysis function
-export apply_kinetic_analysis!
+# Export kinetic analysis functions
+export kinetic_analysis, identify_acr_acrr, create_envz_ompr_model
 end # module COCOA
