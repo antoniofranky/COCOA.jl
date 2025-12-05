@@ -89,7 +89,7 @@ model_elem = split_into_elementary(
 )
 
 # Split all, with 50% using random mechanism
-model_elem = split_into_elementary(model; random=0.5, seed=1234)
+model_elem = split_into_elementary(model; random=0.5, seed=UInt(1234))
 ```
 """
 function split_into_elementary(

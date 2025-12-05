@@ -32,10 +32,10 @@ model = COBREXA.load_model(model_path)
 model = convert(AbstractFBCModels.CanonicalModel.Model, model)
 model = COCOA.remove_blocked_reactions(model, optimizer=HiGHS.Optimizer, settings=highs_settings)
 model = COCOA.remove_orphans(model)
-model = COCOA.split_into_elementary(model)
+model = COCOA.split_into_elementary(model, random=1.0, seed=UInt(seed))
 model = COCOA.split_into_irreversible(model)
 model = convert(SBMLFBCModels.SBMLFBCModel, model)
-AbstractFBCModels.save(model, "/work/schaffran1/results_testjobs/for_babak/E_coli_K12_iJO1366_ordered_irr.xml")
+AbstractFBCModels.save(model, "/work/schaffran1/results_testjobs/for_babak/E_coli_K12_iJO1366_random_irr.xml")
 results = COCOA.activity_concordance_analysis(
     model;
     optimizer=HiGHS.Optimizer,
