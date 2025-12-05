@@ -3,13 +3,14 @@ using SBMLFBCModels, AbstractFBCModels, COBREXA, JLD2, Dates
 @everywhere using COCOA, HiGHS
 
 # Parse command line arguments
-if length(ARGS) < 3
-    error("Usage: julia analyse_models_array.jl <model_file> <results_dir> <model_name>")
+if length(ARGS) < 4
+    error("Usage: julia analyse_models_array.jl <model_file> <results_dir> <model_name> <kinetic_analysis>")
 end
 
 model_file = ARGS[1]
 results_dir = ARGS[2]
 model_name = ARGS[3]
+kinetic_analysis = parse(Bool, lowercase(ARGS[4]))
 
 # --- Analysis Parameters ---
 # Modify these parameters as needed
@@ -93,7 +94,7 @@ try
             cv_threshold=cv_threshold,
             batch_size=batch_size,
             use_transitivity=use_transitivity,
-            kinetic_analysis=true
+            kinetic_analysis=kinetic_analysis
         )
     end
 
@@ -123,7 +124,8 @@ try
             "concordance_tolerance" => concordance_tolerance,
             "balanced_threshold" => balanced_threshold,
             "batch_size" => batch_size,
-            "use_transitivity" => use_transitivity
+            "use_transitivity" => use_transitivity,
+            "kinetic_analysis" => kinetic_analysis
         ),
         "timing_statistics", Dict(
             "analysis_duration_seconds" => analysis_duration,
