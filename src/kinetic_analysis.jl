@@ -1320,3 +1320,105 @@ function is_in_column_span(v::Vector{Float64}, M::Matrix{Float64}, tolerance::Fl
         return false
     end
 end
+
+# ================================================================================================
+# Public API: Deficiency Calculation Functions
+# ================================================================================================
+
+"""
+    structural_deficiency(concordance_modules, model::AbstractFBCModel)
+
+Compute the structural deficiency δ using the classical formula:
+    δ = n - ℓ - s
+
+Where:
+- n = number of complexes
+- ℓ = number of linkage classes (weakly connected components)
+- s = dimension of stoichiometric subspace (rank of stoichiometry matrix S = Y·A)
+
+This is a wrapper for `compute_structural_deficiency` with cleaner naming.
+
+# Example
+```julia
+model = create_envz_ompr_model()
+concordance_modules = extract_concordance_modules(results)
+δ = structural_deficiency(concordance_modules, model)  # Returns 2 for EnvZ-OmpR
+```
+"""
+function structural_deficiency(
+    concordance_modules::Vector{Set{Symbol}},
+    model::A.AbstractFBCModel
+)
+    Y_matrix, _, complex_ids = complex_stoichiometry(model; return_ids=true)
+    A_matrix, _, _ = incidence(model; return_ids=true)
+    complex_to_idx = Dict(id => i for (i, id) in enumerate(complex_ids))
+
+    network = (
+        Y=Y_matrix,
+        A=A_matrix,
+        complex_ids=complex_ids,
+        complex_to_idx=complex_to_idx
+    )
+
+    return compute_structural_deficiency(concordance_modules, network)
+end
+
+"""
+    mass_action_deficiency_bounds(
+        concordance_modules,
+        model::AbstractFBCModel;
+        n_concordance_merges::Int=0
+    )
+
+Compute bounds on mass action deficiency δₖ using:
+- **Lower bound** (Lemma S4-7): δₖ ≥ 1 if not weakly reversible, else δₖ ≥ 0
+- **Upper bound** (Proposition S4-8): δₖ ≤ δ₀ - n_concordance_merges
+
+Returns a named tuple `(lower=..., upper=..., is_exact=...)` where:
+- `lower`: Lower bound on δₖ
+- `upper`: Upper bound on δₖ
+- `is_exact`: true if lower == upper (δₖ is uniquely determined)
+
+# Arguments
+- `concordance_modules`: Vector of concordance modules
+- `model`: AbstractFBCModel
+- `n_concordance_merges`: Number of concordance merges applied (default: 0)
+
+# Example
+```julia
+model = create_envz_ompr_model()
+bounds = mass_action_deficiency_bounds(concordance_modules, model)
+# For EnvZ-OmpR after proper merging: (lower=1, upper=1, is_exact=true)
+```
+"""
+function mass_action_deficiency_bounds(
+    concordance_modules::Vector{Set{Symbol}},
+    model::A.AbstractFBCModel;
+    n_concordance_merges::Int=0
+)
+    Y_matrix, _, complex_ids = complex_stoichiometry(model; return_ids=true)
+    A_matrix, _, _ = incidence(model; return_ids=true)
+    complex_to_idx = Dict(id => i for (i, id) in enumerate(complex_ids))
+
+    network = (
+        Y=Y_matrix,
+        A=A_matrix,
+        complex_ids=complex_ids,
+        complex_to_idx=complex_to_idx
+    )
+
+    # Compute initial structural deficiency
+    initial_delta = compute_structural_deficiency(concordance_modules, network)
+
+    # Get bounds
+    weakly_rev = is_weakly_reversible(network)
+    lower_bound = weakly_rev ? 0 : 1
+    upper_bound = initial_delta - n_concordance_merges
+
+    return (
+        lower=lower_bound,
+        upper=upper_bound,
+        is_exact=(lower_bound == upper_bound),
+        weakly_reversible=weakly_rev
+    )
+end

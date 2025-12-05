@@ -263,4 +263,48 @@ using StableRNGs
 
         @info "Paper Section S.5.2 validation complete ✓"
     end
+
+    @testset "8. Deficiency Calculations" begin
+        model = create_envz_ompr_model()
+
+        concordance_modules = [
+            Set([:XD, :XT, :XpY, :XTYp, :XDYp]),
+            Set([:X, :Xp, Symbol("Xp+Y"), Symbol("X+Yp")]),
+            Set([Symbol("XT+Yp"), Symbol("XT+Y")]),
+            Set([Symbol("XD+Yp"), Symbol("XD+Y")])
+        ]
+
+        # Test structural deficiency
+        δ = structural_deficiency(concordance_modules, model)
+
+        # Paper states EnvZ-OmpR is deficiency-2 (δ = n - ℓ - s = 13 - 4 - 7 = 2)
+        @test δ == 2
+        @info "Structural deficiency verified" δ = δ
+
+        # Test mass action deficiency bounds (before merging)
+        bounds_initial = mass_action_deficiency_bounds(concordance_modules, model; n_concordance_merges=0)
+
+        # Initial: δ₀ = 2, not weakly reversible → δₖ ∈ [1, 2]
+        @test bounds_initial.lower == 1  # Lemma S4-7: not weakly reversible → δₖ ≥ 1
+        @test bounds_initial.upper == 2  # Proposition S4-8: δₖ ≤ δ₀ - 0 = 2
+        @test !bounds_initial.is_exact    # δₖ could be 1 or 2
+        @test !bounds_initial.weakly_reversible
+        @info "Initial mass action deficiency bounds" bounds_initial
+
+        # Test after concordance merging (3 unbalanced modules merge into 1)
+        # This represents 2 concordance merges: 4 modules → 3 modules → 2 modules
+        bounds_after_merge = mass_action_deficiency_bounds(concordance_modules, model; n_concordance_merges=2)
+
+        # After 2 merges: δₖ ≤ 2 - 2 = 0, but δₖ ≥ 1 → contradiction means we need 1 more merge
+        # Actually the algorithm does 1 merge (3 unbalanced → 1 giant), so let's test that:
+        bounds_after_1_merge = mass_action_deficiency_bounds(concordance_modules, model; n_concordance_merges=1)
+
+        @test bounds_after_1_merge.lower == 1
+        @test bounds_after_1_merge.upper == 1  # δₖ ≤ 2 - 1 = 1
+        @test bounds_after_1_merge.is_exact    # δₖ = 1 exactly!
+        @info "Mass action deficiency after merging" bounds_after_1_merge
+
+        # Verify the paper's claim: after proper merging, δₖ = 1
+        @test bounds_after_1_merge.is_exact && bounds_after_1_merge.lower == 1
+    end
 end

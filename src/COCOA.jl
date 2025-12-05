@@ -102,4 +102,7 @@ export incidence, stoichiometry, complex_stoichiometry
 
 # Export kinetic analysis functions
 export kinetic_analysis, identify_acr_acrr, create_envz_ompr_model
+
+# Export deficiency calculation functions
+export structural_deficiency, mass_action_deficiency_bounds
 end # module COCOA
