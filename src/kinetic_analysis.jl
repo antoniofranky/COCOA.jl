@@ -65,7 +65,7 @@ function kinetic_analysis(
     min_module_size::Int=1,
     known_acr::Vector{Symbol}=Symbol[]
 )
-    @info "Starting kinetic module analysis" n_concordance_modules = length(concordance_modules) - 1 n_balanced = length(concordance_modules[1])
+    @debug "Starting kinetic module analysis" n_concordance_modules = length(concordance_modules) - 1 n_balanced = length(concordance_modules[1])
 
     # Extract network topology and build ID mappings ONCE
     A_matrix, complex_ids = incidence(model; return_ids=true)
@@ -79,7 +79,7 @@ function kinetic_analysis(
     acr_augmentation = build_acr_augmentation(known_acr, metabolite_ids, size(Y_matrix, 1))
 
     if !isempty(known_acr)
-        @info "Using known ACR metabolites for enhanced merging" n_known_acr = length(known_acr) metabolites = known_acr
+        @debug "Using known ACR metabolites for enhanced merging" n_known_acr = length(known_acr) metabolites = known_acr
     end
 
     # Store in a named tuple for easy passing
@@ -100,12 +100,12 @@ function kinetic_analysis(
     current_concordance = copy(concordance_modules)
 
     if length(current_concordance) == 2  # balanced + 1 unbalanced
-        @info "Initial check: δₖ = 1 detected (one unbalanced concordance module)"
-        @info "Directly applying Theorem S4-6 without iterative refinement"
+        @debug "Initial check: δₖ = 1 detected (one unbalanced concordance module)"
+        @debug "Directly applying Theorem S4-6 without iterative refinement"
         kinetic_modules = apply_theorem_s4_6(Set{Symbol}[], current_concordance, network)
         valid_modules = filter(km -> length(km) >= min_module_size, kinetic_modules)
         sort!(valid_modules, by=length, rev=true)
-        @info "Kinetic analysis complete via Theorem S4-6" n_modules = length(valid_modules)
+        @debug "Kinetic analysis complete via Theorem S4-6" n_modules = length(valid_modules)
         return valid_modules
     end
 
@@ -124,13 +124,13 @@ function kinetic_analysis(
 
     while (concordance_changed || acr_changed) && outer_iteration < max_outer_iterations
         outer_iteration += 1
-        @info "=== Iteration $outer_iteration: Concordance-Coupling-ACR Refinement ===" n_modules = length(current_concordance) - 1 n_known_acr = length(current_known_acr)
+        @debug "=== Iteration $outer_iteration: Concordance-Coupling-ACR Refinement ===" n_modules = length(current_concordance) - 1 n_known_acr = length(current_known_acr)
 
         balanced = current_concordance[1]
 
         # Update network with current known ACR (Remark S3-6)
         if !isempty(current_known_acr) && acr_changed
-            @info "Updating Y𝚫 augmentation with newly identified ACR metabolites" new_acr = setdiff(current_known_acr, Set(known_acr))
+            @debug "Updating Y𝚫 augmentation with newly identified ACR metabolites" new_acr = setdiff(current_known_acr, Set(known_acr))
             acr_augmentation = build_acr_augmentation(collect(current_known_acr), metabolite_ids, size(Y_matrix, 1))
             network = (
                 A=network.A,
@@ -143,7 +143,7 @@ function kinetic_analysis(
         end
 
         # Step 1: Compute upstream sets for each concordance module
-        @info "Computing upstream sets"
+        @debug "Computing upstream sets"
         upstream_sets = Set{Symbol}[]
 
         for (i, conc_module) in enumerate(current_concordance[2:end])
@@ -161,7 +161,7 @@ function kinetic_analysis(
             end
         end
 
-        @info "Computed upstream sets" n_sets = length(upstream_sets)
+        @debug "Computed upstream sets" n_sets = length(upstream_sets)
 
         if isempty(upstream_sets)
             @warn "No upstream sets found"
@@ -169,7 +169,7 @@ function kinetic_analysis(
         end
 
         # Step 2: Merge coupled modules and track which concordance modules should merge
-        @info "Merging coupled modules"
+        @debug "Merging coupled modules"
         kinetic_modules, merge_map = merge_coupled_sets_tracked(upstream_sets, network)
 
         # Step 3: Check if any merges occurred (Proposition S4-1)
@@ -185,12 +185,12 @@ function kinetic_analysis(
 
         # Step 4: Identify ACR metabolites from current kinetic modules (Proposition S3-5)
         # This enables further merging via Remark S3-6
-        @info "Identifying ACR metabolites from current kinetic modules"
+        @debug "Identifying ACR metabolites from current kinetic modules"
         acr_results = identify_acr_acrr(kinetic_modules, model)
         newly_identified_acr = setdiff(Set(acr_results.acr_metabolites), current_known_acr)
 
         if !isempty(newly_identified_acr)
-            @info "Identified new ACR metabolites" metabolites = newly_identified_acr
+            @debug "Identified new ACR metabolites" metabolites = newly_identified_acr
             union!(current_known_acr, newly_identified_acr)
             acr_changed = true
         else
@@ -198,22 +198,22 @@ function kinetic_analysis(
         end
 
         if concordance_changed
-            @info "Concordance modules merged via Proposition S4-1, recomputing..."
+            @debug "Concordance modules merged via Proposition S4-1, recomputing..."
 
             # Check if concordance merging resulted in δₖ = 1
             if length(current_concordance) == 2  # balanced + 1 unbalanced
-                @info "After merging: δₖ = 1 detected (one unbalanced concordance module)"
-                @info "Directly applying Theorem S4-6"
+                @debug "After merging: δₖ = 1 detected (one unbalanced concordance module)"
+                @debug "Directly applying Theorem S4-6"
                 kinetic_modules = apply_theorem_s4_6(Set{Symbol}[], current_concordance, network)
                 valid_modules = filter(km -> length(km) >= min_module_size, kinetic_modules)
                 sort!(valid_modules, by=length, rev=true)
-                @info "Kinetic analysis complete via Theorem S4-6" n_modules = length(valid_modules)
+                @debug "Kinetic analysis complete via Theorem S4-6" n_modules = length(valid_modules)
                 return valid_modules
             end
         elseif acr_changed
-            @info "New ACR metabolites identified, will continue iteration with augmented Y𝚫"
+            @debug "New ACR metabolites identified, will continue iteration with augmented Y𝚫"
         else
-            @info "No concordance changes and no new ACR, checking for δₖ = 1..."
+            @debug "No concordance changes and no new ACR, checking for δₖ = 1..."
 
             # Check if δₖ = 1 using Proposition S4-8 and Lemma S4-7
             (is_delta_k_one, should_merge_concordance) = check_mass_action_deficiency(
@@ -224,19 +224,19 @@ function kinetic_analysis(
             )
 
             if is_delta_k_one && should_merge_concordance
-                @info "δₖ = 1 detected! Forcing merge of all unbalanced concordance modules (Lemma S4-5)"
+                @debug "δₖ = 1 detected! Forcing merge of all unbalanced concordance modules (Lemma S4-5)"
 
                 # Merge all unbalanced concordance modules into one
                 all_unbalanced = reduce(∪, current_concordance[2:end]; init=Set{Symbol}())
                 current_concordance = [current_concordance[1], all_unbalanced]
 
-                @info "Recomputing with merged concordance modules..."
+                @debug "Recomputing with merged concordance modules..."
                 # Continue loop to recompute upstream sets
                 concordance_changed = true
                 continue
             end
 
-            @info "Refinement converged"
+            @debug "Refinement converged"
 
             # Add singleton balanced complexes from extended modules
             kinetic_modules = add_singleton_balanced(kinetic_modules, balanced, current_concordance[2:end], network)
@@ -250,7 +250,7 @@ function kinetic_analysis(
             # Sort by size (largest first) so giant module is at index 1
             sort!(valid_modules, by=length, rev=true)
 
-            @info "Kinetic analysis complete" n_modules = length(valid_modules) giant_size = (isempty(valid_modules) ? 0 : maximum(length.(valid_modules)))
+            @debug "Kinetic analysis complete" n_modules = length(valid_modules) giant_size = (isempty(valid_modules) ? 0 : maximum(length.(valid_modules)))
 
             return valid_modules
         end
@@ -303,36 +303,36 @@ function upstream_algorithm(
     # Convert to indices for matrix operations
     current_indices = Set(complex_to_idx[c] for c in extended_module if haskey(complex_to_idx, c))
 
-    @info "Starting upstream algorithm (simplified 2-phase)" extended_size = length(extended_module) indices_found = length(current_indices)
+    @debug "Starting upstream algorithm (simplified 2-phase)" extended_size = length(extended_module) indices_found = length(current_indices)
     remaining = [complex_ids[i] for i in current_indices]
-    @info "  Extended module complexes: $remaining"
+    @debug "  Extended module complexes: $remaining"
 
     # Phase I: Remove entry complexes (autonomous property)
-    @info "Phase I: Removing entry complexes" initial_size = length(current_indices)
+    @debug "Phase I: Removing entry complexes" initial_size = length(current_indices)
     iteration = 0
     while true
         iteration += 1
         entries = find_entry_complexes_idx(current_indices, A_matrix)
         if !isempty(entries)
             entry_symbols = [complex_ids[i] for i in entries]
-            @info "  Phase I iteration $iteration: removing $(length(entries)) entries: $entry_symbols"
+            @debug "  Phase I iteration $iteration: removing $(length(entries)) entries: $entry_symbols"
         end
 
         isempty(entries) && break
         setdiff!(current_indices, entries)
 
         if isempty(current_indices)
-            @info "  All complexes removed in Phase I"
+            @debug "  All complexes removed in Phase I"
             return Set{Symbol}()
         end
     end
 
     remaining = [complex_ids[i] for i in current_indices]
-    @info "Phase II: Removing terminal strong linkage classes" remaining
+    @debug "Phase II: Removing terminal strong linkage classes" remaining
 
     # Phase II: Find and remove all terminal strong linkage classes using Tarjan's algorithm
     sccs = tarjan_scc(current_indices, A_matrix)
-    @info "  Found $(length(sccs)) strongly connected components"
+    @debug "  Found $(length(sccs)) strongly connected components"
 
     # Debug: Show all SCCs with their terminal status
     @debug "  SCC analysis:" begin
@@ -352,7 +352,7 @@ function upstream_algorithm(
     for scc in sccs
         scc_symbols = [complex_ids[i] for i in scc]
         is_term = is_terminal_scc_idx(scc, original_indices, A_matrix)
-        @info "  SCC (size $(length(scc))): $scc_symbols - Terminal: $is_term"
+        @debug "  SCC (size $(length(scc))): $scc_symbols - Terminal: $is_term"
 
         if is_term
             push!(terminal_sccs, scc)
@@ -366,12 +366,12 @@ function upstream_algorithm(
         setdiff!(current_indices, scc)
     end
 
-    @info "  Removed $(length(terminal_sccs)) terminal SCCs, kept $(length(non_terminal_sccs)) non-terminal SCCs"
+    @debug "  Removed $(length(terminal_sccs)) terminal SCCs, kept $(length(non_terminal_sccs)) non-terminal SCCs"
 
     # Convert back to symbols using complex_ids vector
     upstream_set = Set(complex_ids[i] for i in current_indices if i <= length(complex_ids))
 
-    @info "Upstream algorithm complete" upstream_size = length(upstream_set) complexes = sort(collect(upstream_set), by=string)
+    @debug "Upstream algorithm complete" upstream_size = length(upstream_set) complexes = sort(collect(upstream_set), by=string)
 
     return upstream_set
 end
@@ -555,7 +555,7 @@ function apply_concordance_merging!(concordance_modules::Vector{Set{Symbol}}, me
     end
 
     # Merge concordance modules
-    @info "Applying Proposition S4-1: Merging concordance modules"
+    @debug "Applying Proposition S4-1: Merging concordance modules"
     balanced = concordance_modules[1]
     new_concordance = [balanced]
 
@@ -566,7 +566,7 @@ function apply_concordance_merging!(concordance_modules::Vector{Set{Symbol}}, me
         end
 
         if length(module_indices) > 1
-            @info "  Merging concordance modules $(collect(module_indices)) (coupling sets merged)"
+            @debug "  Merging concordance modules $(collect(module_indices)) (coupling sets merged)"
         end
 
         push!(new_concordance, merged_module)
@@ -617,19 +617,19 @@ function merge_coupled_sets(upstream_sets::Vector{Set{Symbol}}, network::NamedTu
     end
 
     # Step 1: Trivial merging - merge sets that share complexes directly (Lemma S3-1)
-    @info "Step 1: Trivial merging (Lemma S3-1)"
+    @debug "Step 1: Trivial merging (Lemma S3-1)"
     for i in 1:n
         for j in (i+1):n
             if !isdisjoint(upstream_sets[i], upstream_sets[j])
                 union_indices!(i, j)
-                @info "  Merging modules $i and $j (shared complexes)" shared = upstream_sets[i] ∩ upstream_sets[j]
+                @debug "  Merging modules $i and $j (shared complexes)" shared = upstream_sets[i] ∩ upstream_sets[j]
             end
         end
     end
 
     # Step 2: Advanced merging via Proposition S3-4
     # Check if Y[:,α] - Y[:,β] ∈ im(Y𝚫) for complexes from different coupling sets
-    @info "Step 2: Advanced merging via Proposition S3-4"
+    @debug "Step 2: Advanced merging via Proposition S3-4"
 
     # Build coupling companion map 𝚫 from current upstream sets
     # 𝚫 = [𝚫1 ... 𝚫q] where each 𝚫i encodes coupling relations in upstream_sets[i]
@@ -638,7 +638,7 @@ function merge_coupled_sets(upstream_sets::Vector{Set{Symbol}}, network::NamedTu
     # Augment with known ACR columns (Remark S3-6)
     if haskey(network, :acr_augmentation) && size(network.acr_augmentation, 2) > 0
         Y_Delta = hcat(Y_Delta, network.acr_augmentation)
-        @info "  Augmented Y𝚫 with known ACR metabolites" n_augmentation_cols = size(network.acr_augmentation, 2)
+        @debug "  Augmented Y𝚫 with known ACR metabolites" n_augmentation_cols = size(network.acr_augmentation, 2)
     end
 
     # Check all pairs of distinct coupling sets
@@ -675,7 +675,7 @@ function merge_coupled_sets(upstream_sets::Vector{Set{Symbol}}, network::NamedTu
                 # Check if y_diff ∈ im(Y𝚫) by solving: Y𝚫 ξ = y_diff
                 if can_merge_via_proposition_s34(y_diff, Y_Delta)
                     if union_indices!(i, j)
-                        @info "  Merging modules $i and $j via Proposition S3-4" complexes = (c_alpha, c_beta)
+                        @debug "  Merging modules $i and $j via Proposition S3-4" complexes = (c_alpha, c_beta)
                         merged_any = true
 
                         # Rebuild Y_Delta with updated coupling information
@@ -971,7 +971,7 @@ function compute_structural_deficiency(
     s_dim = LinearAlgebra.rank(Matrix(S_matrix))
     classical_delta = n_complexes - n_linkages - s_dim
 
-    @info "Structural deficiency computation" ℯ = e n_linkages n_complexes rank_YUM = matrix_rank s_stoich = s_dim δ_equation_S46 = delta δ_classical = classical_delta
+    @debug "Structural deficiency computation" ℯ = e n_linkages n_complexes rank_YUM = matrix_rank s_stoich = s_dim δ_equation_S46 = delta δ_classical = classical_delta
 
     # Return the classical deficiency (should match Equation S4-6, but let's use classical for now)
     return classical_delta
@@ -1013,7 +1013,7 @@ function check_mass_action_deficiency(
     # δₖ ≤ δ₀ - n_concordance_merges
     delta_k_upper_bound = initial_delta - n_concordance_merges
 
-    @info "Mass action deficiency bounds" δ₀ = initial_delta weakly_reversible = weakly_rev δₖ_lower = delta_k_lower_bound δₖ_upper = delta_k_upper_bound n_merges = n_concordance_merges
+    @debug "Mass action deficiency bounds" δ₀ = initial_delta weakly_reversible = weakly_rev δₖ_lower = delta_k_lower_bound δₖ_upper = delta_k_upper_bound n_merges = n_concordance_merges
 
     # Check if δₖ = 1
     is_delta_k_one = (delta_k_lower_bound == 1 && delta_k_upper_bound == 1)
@@ -1052,21 +1052,21 @@ function apply_theorem_s4_6(
 
     # Lemma S4-5: δₖ = 1 ⟺ exactly one unbalanced concordance module
     if n_unbalanced_modules == 1
-        @info "Applying Theorem S4-6: δₖ = 1 (one unbalanced concordance module)"
+        @debug "Applying Theorem S4-6: δₖ = 1 (one unbalanced concordance module)"
 
         # ALL complexes in the network (balanced + unbalanced)
         all_complexes = reduce(∪, [balanced; unbalanced_modules]; init=Set{Symbol}())
-        @info "  Total complexes in network" n_total = length(all_complexes)
+        @debug "  Total complexes in network" n_total = length(all_complexes)
 
         # Find terminal complexes
         terminal_complexes = find_terminal_complexes(all_complexes, network)
-        @info "  Terminal complexes" n_terminal = length(terminal_complexes) complexes = terminal_complexes
+        @debug "  Terminal complexes" n_terminal = length(terminal_complexes) complexes = terminal_complexes
 
         # Theorem S4-6: All non-terminal complexes are mutually coupled
         non_terminal = setdiff(all_complexes, terminal_complexes)
 
         if !isempty(non_terminal)
-            @info "  Merging all non-terminal complexes into single kinetic module" n_non_terminal = length(non_terminal)
+            @debug "  Merging all non-terminal complexes into single kinetic module" n_non_terminal = length(non_terminal)
             # Return single module with all non-terminal complexes, plus terminal singletons
             result = [non_terminal]
             for terminal_complex in terminal_complexes
@@ -1290,7 +1290,7 @@ function identify_acr_acrr(
         end
     end
 
-    @info "ACR/ACRR identification complete" n_acr = length(acr_metabolites) n_acrr = length(acrr_pairs)
+    @debug "ACR/ACRR identification complete" n_acr = length(acr_metabolites) n_acrr = length(acrr_pairs)
 
     return (acr_metabolites=acr_metabolites, acrr_pairs=acrr_pairs)
 end
