@@ -25,7 +25,7 @@ using StableRNGs
         @test length(A.reactions(model)) == 14
         @test length(A.metabolites(model)) == 9
 
-        @info "Model created successfully" n_reactions=length(A.reactions(model)) n_metabolites=length(A.metabolites(model))
+        @info "Model created successfully" n_reactions = length(A.reactions(model)) n_metabolites = length(A.metabolites(model))
     end
 
     @testset "2. Concordance Analysis" begin
@@ -64,7 +64,7 @@ using StableRNGs
         remaining = Set(concordance_modules[2:end])
         @test remaining == unbalanced_sets
 
-        @info "Concordance modules verified" n_modules=length(concordance_modules) balanced_size=length(balanced)
+        @info "Concordance modules verified" n_modules = length(concordance_modules) balanced_size = length(balanced)
     end
 
     @testset "3. Kinetic Analysis" begin
@@ -107,7 +107,7 @@ using StableRNGs
         terminal_modules = Set(kinetic_modules[2:end])
         @test terminal_modules == expected_terminal_singletons
 
-        @info "Kinetic modules verified" n_modules=length(kinetic_modules) giant_size=length(kinetic_modules[1])
+        @info "Kinetic modules verified" n_modules = length(kinetic_modules) giant_size = length(kinetic_modules[1])
     end
 
     @testset "4. ACR/ACRR Identification" begin
@@ -151,7 +151,7 @@ using StableRNGs
         @test (:XT, :XpY) in acr_results.acrr_pairs
         @test (:XD, :XTYp) in acr_results.acrr_pairs
 
-        @info "ACR/ACRR identification verified" n_acr=length(acr_results.acr_metabolites) n_acrr=length(acr_results.acrr_pairs)
+        @info "ACR/ACRR identification verified" n_acr = length(acr_results.acr_metabolites) n_acrr = length(acr_results.acrr_pairs)
     end
 
     @testset "5. Complete Pipeline Integration" begin
@@ -177,8 +177,11 @@ using StableRNGs
         acr_results = identify_acr_acrr(kinetic_modules, model)
 
         # Verify final outputs
+        expected_giant_module = Set([:XD, :XT, Symbol("Xp+Y"), Symbol("XT+Yp"), :XDYp, :XTYp, Symbol("XD+Yp"), :XpY, :X])
+        expected_acr = Set([:Yp])
         @test length(concordance_modules) == 4
         @test length(kinetic_modules) == 5
+        @test kinetic_modules[1] == expected_giant_module
         @test :Yp in acr_results.acr_metabolites
         @test length(acr_results.acrr_pairs) == 15
 
@@ -186,7 +189,7 @@ using StableRNGs
         # This is computed internally during kinetic_analysis
         # We can verify by checking the log output or running the calculation directly
 
-        @info "Complete pipeline validated" concordance_modules=length(concordance_modules) kinetic_modules=length(kinetic_modules) acr=acr_results.acr_metabolites acrr_pairs=length(acr_results.acrr_pairs)
+        @info "Complete pipeline validated" concordance_modules = length(concordance_modules) kinetic_modules = length(kinetic_modules) acr = acr_results.acr_metabolites acrr_pairs = length(acr_results.acrr_pairs)
     end
 
     @testset "6. Mathematical Properties" begin
@@ -206,9 +209,10 @@ using StableRNGs
         complex_to_idx = Dict(id => i for (i, id) in enumerate(complex_ids))
 
         # Build Y𝚫 from giant module (should have 8 columns for 9 coupled complexes)
+        expected_giant_module = Set([:XD, :XT, Symbol("Xp+Y"), Symbol("XT+Yp"), :XDYp, :XTYp, Symbol("XD+Yp"), :XpY, :X])
         giant_module = kinetic_modules[1]
         @test length(giant_module) == 9
-
+        @test giant_module == expected_giant_module
         # Expected: 9 coupled complexes → 8 coupling relations (columns in Y𝚫)
         # This is verified internally but we can check the structure
 
@@ -232,36 +236,62 @@ using StableRNGs
         expected_metabolites = Set([:X, :Xp, :XD, :XDYp, :XT, :XTYp, :XpY, :Y, :Yp])
         @test metabolites_in_giant == expected_metabolites
 
-        @info "Mathematical properties verified" n_metabolites_in_giant=length(metabolites_in_giant)
+        @info "Mathematical properties verified" n_metabolites_in_giant = length(metabolites_in_giant)
     end
 
-    @testset "7. Paper Section S.5.2 Validation" begin
+    @testset "7. Paper Section S.5.2 Validation (Detailed)" begin
         # This test explicitly validates the EnvZ-OmpR example from Section S.5.2 of the paper
+        # Detailed walkthrough checking intermediate coupling sets and merging logic.
         model = create_envz_ompr_model()
 
-        concordance_modules = [
-            Set([:XD, :XT, :XpY, :XTYp, :XDYp]),
-            Set([:X, :Xp, Symbol("Xp+Y"), Symbol("X+Yp")]),
-            Set([Symbol("XT+Yp"), Symbol("XT+Y")]),
-            Set([Symbol("XD+Yp"), Symbol("XD+Y")])
-        ]
+        # 1. Verify Concordance Modules
+        balanced = Set([:XDYp, :XTYp, :XpY, :XD, :XT])
+        Cm1 = Set([:X, :Xp, Symbol("Xp+Y"), Symbol("X+Yp")])
+        Cm2 = Set([Symbol("XT+Yp"), Symbol("XT+Y")])
+        Cm3 = Set([Symbol("XD+Yp"), Symbol("XD+Y")])
 
-        kinetic_modules = kinetic_analysis(concordance_modules, model, min_module_size=1)
-        acr_results = identify_acr_acrr(kinetic_modules, model)
+        # 2. Verify Upstream Sets (Initial Coupling)
+        A_matrix, complex_ids = COCOA.incidence(model; return_ids=true)
+        Y_matrix, metabolite_ids, _ = COCOA.complex_stoichiometry(model; return_ids=true)
 
-        # Paper states: "In the EnvZ-OmpR system... Yp exhibits ACR"
-        @test :Yp in acr_results.acr_metabolites
+        network = (
+            A=A_matrix, Y=Y_matrix, complex_ids=complex_ids, metabolite_ids=metabolite_ids,
+            complex_to_idx=Dict(id => i for (i, id) in enumerate(complex_ids)),
+            acr_augmentation=zeros(Float64, length(metabolite_ids), 0)
+        )
 
-        # Paper states: "This is a deficiency-2 network"
-        # (verified by classical deficiency formula: δ = n - ℓ - s = 13 - 4 - 7 = 2)
+        Cm1_bar, Cm2_bar, Cm3_bar = union(balanced, Cm1), union(balanced, Cm2), union(balanced, Cm3)
+        C1, C2, C3 = [COCOA.upstream_algorithm(G, network) for G in [Cm1_bar, Cm2_bar, Cm3_bar]]
 
-        # Paper states: "Mass action deficiency δₖ = 1"
-        # (verified by Proposition S4-8 and Lemma S4-7 during kinetic_analysis)
+        expected_C1 = Set([:XD, :X, :XT, Symbol("Xp+Y"), :XpY])
+        expected_C2 = Set([Symbol("XT+Yp"), :XTYp])
+        expected_C3 = Set([Symbol("XD+Yp"), :XDYp])
 
-        # Paper states: "All non-terminal complexes are mutually coupled" (Theorem S4-6)
-        @test length(kinetic_modules[1]) == 9  # Giant module with 9 non-terminal complexes
+        @test C1 == expected_C1 && C2 == expected_C2 && C3 == expected_C3
 
-        @info "Paper Section S.5.2 validation complete ✓"
+        # 3. Verify Advanced Merging (Proposition S3-4)
+        # Verify C2 and C3 merge into C4 due to constant ratio from C1
+        merged_modules = COCOA.merge_coupled_sets([C1, C2, C3], network)
+
+        expected_C4 = union(expected_C2, expected_C3)
+        has_C4 = any(m -> m == expected_C4, merged_modules)
+        @test has_C4 || any(m -> issubset(expected_C4, m), merged_modules)
+
+        if has_C4
+            @info "Advanced Merging Verified: C2+C3 merged"
+        else
+            @info "Advanced Merging Result: Modules merged further than C4" modules = merged_modules
+        end
+
+        # 4. Final Result Validation
+        concordance_modules_vec = [balanced, Cm1, Cm2, Cm3]
+        kinetic_modules = kinetic_analysis(concordance_modules_vec, model)
+
+        expected_giant = union(expected_C1, expected_C4)
+        @test length(kinetic_modules[1]) == 9
+        @test kinetic_modules[1] == expected_giant
+
+        @info "Paper Section S.5.2 detailed validation complete ✓"
     end
 
     @testset "8. Deficiency Calculations" begin

@@ -63,7 +63,8 @@ function kinetic_analysis(
     concordance_modules::Vector{Set{Symbol}},
     model::A.AbstractFBCModel;
     min_module_size::Int=1,
-    known_acr::Vector{Symbol}=Symbol[]
+    known_acr::Vector{Symbol}=Symbol[],
+    enable_advanced_merging::Bool=true
 )
     @debug "Starting kinetic module analysis" n_concordance_modules = length(concordance_modules) - 1 n_balanced = length(concordance_modules[1])
 
@@ -89,7 +90,8 @@ function kinetic_analysis(
         complex_ids=complex_ids,
         metabolite_ids=metabolite_ids,
         complex_to_idx=complex_to_idx,
-        acr_augmentation=acr_augmentation
+        acr_augmentation=acr_augmentation,
+        enable_advanced_merging=enable_advanced_merging
     )
 
     # Compute initial structural deficiency δ₀ before any concordance merging (for Proposition S4-8)
@@ -629,6 +631,31 @@ function merge_coupled_sets(upstream_sets::Vector{Set{Symbol}}, network::NamedTu
 
     # Step 2: Advanced merging via Proposition S3-4
     # Check if Y[:,α] - Y[:,β] ∈ im(Y𝚫) for complexes from different coupling sets
+    if !get(network, :enable_advanced_merging, true)
+        @debug "Skipping Step 2: Advanced merging (disabled)"
+
+        # Return results from Step 1
+        merged_modules = Set{Symbol}[]
+        merge_map = Dict{Int,Int}()
+
+        new_sets = Dict{Int,Set{Symbol}}()
+
+        for i in 1:n
+            root = find_root(i)
+            if !haskey(new_sets, root)
+                new_sets[root] = Set{Symbol}()
+            end
+            union!(new_sets[root], upstream_sets[i])
+            merge_map[i] = root # Store mapping even if trivial
+        end
+
+        for (_, s) in new_sets
+            push!(merged_modules, s)
+        end
+
+        return merged_modules
+    end
+
     @debug "Step 2: Advanced merging via Proposition S3-4"
 
     # Build coupling companion map 𝚫 from current upstream sets
@@ -642,67 +669,44 @@ function merge_coupled_sets(upstream_sets::Vector{Set{Symbol}}, network::NamedTu
     end
 
     # Check all pairs of distinct coupling sets
-    max_iterations = 10  # Prevent infinite loops
-    iteration = 0
-    merged_any = true
+    # Optimization: According to Remark S3-3, merging coupling sets does NOT alter the column span of Y𝚫.
+    # Therefore, we do not need to rebuild or update Y𝚫 after merges.
+    # A single pass over all pairs is sufficient to find all merging opportunities.
+    # The Union-Find structure handles the transitive closure of merges.
 
-    while merged_any && iteration < max_iterations
-        iteration += 1
-        merged_any = false
+    for i in 1:n
+        for j in (i+1):n
+            # Skip if already merged
+            if find_root(i) == find_root(j)
+                continue
+            end
 
-        for i in 1:n
-            for j in (i+1):n
-                # Skip if already merged
-                if find_root(i) == find_root(j)
-                    continue
-                end
+            # Check Proposition S3-4: can we merge sets i and j?
+            # Pick arbitrary complexes from each set
+            c_alpha = first(upstream_sets[i])
+            c_beta = first(upstream_sets[j])
 
-                # Check Proposition S3-4: can we merge sets i and j?
-                # Pick arbitrary complexes from each set
-                c_alpha = first(upstream_sets[i])
-                c_beta = first(upstream_sets[j])
+            # Get their stoichiometric vectors
+            if !haskey(complex_to_idx, c_alpha) || !haskey(complex_to_idx, c_beta)
+                continue
+            end
 
-                # Get their stoichiometric vectors
-                if !haskey(complex_to_idx, c_alpha) || !haskey(complex_to_idx, c_beta)
-                    continue
-                end
+            idx_alpha = complex_to_idx[c_alpha]
+            idx_beta = complex_to_idx[c_beta]
 
-                idx_alpha = complex_to_idx[c_alpha]
-                idx_beta = complex_to_idx[c_beta]
+            # Compute difference: y_alpha - y_beta
+            y_diff = collect(Y_matrix[:, idx_alpha] - Y_matrix[:, idx_beta])
 
-                y_diff = collect(Y_matrix[:, idx_alpha] - Y_matrix[:, idx_beta])
-
-                # Check if y_diff ∈ im(Y𝚫) by solving: Y𝚫 ξ = y_diff
-                if can_merge_via_proposition_s34(y_diff, Y_Delta)
-                    if union_indices!(i, j)
-                        @debug "  Merging modules $i and $j via Proposition S3-4" complexes = (c_alpha, c_beta)
-                        merged_any = true
-
-                        # Rebuild Y_Delta with updated coupling information
-                        groups_temp = Dict{Int,Set{Symbol}}()
-                        for k in 1:n
-                            root = find_root(k)
-                            if !haskey(groups_temp, root)
-                                groups_temp[root] = Set{Symbol}()
-                            end
-                            Base.union!(groups_temp[root], upstream_sets[k])
-                        end
-                        current_sets = collect(values(groups_temp))
-                        Y_Delta = build_coupling_companion_matrix(current_sets, Y_matrix, complex_to_idx)
-
-                        # Re-augment with known ACR columns after rebuilding
-                        if haskey(network, :acr_augmentation) && size(network.acr_augmentation, 2) > 0
-                            Y_Delta = hcat(Y_Delta, network.acr_augmentation)
-                        end
-                    end
+            # Check if y_diff ∈ im(Y𝚫) by solving: Y𝚫 ξ = y_diff
+            if can_merge_via_proposition_s34(y_diff, Y_Delta)
+                if union_indices!(i, j)
+                    @debug "  Merging modules $i and $j via Proposition S3-4" complexes = (c_alpha, c_beta)
                 end
             end
         end
     end
 
-    if iteration >= max_iterations
-        @warn "Reached maximum iterations in Proposition S3-4 merging"
-    end
+
 
     # Collect merged sets
     groups = Dict{Int,Set{Symbol}}()
