@@ -11,14 +11,14 @@ import Graphs
 import LinearAlgebra: norm
 
 """
-    kinetic_analysis(concordance_modules, model; min_module_size=1, known_acr=Symbol[])
+    kinetic_analysis(concordance_modules, model; min_module_size=1, known_acr=Symbol[], efficient=true)
 
 Apply kinetic module analysis using set-based concordance module structure.
 
 Implements the iterative refinement algorithm from Section S.4.1 with three feedback loops:
 1. Proposition S4-1: Coupling merges → Concordance merges
-2. Remark S3-6: ACR identification → Enhanced coupling via augmented Y𝚫
-3. Theorem S4-6: If δₖ = 1, all non-terminal complexes are coupled
+2. Remark S3-6: ACR identification → Enhanced coupling via augmented Y𝚫 (only if `efficient=false`)
+3. Theorem S4-6: If δₖ = 1, all non-terminal complexes are coupled (only if `efficient=false`)
 
 # Arguments
 - `concordance_modules`: Vector{Set{Symbol}} where:
@@ -26,22 +26,15 @@ Implements the iterative refinement algorithm from Section S.4.1 with three feed
   - `concordance_modules[2+]` = concordance modules 1, 2, ...
 - `model`: AbstractFBCModel for network topology
 - `min_module_size`: Minimum size for reported modules (default: 1)
-  - Set to 1 to include singleton modules (terminal and unassigned complexes)
-  - Set to 2 to exclude singletons and focus on coupled modules
 - `known_acr`: Vector of metabolite IDs with known ACR (from external sources)
-  Used to enhance merging via Remark S3-6 (default: Symbol[])
+- `efficient`: Boolean flag for performance optimization (default: `true`)
+    - `true`: Fast pairwise ACR/ACRR detection, trivial merging only (no matrix inversions/rank checks).
+    - `false`: Full analysis including matrix-based ACR/ACRR, Proposition S3-4 advanced merging, and deficiency checks.
 
 # Returns
 - `Vector{Set{Symbol}}`: Kinetic modules (sets of complex IDs), sorted by size (largest first)
 
-# Notes
-- Singleton modules include: terminal complexes (dead ends) and balanced/unbalanced
-  complexes not assigned to larger modules
-- Terminal complexes don't participate in steady-state dynamics (their monomials
-  don't appear in ODEs), but are included for completeness
-- Set `min_module_size=2` to exclude singletons and focus on "interesting" kinetic modules
-
-# Example
+# Examples
 ```julia
 concordance = [
     Set([:A, :C, :F]),              # balanced
@@ -64,23 +57,28 @@ function kinetic_analysis(
     model::A.AbstractFBCModel;
     min_module_size::Int=1,
     known_acr::Vector{Symbol}=Symbol[],
-    enable_advanced_merging::Bool=true
+    efficient::Bool=true
 )
-    @debug "Starting kinetic module analysis" n_concordance_modules = length(concordance_modules) - 1 n_balanced = length(concordance_modules[1])
+    # Map efficient flag to advanced merging control
+    # efficient=true  -> enable_advanced_merging=false (trivial merging only)
+    # efficient=false -> enable_advanced_merging=true (full matrix merging)
+    enable_advanced_merging = !efficient
+
+    @debug "Starting kinetic module analysis" n_concordance_modules = length(concordance_modules) - 1 efficient
 
     # Extract network topology and build ID mappings ONCE
     A_matrix, complex_ids = incidence(model; return_ids=true)
     Y_matrix, metabolite_ids, _ = complex_stoichiometry(model; return_ids=true)
 
     # Build mappings once and reuse throughout
-    complex_to_idx = Dict(id => i for (i, id) in enumerate(complex_ids))
+    complex_to_idx = Dict{Symbol,Int}(id => i for (i, id) in enumerate(complex_ids))
 
     # Build augmentation for known ACR metabolites (Remark S3-6)
-    # For each known ACR metabolite, add its unit vector e_S as an augmentation column
+    # Works in both modes - helps with merging even in efficient mode
     acr_augmentation = build_acr_augmentation(known_acr, metabolite_ids, size(Y_matrix, 1))
 
     if !isempty(known_acr)
-        @debug "Using known ACR metabolites for enhanced merging" n_known_acr = length(known_acr) metabolites = known_acr
+        @debug "Using known ACR metabolites" n_known_acr = length(known_acr)
     end
 
     # Store in a named tuple for easy passing
@@ -94,191 +92,173 @@ function kinetic_analysis(
         enable_advanced_merging=enable_advanced_merging
     )
 
-    # Compute initial structural deficiency δ₀ before any concordance merging (for Proposition S4-8)
-    initial_delta = compute_structural_deficiency(concordance_modules, network)
+    # Filter out singleton concordance modules
+    balanced = concordance_modules[1]
+    non_singleton_unbalanced = [m for m in concordance_modules[2:end] if length(m) > 1]
 
-    # Check for mass action deficiency δₖ = 1 before entering the loop (Lemma S4-5)
-    # If δₖ = 1 (one unbalanced concordance module), we can directly apply Theorem S4-6
-    current_concordance = copy(concordance_modules)
+    # Reconstruct concordance_modules without singletons
+    filtered_concordance = [balanced; non_singleton_unbalanced]
 
-    if length(current_concordance) == 2  # balanced + 1 unbalanced
-        @debug "Initial check: δₖ = 1 detected (one unbalanced concordance module)"
-        @debug "Directly applying Theorem S4-6 without iterative refinement"
-        kinetic_modules = apply_theorem_s4_6(Set{Symbol}[], current_concordance, network)
-        valid_modules = filter(km -> length(km) >= min_module_size, kinetic_modules)
-        sort!(valid_modules, by=length, rev=true)
-        @debug "Kinetic analysis complete via Theorem S4-6" n_modules = length(valid_modules)
-        return valid_modules
+    # Compute initial structural deficiency only if doing full analysis
+    initial_delta = -1
+    if !efficient
+        initial_delta = compute_structural_deficiency(filtered_concordance, network)
     end
 
-    # Iterative refinement loop (Section S.4.1 + ACR feedback)
-    # When coupling sets merge, concordance modules also merge (S4-1)
-    # When ACR is identified, it can enable more merging (Remark S3-6)
-    # This may lead to larger upstream sets and more merging opportunities
-    max_outer_iterations = 10
-    outer_iteration = 0
-    concordance_changed = true
-    acr_changed = false
-    current_known_acr = Set{Symbol}(known_acr)  # Track discovered ACR metabolites
+    # Initial check for δₖ = 1 (only if efficient=false)
+    if !efficient
+        current_concordance = copy(filtered_concordance)
+        if length(current_concordance) == 2  # balanced + 1 unbalanced
+            @debug "Initial check: δₖ = 1 detected"
+            kinetic_modules = apply_theorem_s4_6(Set{Symbol}[], current_concordance, network)
+            valid_modules = filter(km -> length(km) >= min_module_size, kinetic_modules)
+            sort!(valid_modules, by=length, rev=true)
+            return valid_modules
+        end
+    else
+        current_concordance = filtered_concordance
+    end
 
-    # Track number of concordance merges for Proposition S4-8
+    # Iterative refinement loop with convergence detection
+    # Continue until we reach a fixed point (no modules change)
+    current_known_acr = Set{Symbol}(known_acr)
+
+    outer_iteration = 0
+    max_iterations = 100  # Safety limit to prevent infinite loops
+
+    # Track state for convergence detection
+    previous_kinetic_modules = Set{Symbol}[]
+    previous_concordance_state = Set{Symbol}[]
+
+    # Track merges for deficiency calculation
     n_concordance_merges = 0
 
-    while (concordance_changed || acr_changed) && outer_iteration < max_outer_iterations
+    while outer_iteration < max_iterations
         outer_iteration += 1
-        @debug "=== Iteration $outer_iteration: Concordance-Coupling-ACR Refinement ===" n_modules = length(current_concordance) - 1 n_known_acr = length(current_known_acr)
+        @debug "=== Iteration $outer_iteration ===" efficient
 
         balanced = current_concordance[1]
 
-        # Update network with current known ACR (Remark S3-6)
-        if !isempty(current_known_acr) && acr_changed
-            @debug "Updating Y𝚫 augmentation with newly identified ACR metabolites" new_acr = setdiff(current_known_acr, Set(known_acr))
+        # Update network with current known ACR for merging
+        # In efficient mode: still use ACR but skip expensive matrix operations
+        if !isempty(current_known_acr) && outer_iteration > 1
             acr_augmentation = build_acr_augmentation(collect(current_known_acr), metabolite_ids, size(Y_matrix, 1))
             network = (
-                A=network.A,
-                Y=network.Y,
-                complex_ids=network.complex_ids,
-                metabolite_ids=network.metabolite_ids,
-                complex_to_idx=network.complex_to_idx,
-                acr_augmentation=acr_augmentation
+                A=network.A, Y=network.Y, complex_ids=network.complex_ids,
+                metabolite_ids=network.metabolite_ids, complex_to_idx=network.complex_to_idx,
+                acr_augmentation=acr_augmentation,
+                enable_advanced_merging=enable_advanced_merging
             )
+            @debug "Updated network with ACR augmentation" n_acr = length(current_known_acr)
         end
 
-        # Step 1: Compute upstream sets for each concordance module
-        @debug "Computing upstream sets"
+        # Step 1: Compute upstream sets
         upstream_sets = Set{Symbol}[]
-
-        for (i, conc_module) in enumerate(current_concordance[2:end])
-            @debug "Processing concordance module $i" size = length(conc_module) complexes = conc_module
-
-            # Form extended module: balanced ∪ concordance
+        for conc_module in current_concordance[2:end]
             extended_module = balanced ∪ conc_module
-
-            # Apply upstream algorithm
             upstream = upstream_algorithm(extended_module, network)
-
-            if !isempty(upstream)
-                push!(upstream_sets, upstream)
-                @debug "Upstream set computed" size = length(upstream) complexes = upstream
-            end
+            !isempty(upstream) && push!(upstream_sets, upstream)
         end
-
-        @debug "Computed upstream sets" n_sets = length(upstream_sets)
 
         if isempty(upstream_sets)
-            @warn "No upstream sets found"
             return Set{Symbol}[]
         end
 
-        # Step 2: Merge coupled modules and track which concordance modules should merge
-        @debug "Merging coupled modules"
+        # Step 2: Merge coupled modules
+        # Use simple merging if efficient=true (handled by enable_advanced_merging=false in network)
         kinetic_modules, merge_map = merge_coupled_sets_tracked(upstream_sets, network)
 
-        # Step 3: Check if any merges occurred (Proposition S4-1)
-        # If coupling sets i and j merged, their concordance modules should also merge
+        # Step 3: Check concordance merges
         previous_n_unbalanced = length(current_concordance) - 1
         concordance_changed = apply_concordance_merging!(current_concordance, merge_map)
-        current_n_unbalanced = length(current_concordance) - 1
 
-        # Track number of concordance merges for Proposition S4-8
-        if concordance_changed
-            n_concordance_merges += (previous_n_unbalanced - current_n_unbalanced)
+        if concordance_changed && !efficient
+            n_concordance_merges += (previous_n_unbalanced - (length(current_concordance) - 1))
         end
 
-        # Step 4: Identify ACR metabolites from current kinetic modules (Proposition S3-5)
-        # This enables further merging via Remark S3-6
-        @debug "Identifying ACR metabolites from current kinetic modules"
-        acr_results = identify_acr_acrr(kinetic_modules, model)
+        # Step 4: Identify ACR and trigger feedback loop
+        # Works in both efficient and full modes (just uses different detection methods)
+
+        # Identify ACR from current kinetic modules
+        acr_results = identify_acr_acrr(kinetic_modules, model; efficient=efficient)
         newly_identified_acr = setdiff(Set(acr_results.acr_metabolites), current_known_acr)
 
         if !isempty(newly_identified_acr)
-            @debug "Identified new ACR metabolites" metabolites = newly_identified_acr
             union!(current_known_acr, newly_identified_acr)
-            acr_changed = true
-        else
-            acr_changed = false
+            @debug "Identified new ACR metabolites" count = length(newly_identified_acr) acr_list = collect(newly_identified_acr)
         end
 
-        if concordance_changed
-            @debug "Concordance modules merged via Proposition S4-1, recomputing..."
+        # Check convergence: Has the kinetic module partition changed?
+        # Convert to canonical form for comparison (sorted sets of sorted symbols)
+        current_state = Set(Set(sort(collect(km), by=string)) for km in kinetic_modules)
+        concordance_state = Set(Set(sort(collect(cm), by=string)) for cm in current_concordance)
 
-            # Check if concordance merging resulted in δₖ = 1
-            if length(current_concordance) == 2  # balanced + 1 unbalanced
-                @debug "After merging: δₖ = 1 detected (one unbalanced concordance module)"
-                @debug "Directly applying Theorem S4-6"
-                kinetic_modules = apply_theorem_s4_6(Set{Symbol}[], current_concordance, network)
-                valid_modules = filter(km -> length(km) >= min_module_size, kinetic_modules)
-                sort!(valid_modules, by=length, rev=true)
-                @debug "Kinetic analysis complete via Theorem S4-6" n_modules = length(valid_modules)
-                return valid_modules
+        converged = (current_state == previous_kinetic_modules &&
+                     concordance_state == previous_concordance_state)
+
+        if converged
+            @debug "Convergence detected - no changes in modules" iteration = outer_iteration
+            break
+        end
+
+        # Store current state for next iteration
+        previous_kinetic_modules = current_state
+        previous_concordance_state = concordance_state
+    end
+
+    # Check if we hit max iterations (should rarely happen with proper convergence)
+    if outer_iteration >= max_iterations
+        @warn "Maximum iterations reached without convergence" max_iterations
+    else
+        @debug "Algorithm converged" iterations = outer_iteration
+    end
+
+    # Final deficiency check for full mode
+    if !efficient && initial_delta >= 0
+        (is_delta_k_one, should_merge) = check_mass_action_deficiency(
+            current_concordance, n_concordance_merges, initial_delta, network
+        )
+        if is_delta_k_one && should_merge
+            # Merge all unbalanced
+            all_unbalanced = reduce(∪, current_concordance[2:end]; init=Set{Symbol}())
+            current_concordance = [current_concordance[1], all_unbalanced]
+
+            # Recompute modules with merged concordance
+            upstream_sets = Set{Symbol}[]
+            balanced = current_concordance[1]
+            for conc_module in current_concordance[2:end]
+                extended_module = balanced ∪ conc_module
+                upstream = upstream_algorithm(extended_module, network)
+                !isempty(upstream) && push!(upstream_sets, upstream)
             end
-        elseif acr_changed
-            @debug "New ACR metabolites identified, will continue iteration with augmented Y𝚫"
-        else
-            @debug "No concordance changes and no new ACR, checking for δₖ = 1..."
 
-            # Check if δₖ = 1 using Proposition S4-8 and Lemma S4-7
-            (is_delta_k_one, should_merge_concordance) = check_mass_action_deficiency(
-                current_concordance,
-                n_concordance_merges,
-                initial_delta,
-                network
-            )
-
-            if is_delta_k_one && should_merge_concordance
-                @debug "δₖ = 1 detected! Forcing merge of all unbalanced concordance modules (Lemma S4-5)"
-
-                # Merge all unbalanced concordance modules into one
-                all_unbalanced = reduce(∪, current_concordance[2:end]; init=Set{Symbol}())
-                current_concordance = [current_concordance[1], all_unbalanced]
-
-                @debug "Recomputing with merged concordance modules..."
-                # Continue loop to recompute upstream sets
-                concordance_changed = true
-                continue
-            end
-
-            @debug "Refinement converged"
-
-            # Add singleton balanced complexes from extended modules
-            kinetic_modules = add_singleton_balanced(kinetic_modules, balanced, current_concordance[2:end], network)
-
-            # Apply Theorem S4-6: if mass action deficiency δₖ = 1, merge all non-terminal modules
-            kinetic_modules = apply_theorem_s4_6(kinetic_modules, current_concordance, network)
-
-            # Filter by size
-            valid_modules = filter(km -> length(km) >= min_module_size, kinetic_modules)
-
-            # Sort by size (largest first) so giant module is at index 1
-            sort!(valid_modules, by=length, rev=true)
-
-            @debug "Kinetic analysis complete" n_modules = length(valid_modules) giant_size = (isempty(valid_modules) ? 0 : maximum(length.(valid_modules)))
-
-            return valid_modules
+            kinetic_modules, _ = merge_coupled_sets_tracked(upstream_sets, network)
         end
     end
 
-    if outer_iteration >= max_outer_iterations
-        @warn "Reached maximum iterations in concordance-coupling refinement loop"
+    # Finalize with singletons and balanced modules
+    kinetic_modules = add_singleton_balanced(kinetic_modules, current_concordance[1], current_concordance[2:end], network)
+
+    # Final ACR-based merging pass for singletons added by add_singleton_balanced
+    # This handles cases like {A+C} merging with {F, A, C+F, E, B+D}
+    if !isempty(current_known_acr)
+        @debug "Final ACR-based merging pass" n_modules_before = length(kinetic_modules)
+
+        # Try merging with known ACR (converting to vector form expected by merge_coupled_sets)
+        final_merged = merge_coupled_sets(kinetic_modules, network)
+
+        if length(final_merged) < length(kinetic_modules)
+            @debug "Final ACR merging reduced module count" before = length(kinetic_modules) after = length(final_merged)
+            kinetic_modules = final_merged
+        end
     end
 
-    # Fallback: return current kinetic modules
-    balanced = current_concordance[1]
-    upstream_sets = Set{Symbol}[]
-    for conc_module in current_concordance[2:end]
-        extended_module = balanced ∪ conc_module
-        upstream = upstream_algorithm(extended_module, network)
-        !isempty(upstream) && push!(upstream_sets, upstream)
+    if !efficient
+        kinetic_modules = apply_theorem_s4_6(kinetic_modules, current_concordance, network)
     end
 
-    kinetic_modules = merge_coupled_sets(upstream_sets, network)
-    kinetic_modules = add_singleton_balanced(kinetic_modules, balanced, current_concordance[2:end], network)
-    kinetic_modules = apply_theorem_s4_6(kinetic_modules, current_concordance, network)
     valid_modules = filter(km -> length(km) >= min_module_size, kinetic_modules)
-
-    # Sort by size (largest first) so giant module is at index 1
     sort!(valid_modules, by=length, rev=true)
-
     return valid_modules
 end
 
@@ -312,7 +292,8 @@ function upstream_algorithm(
     # Phase I: Remove entry complexes (autonomous property)
     @debug "Phase I: Removing entry complexes" initial_size = length(current_indices)
     iteration = 0
-    while true
+    max_phase1_iterations = 1000  # Safety limit
+    while iteration < max_phase1_iterations
         iteration += 1
         entries = find_entry_complexes_idx(current_indices, A_matrix)
         if !isempty(entries)
@@ -327,6 +308,10 @@ function upstream_algorithm(
             @debug "  All complexes removed in Phase I"
             return Set{Symbol}()
         end
+    end
+
+    if iteration >= max_phase1_iterations
+        @warn "Phase I exceeded maximum iterations" max_iterations = max_phase1_iterations n_complexes = length(current_indices)
     end
 
     remaining = [complex_ids[i] for i in current_indices]
@@ -629,31 +614,73 @@ function merge_coupled_sets(upstream_sets::Vector{Set{Symbol}}, network::NamedTu
         end
     end
 
+    # Step 1.5: ACR-based merging - merge sets where complexes differ only by ACR species
+    # This handles cases like {A} and {A+C} where C is ACR
+    if haskey(network, :acr_augmentation) && size(network.acr_augmentation, 2) > 0
+        @debug "Step 1.5: ACR-based merging (Remark S3-6)"
+
+        # Get ACR metabolite indices from augmentation matrix
+        acr_indices = Set{Int}()
+        for col in 1:size(network.acr_augmentation, 2)
+            # Each column is a unit vector for an ACR metabolite
+            nz_idx = findfirst(x -> abs(x) > 1e-10, network.acr_augmentation[:, col])
+            if !isnothing(nz_idx)
+                push!(acr_indices, nz_idx)
+            end
+        end
+
+        if !isempty(acr_indices)
+            for i in 1:n
+                for j in (i+1):n
+                    # Skip if already merged
+                    if find_root(i) == find_root(j)
+                        continue
+                    end
+
+                    # Check if any pair of complexes between the two sets differ only by ACR species
+                    for c_i in upstream_sets[i]
+                        idx_i = get(complex_to_idx, c_i, 0)
+                        idx_i == 0 && continue
+
+                        for c_j in upstream_sets[j]
+                            idx_j = get(complex_to_idx, c_j, 0)
+                            idx_j == 0 && continue
+
+                            # Compute stoichiometric difference
+                            diff = Y_matrix[:, idx_i] - Y_matrix[:, idx_j]
+                            nz_indices = SparseArrays.findnz(diff)[1]
+
+                            # If all differences are in ACR metabolites, merge!
+                            if !isempty(nz_indices) && all(idx -> idx in acr_indices, nz_indices)
+                                if union_indices!(i, j)
+                                    @debug "  Merging modules $i and $j (ACR difference)" complexes = (c_i, c_j) acr_diff = [network.metabolite_ids[idx] for idx in nz_indices if idx <= length(network.metabolite_ids)]
+                                end
+                                @goto next_pair_acr
+                            end
+                        end
+                    end
+                    @label next_pair_acr
+                end
+            end
+        end
+    end
+
     # Step 2: Advanced merging via Proposition S3-4
     # Check if Y[:,α] - Y[:,β] ∈ im(Y𝚫) for complexes from different coupling sets
     if !get(network, :enable_advanced_merging, true)
         @debug "Skipping Step 2: Advanced merging (disabled)"
 
         # Return results from Step 1
-        merged_modules = Set{Symbol}[]
-        merge_map = Dict{Int,Int}()
-
-        new_sets = Dict{Int,Set{Symbol}}()
-
+        groups = Dict{Int,Set{Symbol}}()
         for i in 1:n
             root = find_root(i)
-            if !haskey(new_sets, root)
-                new_sets[root] = Set{Symbol}()
+            if !haskey(groups, root)
+                groups[root] = Set{Symbol}()
             end
-            union!(new_sets[root], upstream_sets[i])
-            merge_map[i] = root # Store mapping even if trivial
+            Base.union!(groups[root], upstream_sets[i])
         end
 
-        for (_, s) in new_sets
-            push!(merged_modules, s)
-        end
-
-        return merged_modules
+        return collect(values(groups))
     end
 
     @debug "Step 2: Advanced merging via Proposition S3-4"
@@ -1223,7 +1250,7 @@ function find_balanced_weak_linkage_classes(
 end
 
 """
-    identify_acr_acrr(kinetic_modules, model; tolerance=1e-8)
+    identify_acr_acrr(kinetic_modules, model; tolerance=1e-8, efficient=true)
 
 Identify metabolites with Absolute Concentration Robustness (ACR) and
 Absolute Concentration Ratio Robustness (ACRR) from kinetic modules.
@@ -1236,13 +1263,18 @@ Uses Propositions S3-5 and S3-6 from the paper:
 - `kinetic_modules`: Vector of kinetic modules (from kinetic_analysis)
 - `model`: AbstractFBCModel for network topology
 - `tolerance`: Tolerance for linear system solving (default: 1e-8)
+- `efficient`: Boolean flag for performance optimization (default: `true`)
+    - `true`: Use fast pairwise comparison of coupled complexes. Identifies ACR/ACRR
+      only from direct stoichiometric differences within modules.
+    - `false`: Use full matrix analysis (Proposition S3-5/S3-6) checking column span of Y𝚫.
+      Can identify implicit relationships from linear combinations.
 
 # Returns
 Named tuple with:
 - `acr_metabolites`: Vector of metabolite IDs with ACR
 - `acrr_pairs`: Vector of tuples (S1, S2) with ACRR
 
-# Example
+# Examples
 ```julia
 kinetic_modules = kinetic_analysis(concordance_modules, model)
 acr_results = identify_acr_acrr(kinetic_modules, model)
@@ -1253,50 +1285,132 @@ println("ACRR pairs: ", acr_results.acrr_pairs)
 function identify_acr_acrr(
     kinetic_modules::Vector{Set{Symbol}},
     model::A.AbstractFBCModel;
-    tolerance::Float64=1e-8
+    tolerance::Float64=1e-8,
+    efficient::Bool=true
 )
     # Extract network topology
     Y_matrix, metabolite_ids, complex_ids = complex_stoichiometry(model; return_ids=true)
-    complex_to_idx = Dict(id => i for (i, id) in enumerate(complex_ids))
-    metabolite_to_idx = Dict(id => i for (i, id) in enumerate(metabolite_ids))
 
-    # Build Y𝚫 from final kinetic modules
-    Y_Delta = build_coupling_companion_matrix(kinetic_modules, Y_matrix, complex_to_idx)
+    if efficient
+        # Fast efficient path: Direct pairwise comparison
+        # No matrix inversions or column span checks
+        # O(N_modules * N_complexes^2) but usually N_complexes is small per module
 
-    n_metabolites = length(metabolite_ids)
+        complex_to_idx = Dict{Symbol,Int}(id => i for (i, id) in enumerate(complex_ids))
+        n_metabolites = length(metabolite_ids)
 
-    # Check ACR for each metabolite (Proposition S3-5)
-    acr_metabolites = Symbol[]
-    for (met_idx, met_id) in enumerate(metabolite_ids)
-        # Build unit vector e_S
-        e_S = zeros(Float64, n_metabolites)
-        e_S[met_idx] = 1.0
+        acr_metabolites = Set{Symbol}()
+        acrr_pairs = Set{Tuple{Symbol,Symbol}}()
 
-        # Check if e_S ∈ im(YΔ)
-        if is_in_column_span(e_S, Y_Delta, tolerance)
-            push!(acr_metabolites, met_id)
-        end
-    end
+        for module_set in kinetic_modules
+            complexes = collect(module_set)
+            k = length(complexes)
+            if k < 2
+                continue
+            end
 
-    # Check ACRR for all pairs of metabolites (Proposition S3-6)
-    acrr_pairs = Tuple{Symbol,Symbol}[]
-    for i in 1:n_metabolites
-        for j in (i+1):n_metabolites
-            # Build difference e_{S1} - e_{S2}
-            e_diff = zeros(Float64, n_metabolites)
-            e_diff[i] = 1.0
-            e_diff[j] = -1.0
+            # Check all pairs in the module
+            for i in 1:k
+                idx_a = get(complex_to_idx, complexes[i], 0)
+                idx_a == 0 && continue
 
-            # Check if e_diff ∈ im(YΔ)
-            if is_in_column_span(e_diff, Y_Delta, tolerance)
-                push!(acrr_pairs, (metabolite_ids[i], metabolite_ids[j]))
+                for j in (i+1):k
+                    idx_b = get(complex_to_idx, complexes[j], 0)
+                    idx_b == 0 && continue
+
+                    # Compute stoichiometric difference: y_a - y_b
+                    # Do this efficiently using sparse matrix access
+                    # We iterate over non-zero elements of Y[:, idx_a] and Y[:, idx_b]
+
+                    # Identify metabolites that change count
+                    # Δy = Y[:, idx_a] - Y[:, idx_b]
+
+                    # We are looking for:
+                    # 1. ACR: Δy has exactly one non-zero entry at index m -> Metabolite m is ACR
+                    # 2. ACRR: Δy has exactly two non-zero entries at m1, m2 with opposite signs/equal magnitude -> ACRR(m1, m2)
+                    #    Formally: c*e_m1 - c*e_m2 = Δy  =>  diff in m1 is +c, diff in m2 is -c (or vice versa)
+
+                    # Get non-zero indices for both columns
+                    # Ideally we iterate sparse NZs, but column indexing Y_matrix[:, idx] is efficient in CSC
+                    col_a = Y_matrix[:, idx_a]
+                    col_b = Y_matrix[:, idx_b]
+                    diff = col_a - col_b
+
+                    nz_indices = SparseArrays.findnz(diff)[1]
+                    nnz_count = length(nz_indices)
+
+                    if nnz_count == 1
+                        # ACR detected: Only one metabolite concentration changes between coupled complexes
+                        # Since complexes are coupled (ratio stable), the single changing metabolite must be constant
+                        m_idx = nz_indices[1]
+                        push!(acr_metabolites, metabolite_ids[m_idx])
+
+                    elseif nnz_count == 2
+                        # Potential ACRR
+                        idx1, idx2 = nz_indices[1], nz_indices[2]
+                        val1, val2 = diff[idx1], diff[idx2]
+
+                        # Check if they change in fixed ratio (specifically 1:-1 for direct ACRR)
+                        # We look for sum ~ 0 => opposite changes
+                        if abs(val1 + val2) < tolerance
+                            m1 = metabolite_ids[idx1]
+                            m2 = metabolite_ids[idx2]
+                            # Store sorted pair for uniqueness
+                            if m1 < m2
+                                push!(acrr_pairs, (m1, m2))
+                            else
+                                push!(acrr_pairs, (m2, m1))
+                            end
+                        end
+                    end
+                end
             end
         end
+
+        return (acr_metabolites=collect(acr_metabolites), acrr_pairs=collect(acrr_pairs))
+
+    else
+        # Full matrix path (Original Implementation)
+        complex_to_idx = Dict(id => i for (i, id) in enumerate(complex_ids))
+        metabolite_to_idx = Dict(id => i for (i, id) in enumerate(metabolite_ids))
+        n_metabolites = length(metabolite_ids)
+
+        # Build Y𝚫 from final kinetic modules
+        Y_Delta = build_coupling_companion_matrix(kinetic_modules, Y_matrix, complex_to_idx)
+
+        # Check ACR for each metabolite (Proposition S3-5)
+        acr_metabolites = Symbol[]
+        for (met_idx, met_id) in enumerate(metabolite_ids)
+            # Build unit vector e_S
+            e_S = zeros(Float64, n_metabolites)
+            e_S[met_idx] = 1.0
+
+            # Check if e_S ∈ im(YΔ)
+            if is_in_column_span(e_S, Y_Delta, tolerance)
+                push!(acr_metabolites, met_id)
+            end
+        end
+
+        # Check ACRR for all pairs of metabolites (Proposition S3-6)
+        acrr_pairs = Tuple{Symbol,Symbol}[]
+        for i in 1:n_metabolites
+            for j in (i+1):n_metabolites
+                # Build difference e_{S1} - e_{S2}
+                e_diff = zeros(Float64, n_metabolites)
+                e_diff[i] = 1.0
+                e_diff[j] = -1.0
+
+                # Check if e_diff ∈ im(YΔ)
+                if is_in_column_span(e_diff, Y_Delta, tolerance)
+                    push!(acrr_pairs, (metabolite_ids[i], metabolite_ids[j]))
+                end
+            end
+        end
+
+        @debug "ACR/ACRR identification complete (matrix method)" n_acr = length(acr_metabolites) n_acrr = length(acrr_pairs)
+
+        return (acr_metabolites=acr_metabolites, acrr_pairs=acrr_pairs)
     end
-
-    @debug "ACR/ACRR identification complete" n_acr = length(acr_metabolites) n_acrr = length(acrr_pairs)
-
-    return (acr_metabolites=acr_metabolites, acrr_pairs=acrr_pairs)
 end
 
 """

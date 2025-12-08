@@ -78,7 +78,7 @@ using StableRNGs
             Set([Symbol("XD+Yp"), Symbol("XD+Y")])                          # 𝒞m3
         ]
 
-        kinetic_modules = kinetic_analysis(concordance_modules, model, min_module_size=1)
+        kinetic_modules = kinetic_analysis(concordance_modules, model; min_module_size=1, efficient=false)
 
         @test !isempty(kinetic_modules)
         @test all(km -> km isa Set{Symbol}, kinetic_modules)
@@ -120,7 +120,7 @@ using StableRNGs
             Set([Symbol("XD+Yp"), Symbol("XD+Y")])
         ]
 
-        kinetic_modules = kinetic_analysis(concordance_modules, model, min_module_size=1)
+        kinetic_modules = kinetic_analysis(concordance_modules, model; min_module_size=1, efficient=false)
 
         # Identify ACR/ACRR
         acr_results = identify_acr_acrr(kinetic_modules, model)
@@ -171,7 +171,7 @@ using StableRNGs
         concordance_modules = extract_concordance_modules(concordance_results)
 
         # Step 3: Kinetic analysis
-        kinetic_modules = kinetic_analysis(concordance_modules, model, min_module_size=1)
+        kinetic_modules = kinetic_analysis(concordance_modules, model; min_module_size=1, efficient=false)
 
         # Step 4: Identify ACR/ACRR
         acr_results = identify_acr_acrr(kinetic_modules, model)
@@ -202,7 +202,7 @@ using StableRNGs
             Set([Symbol("XD+Yp"), Symbol("XD+Y")])
         ]
 
-        kinetic_modules = kinetic_analysis(concordance_modules, model, min_module_size=1)
+        kinetic_modules = kinetic_analysis(concordance_modules, model; min_module_size=1, efficient=false)
 
         # Verify Y𝚫 matrix construction
         Y_matrix, metabolite_ids, complex_ids = complex_stoichiometry(model; return_ids=true)
@@ -250,6 +250,13 @@ using StableRNGs
         Cm2 = Set([Symbol("XT+Yp"), Symbol("XT+Y")])
         Cm3 = Set([Symbol("XD+Yp"), Symbol("XD+Y")])
 
+        # Note: In the paper, balanced set is identified later or implicitly. 
+        # Here we verify that with these inputs, we get the exact paper result.
+
+        concordance_modules = [balanced, Cm1, Cm2, Cm3]
+
+        Cm3 = Set([Symbol("XD+Yp"), Symbol("XD+Y")])
+
         # 2. Verify Upstream Sets (Initial Coupling)
         A_matrix, complex_ids = COCOA.incidence(model; return_ids=true)
         Y_matrix, metabolite_ids, _ = COCOA.complex_stoichiometry(model; return_ids=true)
@@ -285,7 +292,7 @@ using StableRNGs
 
         # 4. Final Result Validation
         concordance_modules_vec = [balanced, Cm1, Cm2, Cm3]
-        kinetic_modules = kinetic_analysis(concordance_modules_vec, model)
+        kinetic_modules = kinetic_analysis(concordance_modules_vec, model; efficient=false)
 
         expected_giant = union(expected_C1, expected_C4)
         @test length(kinetic_modules[1]) == 9
@@ -338,3 +345,88 @@ using StableRNGs
         @test bounds_after_1_merge.is_exact && bounds_after_1_merge.lower == 1
     end
 end
+
+@testset "Deficiency Two Network (Fig S-6)" begin
+    model = create_deficiency_two_model()
+
+    # Concordance modules from text
+    # 𝒞b ={F, E, W, X, D+Y}
+    Cb = Set([:F, :E, :W, :X, Symbol("D+Y")])
+
+    # 𝒞m1={A, B, C+F, D+F, B+D, A+C}
+    Cm1 = Set([:A, :B, Symbol("C+F"), Symbol("D+F"), Symbol("B+D"), Symbol("A+C")])
+
+    # 𝒞m2={U+X, V+X, S, T, T+Z, S+U, V, Z}
+    Cm2 = Set([Symbol("U+X"), Symbol("V+X"), :S, :T, Symbol("T+Z"), Symbol("S+U"), :V, :Z])
+
+    concordance_modules = [Cb, Cm1, Cm2]
+
+    # Use efficient=false to enable advanced merging via Proposition S3-4
+    kinetic_modules = kinetic_analysis(concordance_modules, model; efficient=true, min_module_size=1)
+
+    # Expected coupling partition from text:
+    # {F, A, C+F, E, B+D, A+C}
+    M1_expected = Set([:F, :A, Symbol("C+F"), :E, Symbol("B+D"), Symbol("A+C")])
+
+    # {U+X, W, X, S, T+Z, V, D+Y, S+U}
+    M2_expected = Set([Symbol("U+X"), :W, :X, :S, Symbol("T+Z"), :V, Symbol("D+Y"), Symbol("S+U")])
+
+    # Terminals: {B}, {D+F}, {V+X}, {T}, {Z}
+    Terminals_expected = Set([
+        Set([:B]),
+        Set([Symbol("D+F")]),
+        Set([Symbol("V+X")]),
+        Set([:T]),
+        Set([:Z])
+    ])
+
+    # Find M1 and M2 in results
+    found_M1 = false
+    found_M2 = false
+    found_terminals = Set{Set{Symbol}}()
+
+    for mod in kinetic_modules
+        if mod == M1_expected
+            found_M1 = true
+        elseif mod == M2_expected
+            found_M2 = true
+        elseif length(mod) == 1
+            push!(found_terminals, mod)
+        end
+    end
+
+    @test found_M1
+    @test found_M2
+    @test found_terminals == Terminals_expected
+    @test length(kinetic_modules) == 7 # 2 large + 5 terminals
+
+    @info "Deficiency Two Network validation complete" found_M1 found_M2 n_terminals = length(found_terminals)
+
+    # Also check efficient ACR/ACRR on this model (efficient=true)
+    # Should detect comparable ACR/ACRR results even if merging logic is simpler
+    acr_results = identify_acr_acrr(kinetic_modules, model; efficient=true)
+
+    # Text says: ACR components: C, U
+    @test :C in acr_results.acr_metabolites
+    @test :U in acr_results.acr_metabolites
+
+    # Text says: ACRR pairs: A/F, A/E, E/F, W/X, W/S, X/S, W/V, X/V, S/V
+    # Check a few
+    expected_pairs = [
+        (:A, :F), (:A, :E), (:E, :F),
+        (:W, :X), (:W, :S), (:X, :S),
+        (:W, :V), (:X, :V), (:S, :V)
+    ]
+
+    count_found = 0
+    for (m1, m2) in expected_pairs
+        # Order in tuple might be swapped
+        if (m1, m2) in acr_results.acrr_pairs || (m2, m1) in acr_results.acrr_pairs
+            count_found += 1
+        end
+    end
+
+    @test count_found >= length(expected_pairs)
+    @info "Efficient ACR/ACRR verified on Deficiency Two Network" count_found
+end
+

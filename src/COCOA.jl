@@ -77,6 +77,7 @@ include("variability.jl")
 include("concordance.jl")
 include("kinetic_analysis.jl")
 include("create_envz_ompr_model.jl")
+include("create_deficiency_two_model.jl")
 
 # Include preprocessing functions
 include("preprocessing/preprocessing.jl")
@@ -101,7 +102,7 @@ export incidence, stoichiometry, complex_stoichiometry
 
 
 # Export kinetic analysis functions
-export kinetic_analysis, identify_acr_acrr, create_envz_ompr_model
+export kinetic_analysis, upstream_algorithm, identify_acr_acrr, create_envz_ompr_model, create_deficiency_two_model
 
 # Export deficiency calculation functions
 export structural_deficiency, mass_action_deficiency_bounds
