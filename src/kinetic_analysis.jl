@@ -8,7 +8,7 @@ Uses the simplified 2-phase upstream algorithm from the paper (Remark S2-1).
 """
 
 import Graphs
-import LinearAlgebra: norm
+import LinearAlgebra: norm, dot
 import Base.Threads
 
 """
@@ -93,12 +93,14 @@ function kinetic_analysis(
         enable_advanced_merging=enable_advanced_merging
     )
 
-    # Filter out singleton concordance modules
+    # Extract balanced and unbalanced modules (keep ALL modules including singletons)
+    # Singletons can still contribute to cross-module couplings via Proposition S3-4
+    # Filtering by min_module_size happens only at the end when returning results
     balanced = concordance_modules[1]
-    non_singleton_unbalanced = [m for m in concordance_modules[2:end] if length(m) > 1]
+    unbalanced_modules = concordance_modules[2:end]
 
-    # Reconstruct concordance_modules without singletons
-    filtered_concordance = [balanced; non_singleton_unbalanced]
+    # Keep all concordance modules for analysis
+    filtered_concordance = [balanced; unbalanced_modules]
 
     # Compute initial structural deficiency only if doing full analysis
     initial_delta = -1
@@ -719,43 +721,86 @@ function merge_coupled_sets(upstream_sets::Vector{Set{Symbol}}, network::NamedTu
         @debug "  Augmented Y𝚫 with known ACR metabolites" n_augmentation_cols = size(network.acr_augmentation, 2)
     end
 
-    # Check all pairs of distinct coupling sets
-    # Optimization: According to Remark S3-3, merging coupling sets does NOT alter the column span of Y𝚫.
+    # OPTIMIZATION: Build cached QR decomposition ONCE for all merge checks
+    # According to Remark S3-3, merging coupling sets does NOT alter the column span of Y𝚫.
     # Therefore, we do not need to rebuild or update Y𝚫 after merges.
     # A single pass over all pairs is sufficient to find all merging opportunities.
     # The Union-Find structure handles the transitive closure of merges.
+    cache = build_cached_column_span(Y_Delta)
+    @debug "  Built cached column span" rank = cache.rank n_cols = size(Y_Delta, 2)
 
+    # OPTIMIZATION: Precompute stoichiometric vectors for all relevant complexes
+    # Avoids repeated sparse-to-dense conversions in the loop
+    n_metabolites = size(Y_matrix, 1)
+    complex_vectors = Dict{Symbol,Vector{Float64}}()
+    for upstream_set in upstream_sets
+        c = first(upstream_set)  # We only need one complex per set (Lemma S3-3)
+        if haskey(complex_to_idx, c) && !haskey(complex_vectors, c)
+            complex_vectors[c] = Vector(Y_matrix[:, complex_to_idx[c]])
+        end
+    end
+
+    # OPTIMIZATION: Collect pairs to check, then parallelize
+    # Build list of (i, j, c_alpha, c_beta) tuples for pairs that need checking
+    pairs_to_check = Tuple{Int,Int,Symbol,Symbol}[]
     for i in 1:n
+        c_alpha = first(upstream_sets[i])
+        haskey(complex_vectors, c_alpha) || continue
+
         for j in (i+1):n
-            # Skip if already merged
-            if find_root(i) == find_root(j)
-                continue
-            end
+            # Skip if already merged from Step 1/1.5
+            find_root(i) == find_root(j) && continue
 
-            # Check Proposition S3-4: can we merge sets i and j?
-            # Pick arbitrary complexes from each set
-            c_alpha = first(upstream_sets[i])
             c_beta = first(upstream_sets[j])
+            haskey(complex_vectors, c_beta) || continue
 
-            # Get their stoichiometric vectors
-            if !haskey(complex_to_idx, c_alpha) || !haskey(complex_to_idx, c_beta)
-                continue
+            push!(pairs_to_check, (i, j, c_alpha, c_beta))
+        end
+    end
+
+    @debug "  Checking $(length(pairs_to_check)) pairs for Proposition S3-4 merging"
+
+    # OPTIMIZATION: Parallel merge check using pre-allocated workspace per thread
+    # Results stored in thread-safe channel
+    merge_pairs = Channel{Tuple{Int,Int}}(length(pairs_to_check) + 1)
+
+    if length(pairs_to_check) > 0
+        # Preallocate workspace per thread for y_diff computation
+        # Use maxthreadid() instead of nthreads() to handle interactive threads in Julia 1.9+
+        max_tid = Threads.maxthreadid()
+        workspaces = [Vector{Float64}(undef, n_metabolites) for _ in 1:max_tid]
+
+        Threads.@threads for pair_idx in 1:length(pairs_to_check)
+            i, j, c_alpha, c_beta = pairs_to_check[pair_idx]
+
+            # Use thread-local workspace
+            tid = Threads.threadid()
+            y_diff = workspaces[tid]
+
+            # Compute difference in-place: y_alpha - y_beta
+            y_alpha = complex_vectors[c_alpha]
+            y_beta = complex_vectors[c_beta]
+            @inbounds for k in 1:n_metabolites
+                y_diff[k] = y_alpha[k] - y_beta[k]
             end
 
-            idx_alpha = complex_to_idx[c_alpha]
-            idx_beta = complex_to_idx[c_beta]
-
-            # Compute difference: y_alpha - y_beta
-            y_diff = collect(Y_matrix[:, idx_alpha] - Y_matrix[:, idx_beta])
-
-            # Check if y_diff ∈ im(Y𝚫) by solving: Y𝚫 ξ = y_diff
-            if can_merge_via_proposition_s34(y_diff, Y_Delta)
-                if union_indices!(i, j)
-                    @debug "  Merging modules $i and $j via Proposition S3-4" complexes = (c_alpha, c_beta)
-                end
+            # Check if y_diff ∈ im(Y𝚫) using cached QR
+            if can_merge_via_proposition_s34(y_diff, cache)
+                put!(merge_pairs, (i, j))
             end
         end
     end
+    close(merge_pairs)
+
+    # Apply merges sequentially (union-find not thread-safe)
+    merge_count = 0
+    for (i, j) in merge_pairs
+        if union_indices!(i, j)
+            merge_count += 1
+            @debug "  Merging modules $i and $j via Proposition S3-4"
+        end
+    end
+    @debug "  Proposition S3-4 merged $merge_count pairs"
 
 
 
@@ -863,6 +908,63 @@ function build_coupling_companion_matrix(
 end
 
 """
+Cached QR decomposition for efficient column span checks.
+
+Stores the orthonormal basis Q_reduced for the column span of Y𝚫,
+enabling O(m·k) projection checks instead of O(m³) QR per check.
+"""
+struct CachedColumnSpan
+    Q_reduced::Matrix{Float64}  # Orthonormal basis for im(Y𝚫)
+    rank::Int                   # Effective rank of Y𝚫
+    tolerance::Float64          # Numerical tolerance
+end
+
+"""
+    build_cached_column_span(Y_Delta; tolerance=1e-8)
+
+Build a cached QR decomposition for efficient column span membership checks.
+"""
+function build_cached_column_span(Y_Delta::Matrix{Float64}; tolerance::Float64=1e-8)
+    n_rows = size(Y_Delta, 1)
+
+    if size(Y_Delta, 2) == 0
+        return CachedColumnSpan(zeros(Float64, n_rows, 0), 0, tolerance)
+    end
+
+    try
+        Q, R = LinearAlgebra.qr(Y_Delta)
+        r_diag = abs.(LinearAlgebra.diag(R))
+        rank_ydelta = sum(r_diag .> tolerance)
+
+        if rank_ydelta == 0
+            return CachedColumnSpan(zeros(Float64, n_rows, 0), 0, tolerance)
+        end
+
+        Q_reduced = Matrix(Q[:, 1:rank_ydelta])
+        return CachedColumnSpan(Q_reduced, rank_ydelta, tolerance)
+    catch e
+        @debug "Error building cached column span" exception = e
+        return CachedColumnSpan(zeros(Float64, n_rows, 0), 0, tolerance)
+    end
+end
+
+"""
+    is_in_span(v, cache::CachedColumnSpan)
+
+Check if vector v is in the column span using cached QR decomposition.
+O(m·k) instead of O(m³) per check.
+"""
+function is_in_span(v::AbstractVector{Float64}, cache::CachedColumnSpan)
+    if cache.rank == 0
+        return norm(v) < cache.tolerance
+    end
+
+    # Project v onto column space: P v = Q Q^T v
+    proj = cache.Q_reduced * (cache.Q_reduced' * v)
+    return norm(proj - v) < cache.tolerance
+end
+
+"""
 Check if y_diff ∈ im(Y𝚫) using QR-based projection.
 
 More robust than direct least squares solve - handles rank-deficient matrices gracefully.
@@ -905,6 +1007,13 @@ function can_merge_via_proposition_s34(y_diff::Vector{Float64}, Y_Delta::Matrix{
 end
 
 """
+Check if y_diff ∈ im(Y𝚫) using pre-cached QR decomposition.
+"""
+function can_merge_via_proposition_s34(y_diff::Vector{Float64}, cache::CachedColumnSpan)
+    return is_in_span(y_diff, cache)
+end
+
+"""
     is_weakly_reversible(network)
 
 Check if the network is weakly reversible.
@@ -917,20 +1026,8 @@ function is_weakly_reversible(network::NamedTuple)
     complex_ids = network.complex_ids
     n_complexes = length(complex_ids)
 
-    # Build directed graph from incidence matrix
-    g = Graphs.SimpleDiGraph(n_complexes)
-    n_reactions = size(A_matrix, 2)
-
-    for rxn_idx in 1:n_reactions
-        substrates = findall(A_matrix[:, rxn_idx] .< 0)
-        products = findall(A_matrix[:, rxn_idx] .> 0)
-
-        for sub in substrates
-            for prod in products
-                Graphs.add_edge!(g, sub, prod)
-            end
-        end
-    end
+    # OPTIMIZATION: Use helper function for graph building
+    g = build_reaction_graph(A_matrix, n_complexes)
 
     # Find weakly connected components (linkage classes)
     weak_components = Graphs.weakly_connected_components(g)
@@ -950,6 +1047,66 @@ function is_weakly_reversible(network::NamedTuple)
     end
 
     return true
+end
+
+"""
+    build_reaction_graph(A_matrix, n_complexes)
+
+Build a directed graph from the incidence matrix.
+Returns the graph and weakly connected components (linkage classes).
+"""
+function build_reaction_graph(A_matrix::SparseArrays.SparseMatrixCSC, n_complexes::Int)
+    g = Graphs.SimpleDiGraph(n_complexes)
+    n_reactions = size(A_matrix, 2)
+
+    # OPTIMIZATION: Use sparse matrix structure directly
+    rows = SparseArrays.rowvals(A_matrix)
+    vals = SparseArrays.nonzeros(A_matrix)
+
+    for rxn_idx in 1:n_reactions
+        substrates = Int[]
+        products = Int[]
+
+        for idx in SparseArrays.nzrange(A_matrix, rxn_idx)
+            row = rows[idx]
+            val = vals[idx]
+            if val < 0
+                push!(substrates, row)
+            elseif val > 0
+                push!(products, row)
+            end
+        end
+
+        for sub in substrates, prod in products
+            Graphs.add_edge!(g, sub, prod)
+        end
+    end
+
+    return g
+end
+
+"""
+    robust_rank(M; tolerance=1e-10)
+
+Compute numerical rank using SVD with configurable tolerance.
+More robust than LinearAlgebra.rank for ill-conditioned matrices.
+"""
+function robust_rank(M::AbstractMatrix; tolerance::Float64=1e-10)
+    if isempty(M) || all(iszero, M)
+        return 0
+    end
+
+    # Use SVD for robust rank computation
+    svd_result = LinearAlgebra.svd(M)
+    max_sv = maximum(svd_result.S)
+
+    if max_sv < tolerance
+        return 0
+    end
+
+    # Count singular values above relative tolerance
+    threshold = tolerance * max_sv
+    return count(s -> s > threshold, svd_result.S)
 end
 
 """
@@ -983,36 +1140,37 @@ function compute_structural_deficiency(
         return 0
     end
 
-    # Build complex-linkage class incidence matrix U (sparse)
     n_complexes = length(complex_ids)
-    g = Graphs.SimpleDiGraph(n_complexes)
-    n_reactions = size(A_matrix, 2)
 
-    for rxn_idx in 1:n_reactions
-        substrates = findall(A_matrix[:, rxn_idx] .< 0)
-        products = findall(A_matrix[:, rxn_idx] .> 0)
-        for sub in substrates, prod in products
-            Graphs.add_edge!(g, sub, prod)
-        end
-    end
-
+    # OPTIMIZATION: Use helper function for graph building
+    g = build_reaction_graph(A_matrix, n_complexes)
     linkage_classes = Graphs.weakly_connected_components(g)
     n_linkages = length(linkage_classes)
 
-    # Build U matrix as sparse
-    I_u = Int[]
-    J_u = Int[]
+    # Build U matrix as sparse (complex-linkage class incidence)
+    # OPTIMIZATION: Preallocate with known size
+    total_entries = sum(length, linkage_classes)
+    I_u = Vector{Int}(undef, total_entries)
+    J_u = Vector{Int}(undef, total_entries)
+
+    idx = 1
     for (j, lc) in enumerate(linkage_classes)
         for complex_idx in lc
-            push!(I_u, complex_idx)
-            push!(J_u, j)
+            I_u[idx] = complex_idx
+            J_u[idx] = j
+            idx += 1
         end
     end
-    U_matrix = SparseArrays.sparse(I_u, J_u, ones(Int, length(I_u)), n_complexes, n_linkages)
+    U_matrix = SparseArrays.sparse(I_u, J_u, ones(Int, total_entries), n_complexes, n_linkages)
 
     # Build concordance ratio matrix M (sparse)
-    I_m = Int[]
-    J_m = Int[]
+    # OPTIMIZATION: Estimate size for preallocation
+    estimated_entries = sum(length, unbalanced_modules)
+    I_m = Vector{Int}()
+    J_m = Vector{Int}()
+    sizehint!(I_m, estimated_entries)
+    sizehint!(J_m, estimated_entries)
+
     for (module_idx, conc_module) in enumerate(unbalanced_modules)
         for complex_symbol in conc_module
             if haskey(complex_to_idx, complex_symbol)
@@ -1028,18 +1186,18 @@ function compute_structural_deficiency(
     YM = Y_matrix * M_matrix
     UM = U_matrix' * M_matrix
 
-    # Stack and convert to dense for rank computation (small matrix)
+    # Stack and convert to dense for rank computation (small matrix: rows = m + ℓ, cols = ℯ)
     stacked = Matrix(vcat(YM, UM))
 
-    # Compute rank
-    matrix_rank = LinearAlgebra.rank(stacked)
+    # OPTIMIZATION: Use robust SVD-based rank computation
+    matrix_rank = robust_rank(stacked)
 
     delta = e - matrix_rank
 
     # Compute classical deficiency for comparison: δ = n − ℓ − s
     # where s = dim(im(S)) and S = Y * A (stoichiometry matrix)
     S_matrix = Y_matrix * A_matrix
-    s_dim = LinearAlgebra.rank(Matrix(S_matrix))
+    s_dim = robust_rank(Matrix(S_matrix))
     classical_delta = n_complexes - n_linkages - s_dim
 
     @debug "Structural deficiency computation" ℯ = e n_linkages n_complexes rank_YUM = matrix_rank s_stoich = s_dim δ_equation_S46 = delta δ_classical = classical_delta
@@ -1422,8 +1580,8 @@ function identify_acr_acrr(
         return (acr_metabolites=collect(acr_set), acrr_pairs=collect(acrr_set))
 
     else
-        # Full matrix path with QR-based optimization
-        # Avoids redundant least-squares solves by computing QR decomposition once
+        # Full matrix path with BATCH OPTIMIZATIONS
+        # Uses batch matrix operations instead of per-element loops
         complex_to_idx = Dict(id => i for (i, id) in enumerate(complex_ids))
         n_metabolites = length(metabolite_ids)
 
@@ -1435,57 +1593,92 @@ function identify_acr_acrr(
             return (acr_metabolites=Symbol[], acrr_pairs=Tuple{Symbol,Symbol}[])
         end
 
-        # Compute QR decomposition once (major optimization)
-        # This allows efficient projection checks without repeated linear solves
-        Q, R = LinearAlgebra.qr(Y_Delta)
-        rank_ydelta = sum(abs.(LinearAlgebra.diag(R)) .> tolerance)
-        Q_reduced = Matrix(Q[:, 1:rank_ydelta])  # Orthonormal basis for im(Y𝚫)
+        # OPTIMIZATION: Use cached column span structure
+        cache = build_cached_column_span(Y_Delta; tolerance=tolerance)
+        Q_reduced = cache.Q_reduced
+        rank_ydelta = cache.rank
+
+        if rank_ydelta == 0
+            return (acr_metabolites=Symbol[], acrr_pairs=Tuple{Symbol,Symbol}[])
+        end
 
         @debug "QR decomposition complete" rank_ydelta n_metabolites size_Y_Delta = size(Y_Delta)
 
-        # Check ACR for all metabolites efficiently via batch projection
-        # For metabolite m: check if e_m ∈ im(Y𝚫) via ||P e_m - e_m|| < tol
-        # where P = Q Q^T is the projection onto im(Y𝚫)
-        acr_metabolites = Symbol[]
-        for (met_idx, met_id) in enumerate(metabolite_ids)
-            # Project unit vector e_m onto im(Y𝚫)
-            e_m = zeros(Float64, n_metabolites)
-            e_m[met_idx] = 1.0
-            proj = Q_reduced' * e_m  # Q^T e_m
-            reconstructed = Q_reduced * proj  # Q Q^T e_m
+        # OPTIMIZATION: BATCH ACR detection using matrix multiplication
+        # Instead of looping: P = Q Q^T, then check diag(P) and ||P[:,i] - e_i|| for all i
+        # Compute projection matrix P = Q Q^T (m × m matrix)
+        # For ACR: e_m ∈ im(Y𝚫) ⟺ P[m,m] ≈ 1 AND ||P[:,m]||² ≈ 1
 
-            # Check if projection is close to original (meaning e_m is in span)
-            if norm(reconstructed - e_m) < tolerance
-                push!(acr_metabolites, met_id)
+        # More efficient: compute Q^T directly, then check column norms
+        # Q_reduced is m × k, so Q_reduced' is k × m
+        # Q_reduced' * I_m = Q_reduced' (each column is Q^T e_i)
+        # Then Q_reduced * (Q_reduced') gives P
+
+        # For ACR check: ||P e_i - e_i|| < tol ⟺ ||Q Q^T e_i - e_i|| < tol
+        # Equivalent to checking if row i of Q_reduced has norm ≈ 1 when considering projection
+
+        # Batch compute: P = Q_reduced * Q_reduced' (projection matrix)
+        # Then ACR for metabolite i ⟺ ||P[:,i] - e_i|| < tol ⟺ P[i,i] ≈ 1 AND sum(P[:,i].^2) ≈ P[i,i]^2
+
+        # Even more efficient: Compute Q_reduced' (k × m), then Q_reduced * Q_reduced' col-by-col
+        # But simplest batch: just compute the full projection for each unit vector via matrix mult
+
+        # Compute projections for all unit vectors at once
+        # coeffs = Q_reduced' * I = Q_reduced' (k × m matrix, each col is projection coefficients)
+        coeffs = Q_reduced'  # k × m
+
+        # Projected vectors = Q_reduced * coeffs = Q_reduced * Q_reduced' = P (m × m)
+        # But P is dense m×m which can be large. Instead, compute residual norms directly.
+
+        # For each metabolite i: residual = P[:,i] - e_i, ||residual||² = ||P[:,i]||² - 2*P[i,i] + 1
+        # ||P[:,i]||² = ||Q_reduced * coeffs[:,i]||² = ||coeffs[:,i]||² (since Q_reduced has orthonormal cols)
+        # P[i,i] = (Q_reduced * coeffs[:,i])[i] = sum(Q_reduced[i,:] .* coeffs[:,i])
+
+        # So: residual_norm² = ||coeffs[:,i]||² - 2 * dot(Q_reduced[i,:], coeffs[:,i]) + 1
+
+        acr_metabolites = Symbol[]
+        projection_norms_sq = zeros(Float64, n_metabolites)  # For ACRR candidate filtering
+
+        @inbounds for met_idx in 1:n_metabolites
+            # coeffs[:,met_idx] is Q^T e_i
+            coeff_col = @view coeffs[:, met_idx]
+            coeff_norm_sq = sum(abs2, coeff_col)  # ||Q^T e_i||² = ||P e_i||²
+
+            # P[i,i] = e_i^T P e_i = e_i^T Q Q^T e_i = (Q^T e_i)^T (Q^T e_i) [wrong, need Q[i,:] dot coeffs]
+            # Actually P[i,i] = (Q Q^T)[i,i] = sum_k Q[i,k]^2 = ||Q[i,:]||²
+            # And P[:,i] = Q Q^T e_i = Q * coeffs[:,i]
+            # So P[i,i] = dot(Q[i,:], coeffs[:,i])
+
+            Q_row = @view Q_reduced[met_idx, :]
+            P_ii = dot(Q_row, coeff_col)
+
+            # ||P e_i - e_i||² = ||P e_i||² - 2 P[i,i] + 1 = coeff_norm_sq - 2*P_ii + 1
+            residual_norm_sq = coeff_norm_sq - 2 * P_ii + 1
+
+            projection_norms_sq[met_idx] = coeff_norm_sq  # Store for ACRR filtering
+
+            if residual_norm_sq < tolerance^2
+                push!(acr_metabolites, metabolite_ids[met_idx])
             end
         end
 
-        @debug "ACR identification complete" n_acr = length(acr_metabolites)
+        @debug "ACR identification complete (batch)" n_acr = length(acr_metabolites)
 
-        # Smart ACRR detection: Only check pairs where at least one metabolite
-        # has non-negligible projection (heuristic to reduce search space)
-        # Compute projection norms for all metabolites
-        projection_norms = zeros(Float64, n_metabolites)
-        for met_idx in 1:n_metabolites
-            e_m = zeros(Float64, n_metabolites)
-            e_m[met_idx] = 1.0
-            proj = Q_reduced' * e_m
-            projection_norms[met_idx] = norm(proj)
-        end
+        # OPTIMIZATION: Smart ACRR detection with batch precomputation
+        # For ACRR: check if e_i - e_j ∈ im(Y𝚫)
+        # ||P(e_i - e_j) - (e_i - e_j)||² < tol²
 
         # Identify candidates: metabolites with non-zero projection
-        candidate_indices = findall(projection_norms .> tolerance)
+        candidate_indices = findall(projection_norms_sq .> tolerance^2)
 
         @debug "ACRR candidate filtering" n_candidates = length(candidate_indices) n_total = n_metabolites
 
-        # Check ACRR pairs (parallelized with thread-safe accumulation)
-        # Only check pairs involving at least one candidate metabolite
+        # Build pairs to check (only involving candidates)
         pair_indices = Vector{Tuple{Int,Int}}()
         for i in candidate_indices
             for j in (i+1):n_metabolites
                 push!(pair_indices, (i, j))
             end
-            # Also check pairs where j is candidate and i < j
             for j in 1:(i-1)
                 if !(j in candidate_indices)
                     push!(pair_indices, (j, i))
@@ -1496,20 +1689,38 @@ function identify_acr_acrr(
         acrr_set = Set{Tuple{Symbol,Symbol}}()
         acrr_lock = ReentrantLock()
 
+        # OPTIMIZATION: Batch ACRR check with precomputed coefficients
+        # For e_i - e_j: Q^T(e_i - e_j) = coeffs[:,i] - coeffs[:,j]
+        # Then compute residual norm as before
+
+        # Preallocate thread-local workspace for coeff_diff
+        max_tid = Threads.maxthreadid()
+        coeff_workspaces = [Vector{Float64}(undef, rank_ydelta) for _ in 1:max_tid]
+
         Threads.@threads for pair in pair_indices
             i, j = pair
-            # Build difference e_{S1} - e_{S2}
-            e_diff = zeros(Float64, n_metabolites)
-            e_diff[i] = 1.0
-            e_diff[j] = -1.0
+            tid = Threads.threadid()
+            coeff_diff = coeff_workspaces[tid]
 
-            # Check if e_diff ∈ im(Y𝚫) via projection
-            proj = Q_reduced' * e_diff
-            reconstructed = Q_reduced * proj
+            # Compute projection coefficients for difference (in-place)
+            coeff_i = @view coeffs[:, i]
+            coeff_j = @view coeffs[:, j]
+            @inbounds for k in 1:rank_ydelta
+                coeff_diff[k] = coeff_i[k] - coeff_j[k]
+            end
+            coeff_norm_sq = sum(abs2, coeff_diff)
 
-            if norm(reconstructed - e_diff) < tolerance
+            # ||Q c - (e_i - e_j)||² where c = Q^T(e_i - e_j)
+            # = ||c||² - 2((Q c)[i] - (Q c)[j]) + 2
+            Q_row_i = @view Q_reduced[i, :]
+            Q_row_j = @view Q_reduced[j, :]
+            Qc_i = dot(Q_row_i, coeff_diff)
+            Qc_j = dot(Q_row_j, coeff_diff)
+
+            residual_norm_sq = coeff_norm_sq - 2 * (Qc_i - Qc_j) + 2
+
+            if residual_norm_sq < tolerance^2
                 lock(acrr_lock) do
-                    # Store in canonical order
                     if metabolite_ids[i] < metabolite_ids[j]
                         push!(acrr_set, (metabolite_ids[i], metabolite_ids[j]))
                     else
