@@ -15,6 +15,16 @@ using HiGHS
 import Distributed as D
 using StableRNGs
 
+# Load the new redesigned kinetics module
+include("../src/kinetics/Kinetics.jl")
+using .Kinetics
+
+# Override COCOA's kinetic_analysis with the new implementation
+const kinetic_analysis = Kinetics.kinetic_analysis
+
+# For tests that use the old network tuple format, keep COCOA's old functions
+const upstream_algorithm_old = COCOA.upstream_algorithm
+const merge_coupled_sets_old = COCOA.merge_coupled_sets
 
 @testset "EnvZ-OmpR Complete Pipeline" begin
 
@@ -78,7 +88,8 @@ using StableRNGs
             Set([Symbol("XD+Yp"), Symbol("XD+Y")])                          # 𝒞m3
         ]
 
-        kinetic_modules = kinetic_analysis(concordance_modules, model; min_module_size=1, efficient=false)
+        result = kinetic_analysis(concordance_modules, model; min_module_size=1, efficient=false)
+        kinetic_modules = result.kinetic_modules
 
         @test !isempty(kinetic_modules)
         @test all(km -> km isa Set{Symbol}, kinetic_modules)
@@ -120,10 +131,11 @@ using StableRNGs
             Set([Symbol("XD+Yp"), Symbol("XD+Y")])
         ]
 
-        kinetic_modules = kinetic_analysis(concordance_modules, model; min_module_size=1, efficient=false)
+        result = kinetic_analysis(concordance_modules, model; min_module_size=1, efficient=false)
+        kinetic_modules = result.kinetic_modules
 
-        # Identify ACR/ACRR
-        acr_results = identify_acr_acrr(kinetic_modules, model)
+        # Identify ACR/ACRR (now returned directly by kinetic_analysis in result)
+        acr_results = result  # Contains acr_metabolites and acrr_pairs
 
         # Verify ACR: Yp should be identified as ACR (Section S.5.2 of paper)
         @test :Yp in acr_results.acr_metabolites
@@ -170,11 +182,12 @@ using StableRNGs
         # Step 2: Extract concordance modules
         concordance_modules = extract_concordance_modules(concordance_results)
 
-        # Step 3: Kinetic analysis
-        kinetic_modules = kinetic_analysis(concordance_modules, model; min_module_size=1, efficient=false)
+        # Step 3: Kinetic analysis (returns NamedTuple with kinetic_modules, acr_metabolites, acrr_pairs, stats)
+        result = kinetic_analysis(concordance_modules, model; min_module_size=1, efficient=false)
+        kinetic_modules = result.kinetic_modules
 
-        # Step 4: Identify ACR/ACRR
-        acr_results = identify_acr_acrr(kinetic_modules, model)
+        # Step 4: ACR/ACRR already identified in result
+        acr_results = result
 
         # Verify final outputs
         expected_giant_module = Set([:XD, :XT, Symbol("Xp+Y"), Symbol("XT+Yp"), :XDYp, :XTYp, Symbol("XD+Yp"), :XpY, :X])
@@ -202,7 +215,8 @@ using StableRNGs
             Set([Symbol("XD+Yp"), Symbol("XD+Y")])
         ]
 
-        kinetic_modules = kinetic_analysis(concordance_modules, model; min_module_size=1, efficient=false)
+        result = kinetic_analysis(concordance_modules, model; min_module_size=1, efficient=false)
+        kinetic_modules = result.kinetic_modules
 
         # Verify Y𝚫 matrix construction
         Y_matrix, metabolite_ids, complex_ids = complex_stoichiometry(model; return_ids=true)
@@ -292,7 +306,8 @@ using StableRNGs
 
         # 4. Final Result Validation
         concordance_modules_vec = [balanced, Cm1, Cm2, Cm3]
-        kinetic_modules = kinetic_analysis(concordance_modules_vec, model; efficient=false)
+        result = kinetic_analysis(concordance_modules_vec, model; efficient=false)
+        kinetic_modules = result.kinetic_modules
 
         expected_giant = union(expected_C1, expected_C4)
         @test length(kinetic_modules[1]) == 9
@@ -362,7 +377,8 @@ end
     concordance_modules = [Cb, Cm1, Cm2]
 
     # Use efficient=false to enable advanced merging via Proposition S3-4
-    kinetic_modules = kinetic_analysis(concordance_modules, model; efficient=true, min_module_size=1)
+    result = kinetic_analysis(concordance_modules, model; efficient=true, min_module_size=1)
+    kinetic_modules = result.kinetic_modules
 
     # Expected coupling partition from text:
     # {F, A, C+F, E, B+D, A+C}
@@ -404,7 +420,8 @@ end
 
     # Also check efficient ACR/ACRR on this model (efficient=true)
     # Should detect comparable ACR/ACRR results even if merging logic is simpler
-    acr_results = identify_acr_acrr(kinetic_modules, model; efficient=true)
+    # ACR/ACRR already computed and returned in result
+    acr_results = result
 
     # Text says: ACR components: C, U
     @test :C in acr_results.acr_metabolites
