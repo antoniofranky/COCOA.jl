@@ -11,6 +11,61 @@ import Graphs
 import LinearAlgebra: norm, dot
 import Base.Threads
 
+# Forward declarations of types used throughout the module
+"""
+    CachedAdjacency
+
+Pre-computed adjacency structure for efficient graph traversal.
+Avoids repeated sparse matrix indexing in hot loops.
+"""
+struct CachedAdjacency
+    out_neighbors::Vector{Vector{Int}}   # out_neighbors[v] = complexes v can convert to
+    in_neighbors::Vector{Vector{Int}}    # in_neighbors[v] = complexes that can convert to v
+    has_external_in::Vector{Bool}        # has_external_in[v] = true if v has incoming from any source
+end
+
+"""
+    build_cached_adjacency(A_matrix, n_complexes)
+
+Build cached adjacency lists from incidence matrix for O(1) neighbor lookup.
+Replaces repeated `findnz` calls with pre-computed adjacency.
+"""
+function build_cached_adjacency(A_matrix::SparseArrays.SparseMatrixCSC, n_complexes::Int)
+    out_neighbors = [Int[] for _ in 1:n_complexes]
+    in_neighbors = [Int[] for _ in 1:n_complexes]
+    has_external_in = fill(false, n_complexes)
+
+    rows = SparseArrays.rowvals(A_matrix)
+    vals = SparseArrays.nonzeros(A_matrix)
+    n_reactions = size(A_matrix, 2)
+
+    for rxn_idx in 1:n_reactions
+        substrates = Int[]
+        products = Int[]
+
+        for idx in SparseArrays.nzrange(A_matrix, rxn_idx)
+            row = rows[idx]
+            val = vals[idx]
+            if val < 0
+                push!(substrates, row)
+            elseif val > 0
+                push!(products, row)
+            end
+        end
+
+        # Build adjacency: substrates -> products
+        for sub in substrates
+            for prod in products
+                push!(out_neighbors[sub], prod)
+                push!(in_neighbors[prod], sub)
+                has_external_in[prod] = true
+            end
+        end
+    end
+
+    return CachedAdjacency(out_neighbors, in_neighbors, has_external_in)
+end
+
 """
     kinetic_analysis(concordance_modules, model; min_module_size=1, known_acr=Symbol[], efficient=true)
 
@@ -82,6 +137,10 @@ function kinetic_analysis(
         @debug "Using known ACR metabolites" n_known_acr = length(known_acr)
     end
 
+    # OPTIMIZATION: Pre-compute adjacency structure for efficient graph traversal
+    # Avoids repeated sparse matrix indexing in find_entry_complexes and tarjan_scc
+    cached_adj = build_cached_adjacency(A_matrix, length(complex_ids))
+
     # Store in a named tuple for easy passing
     network = (
         A=A_matrix,
@@ -90,7 +149,8 @@ function kinetic_analysis(
         metabolite_ids=metabolite_ids,
         complex_to_idx=complex_to_idx,
         acr_augmentation=acr_augmentation,
-        enable_advanced_merging=enable_advanced_merging
+        enable_advanced_merging=enable_advanced_merging,
+        cached_adj=cached_adj
     )
 
     # Extract balanced and unbalanced modules (keep ALL modules including singletons)
@@ -116,7 +176,16 @@ function kinetic_analysis(
             kinetic_modules = apply_theorem_s4_6(Set{Symbol}[], current_concordance, network)
             valid_modules = filter(km -> length(km) >= min_module_size, kinetic_modules)
             sort!(valid_modules, by=length, rev=true)
-            return valid_modules
+
+            # Detect ACR/ACRR using already-available network data
+            # Always use efficient=true for ACR detection (faster and more complete pairwise detection)
+            acr_results = _detect_acr_acrr(valid_modules, Y_matrix, metabolite_ids, complex_to_idx;
+                efficient=efficient)
+            return (
+                kinetic_modules=valid_modules,
+                acr_metabolites=acr_results.acr_metabolites,
+                acrr_pairs=acr_results.acrr_pairs
+            )
         end
     else
         current_concordance = filtered_concordance
@@ -150,7 +219,8 @@ function kinetic_analysis(
                 A=network.A, Y=network.Y, complex_ids=network.complex_ids,
                 metabolite_ids=network.metabolite_ids, complex_to_idx=network.complex_to_idx,
                 acr_augmentation=acr_augmentation,
-                enable_advanced_merging=enable_advanced_merging
+                enable_advanced_merging=enable_advanced_merging,
+                cached_adj=network.cached_adj
             )
             @debug "Updated network with ACR augmentation" n_acr = length(current_known_acr)
         end
@@ -170,7 +240,11 @@ function kinetic_analysis(
         upstream_sets = Set{Symbol}[r for r in upstream_results if !isnothing(r)]
 
         if isempty(upstream_sets)
-            return Set{Symbol}[]
+            return (
+                kinetic_modules=Set{Symbol}[],
+                acr_metabolites=Symbol[],
+                acrr_pairs=Tuple{Symbol,Symbol}[]
+            )
         end
 
         # Step 2: Merge coupled modules
@@ -268,7 +342,16 @@ function kinetic_analysis(
 
     valid_modules = filter(km -> length(km) >= min_module_size, kinetic_modules)
     sort!(valid_modules, by=length, rev=true)
-    return valid_modules
+
+    # Detect ACR/ACRR using already-available network data (no redundant extraction)
+    acr_results = _detect_acr_acrr(valid_modules, Y_matrix, metabolite_ids, complex_to_idx;
+        efficient=efficient)
+
+    return (
+        kinetic_modules=valid_modules,
+        acr_metabolites=acr_results.acr_metabolites,
+        acrr_pairs=acr_results.acrr_pairs
+    )
 end
 
 """
@@ -278,8 +361,9 @@ Apply simplified 2-phase upstream algorithm to identify kinetic module (Remark S
 
 # Phases
 1. Phase I: Remove entry complexes (autonomous property)
-2. Phase II: Remove terminal strong linkage classes (feeding property)
+2. Phase IV: Remove terminal strong linkage classes (feeding property)
 
+Note: Phases II and III are skipped as per Remark S2-1 (Simplified Upstream Algorithm).
 Returns the upstream set (complexes satisfying both properties).
 """
 function upstream_algorithm(
@@ -304,9 +388,16 @@ function upstream_algorithm(
     max_phase1_iterations = 1000  # Safety limit
     last_size = length(current_indices)
 
+    # Use cached adjacency if available for O(1) neighbor lookup
+    has_cached_adj = haskey(network, :cached_adj)
+
     while iteration < max_phase1_iterations
         iteration += 1
-        entries = find_entry_complexes_idx(current_indices, A_matrix)
+        entries = if has_cached_adj
+            find_entry_complexes_cached(current_indices, network.cached_adj)
+        else
+            find_entry_complexes_idx(current_indices, A_matrix)
+        end
 
         # Progress update every 10 iterations or when finding entries
         if !isempty(entries) || iteration % 10 == 0
@@ -335,17 +426,30 @@ function upstream_algorithm(
     end
 
     remaining = [complex_ids[i] for i in current_indices]
-    @debug "Phase II: Removing terminal strong linkage classes" remaining
+    remaining = [complex_ids[i] for i in current_indices]
+    @debug "Phase IV: Removing terminal strong linkage classes" remaining
 
-    # Phase II: Find and remove all terminal strong linkage classes using Tarjan's algorithm
-    sccs = tarjan_scc(current_indices, A_matrix)
+    # Phase IV: Find and remove all terminal strong linkage classes using Tarjan's algorithm
+    # As per Remark S2-1, we identify terminal SCCs in the current set (C_-4).
+    # Exit complexes correspond to NON-TERMINAL SCCs (because they have edges to outside)
+    # and are thus preserved.
+    # Use cached adjacency if available for O(1) neighbor lookup
+    sccs = if has_cached_adj
+        tarjan_scc_cached(current_indices, network.cached_adj)
+    else
+        tarjan_scc(current_indices, A_matrix)
+    end
     @debug "  Found $(length(sccs)) strongly connected components"
 
     # Debug: Show all SCCs with their terminal status
     @debug "  SCC analysis:" begin
         for (i, scc) in enumerate(sccs)
             scc_symbols = [complex_ids[j] for j in scc]
-            is_term = is_terminal_scc_idx(scc, current_indices, A_matrix)
+            is_term = if has_cached_adj
+                is_terminal_scc_cached(scc, current_indices, network.cached_adj)
+            else
+                is_terminal_scc_idx(scc, current_indices, A_matrix)
+            end
             @debug "    SCC $i (size $(length(scc))): $scc_symbols - Terminal: $is_term"
         end
     end
@@ -358,7 +462,11 @@ function upstream_algorithm(
 
     for scc in sccs
         scc_symbols = [complex_ids[i] for i in scc]
-        is_term = is_terminal_scc_idx(scc, original_indices, A_matrix)
+        is_term = if has_cached_adj
+            is_terminal_scc_cached(scc, original_indices, network.cached_adj)
+        else
+            is_terminal_scc_idx(scc, original_indices, A_matrix)
+        end
         @debug "  SCC (size $(length(scc))): $scc_symbols - Terminal: $is_term"
 
         if is_term
@@ -404,6 +512,29 @@ function find_entry_complexes_idx(complexes::Set{Int}, A_matrix::SparseArrays.Sp
                     push!(entries, cidx)
                     break
                 end
+            end
+        end
+    end
+
+    return entries
+end
+
+"""
+Find entry complexes using cached adjacency (optimized version).
+
+An entry complex has an incoming edge from a complex outside the current set.
+Uses pre-computed adjacency lists instead of repeated sparse matrix indexing.
+"""
+function find_entry_complexes_cached(complexes::Set{Int}, cached_adj::CachedAdjacency)
+    entries = Set{Int}()
+    sizehint!(entries, length(complexes) >> 2)  # Preallocate (expect ~25% entries)
+
+    @inbounds for cidx in complexes
+        # Check if any in-neighbor is outside our set
+        for in_neighbor in cached_adj.in_neighbors[cidx]
+            if in_neighbor ∉ complexes
+                push!(entries, cidx)
+                break
             end
         end
     end
@@ -502,15 +633,94 @@ function is_terminal_scc_idx(scc::Set{Int}, all_complexes::Set{Int}, A_matrix::S
                 # Check products
                 products = SparseArrays.findnz(A_matrix[:, rxn_idx])[1]
                 for pidx in products
-                    if A_matrix[pidx, rxn_idx] > 0 && pidx ∈ all_complexes && pidx ∉ scc
+                    if A_matrix[pidx, rxn_idx] > 0 && pidx ∉ scc
                         @debug "SCC contains complex $cidx which converts (via rxn $rxn_idx) to $pidx outside SCC → NON-TERMINAL"
-                        return false  # Has edge outside SCC but within all_complexes
+                        return false  # Has edge outside SCC
                     end
                 end
             end
         end
     end
 
+    return true
+end
+
+"""
+    tarjan_scc_cached(complexes, cached_adj)
+
+Find all strongly connected components using Tarjan's algorithm with cached adjacency.
+Optimized version that avoids repeated sparse matrix indexing.
+"""
+function tarjan_scc_cached(complexes::Set{Int}, cached_adj::CachedAdjacency)
+    nodes = collect(complexes)
+    n = length(nodes)
+
+    # Initialize Tarjan's algorithm state with preallocation
+    index = 0
+    stack = Vector{Int}()
+    sizehint!(stack, n)
+    indices = Dict{Int,Int}()
+    sizehint!(indices, n)
+    lowlinks = Dict{Int,Int}()
+    sizehint!(lowlinks, n)
+    on_stack = Set{Int}()
+    sizehint!(on_stack, n)
+    sccs = Vector{Set{Int}}()
+    sizehint!(sccs, max(1, n >> 3))
+
+    function strongconnect(v::Int)
+        indices[v] = index
+        lowlinks[v] = index
+        index += 1
+        push!(stack, v)
+        push!(on_stack, v)
+
+        # Use cached out_neighbors instead of sparse matrix traversal
+        @inbounds for w in cached_adj.out_neighbors[v]
+            if w ∈ complexes  # w is in our current set
+                if !haskey(indices, w)
+                    strongconnect(w)
+                    lowlinks[v] = min(lowlinks[v], lowlinks[w])
+                elseif w ∈ on_stack
+                    lowlinks[v] = min(lowlinks[v], indices[w])
+                end
+            end
+        end
+
+        if lowlinks[v] == indices[v]
+            scc = Set{Int}()
+            while true
+                w = pop!(stack)
+                delete!(on_stack, w)
+                push!(scc, w)
+                if w == v
+                    break
+                end
+            end
+            push!(sccs, scc)
+        end
+    end
+
+    for v in nodes
+        if !haskey(indices, v)
+            strongconnect(v)
+        end
+    end
+
+    return sccs
+end
+
+"""
+Check if SCC is terminal using cached adjacency (optimized version).
+"""
+function is_terminal_scc_cached(scc::Set{Int}, all_complexes::Set{Int}, cached_adj::CachedAdjacency)
+    @inbounds for cidx in scc
+        for neighbor in cached_adj.out_neighbors[cidx]
+            if neighbor ∉ scc
+                return false  # Has edge outside SCC
+            end
+        end
+    end
     return true
 end
 
@@ -760,9 +970,9 @@ function merge_coupled_sets(upstream_sets::Vector{Set{Symbol}}, network::NamedTu
 
     @debug "  Checking $(length(pairs_to_check)) pairs for Proposition S3-4 merging"
 
-    # OPTIMIZATION: Parallel merge check using pre-allocated workspace per thread
-    # Results stored in thread-safe channel
-    merge_pairs = Channel{Tuple{Int,Int}}(length(pairs_to_check) + 1)
+    # OPTIMIZATION: Parallel merge check using thread-local result arrays
+    # Avoids Channel synchronization overhead by accumulating results per-thread
+    merge_count = 0
 
     if length(pairs_to_check) > 0
         # Preallocate workspace per thread for y_diff computation
@@ -770,12 +980,26 @@ function merge_coupled_sets(upstream_sets::Vector{Set{Symbol}}, network::NamedTu
         max_tid = Threads.maxthreadid()
         workspaces = [Vector{Float64}(undef, n_metabolites) for _ in 1:max_tid]
 
+        # OPTIMIZATION: Additional workspaces for in-place BLAS operations in is_in_span!
+        # coeffs_workspace: size = cache.rank (for Q' * v result)
+        # proj_workspace: size = n_metabolites (for Q * coeffs and residual)
+        coeffs_workspaces = [Vector{Float64}(undef, max(1, cache.rank)) for _ in 1:max_tid]
+        proj_workspaces = [Vector{Float64}(undef, n_metabolites) for _ in 1:max_tid]
+
+        # Thread-local result buffers (no synchronization during parallel section)
+        thread_results = [Vector{Tuple{Int,Int}}() for _ in 1:max_tid]
+        for buf in thread_results
+            sizehint!(buf, max(1, length(pairs_to_check) ÷ max_tid + 10))
+        end
+
         Threads.@threads for pair_idx in 1:length(pairs_to_check)
             i, j, c_alpha, c_beta = pairs_to_check[pair_idx]
 
-            # Use thread-local workspace
+            # Use thread-local workspaces
             tid = Threads.threadid()
             y_diff = workspaces[tid]
+            coeffs_ws = coeffs_workspaces[tid]
+            proj_ws = proj_workspaces[tid]
 
             # Compute difference in-place: y_alpha - y_beta
             y_alpha = complex_vectors[c_alpha]
@@ -784,20 +1008,20 @@ function merge_coupled_sets(upstream_sets::Vector{Set{Symbol}}, network::NamedTu
                 y_diff[k] = y_alpha[k] - y_beta[k]
             end
 
-            # Check if y_diff ∈ im(Y𝚫) using cached QR
-            if can_merge_via_proposition_s34(y_diff, cache)
-                put!(merge_pairs, (i, j))
+            # Check if y_diff ∈ im(Y𝚫) using in-place BLAS operations
+            if is_in_span!(y_diff, cache, coeffs_ws, proj_ws)
+                push!(thread_results[tid], (i, j))
             end
         end
-    end
-    close(merge_pairs)
 
-    # Apply merges sequentially (union-find not thread-safe)
-    merge_count = 0
-    for (i, j) in merge_pairs
-        if union_indices!(i, j)
-            merge_count += 1
-            @debug "  Merging modules $i and $j via Proposition S3-4"
+        # Sequential merge of thread-local results (union-find not thread-safe)
+        for thread_result in thread_results
+            for (i, j) in thread_result
+                if union_indices!(i, j)
+                    merge_count += 1
+                    @debug "  Merging modules $i and $j via Proposition S3-4"
+                end
+            end
         end
     end
     @debug "  Proposition S3-4 merged $merge_count pairs"
@@ -870,7 +1094,30 @@ function build_coupling_companion_matrix(
     complex_to_idx::Dict{Symbol,Int}
 )
     n_metabolites = size(Y_matrix, 1)
-    columns = Vector{Float64}[]
+
+    # Pre-count columns needed to avoid reallocation
+    n_columns = 0
+    for coupling_set in coupling_sets
+        if length(coupling_set) >= 2
+            # Count valid complexes for this set
+            valid_count = count(c -> haskey(complex_to_idx, c), coupling_set)
+            if valid_count >= 2
+                n_columns += valid_count - 1  # (p-1) columns per set
+            end
+        end
+    end
+
+    if n_columns == 0
+        return zeros(Float64, n_metabolites, 0)
+    end
+
+    # Pre-allocate result matrix
+    result = zeros(Float64, n_metabolites, n_columns)
+    col_idx = 1
+
+    # OPTIMIZATION: Use sparse-aware difference computation
+    # Avoids intermediate sparse allocations from Y[:,ref] - Y[:,other]
+    Y_sparse = Y_matrix isa SparseArrays.SparseMatrixCSC ? Y_matrix : nothing
 
     for coupling_set in coupling_sets
         if length(coupling_set) < 2
@@ -893,18 +1140,36 @@ function build_coupling_companion_matrix(
             end
 
             other_idx = complex_to_idx[complexes_list[j]]
-            # Column: Y[:,ref] - Y[:,other]
-            # collect() converts sparse to dense vector
-            col = collect(Y_matrix[:, ref_idx] - Y_matrix[:, other_idx])
-            push!(columns, col)
+
+            # OPTIMIZED: Direct sparse-aware column difference
+            # Write directly to result matrix column, no intermediate allocation
+            if Y_sparse !== nothing
+                # Zero the column (result is already zeroed, but be explicit for safety)
+                # Actually skip this since we know result starts as zeros
+
+                # Add ref_idx column values
+                rows = SparseArrays.rowvals(Y_sparse)
+                vals = SparseArrays.nonzeros(Y_sparse)
+                for k in SparseArrays.nzrange(Y_sparse, ref_idx)
+                    result[rows[k], col_idx] += vals[k]
+                end
+
+                # Subtract other_idx column values
+                for k in SparseArrays.nzrange(Y_sparse, other_idx)
+                    result[rows[k], col_idx] -= vals[k]
+                end
+            else
+                # Fallback for dense matrices
+                @inbounds for row in 1:n_metabolites
+                    result[row, col_idx] = Y_matrix[row, ref_idx] - Y_matrix[row, other_idx]
+                end
+            end
+
+            col_idx += 1
         end
     end
 
-    if isempty(columns)
-        return zeros(Float64, n_metabolites, 0)
-    end
-
-    return hcat(columns...)
+    return result
 end
 
 """
@@ -962,6 +1227,43 @@ function is_in_span(v::AbstractVector{Float64}, cache::CachedColumnSpan)
     # Project v onto column space: P v = Q Q^T v
     proj = cache.Q_reduced * (cache.Q_reduced' * v)
     return norm(proj - v) < cache.tolerance
+end
+
+"""
+    is_in_span!(v, cache, coeffs_workspace, proj_workspace)
+
+In-place version of is_in_span using pre-allocated workspaces.
+Avoids allocations in hot loops. Uses BLAS operations for efficiency.
+
+Arguments:
+- v: Vector to check (not modified)
+- cache: CachedColumnSpan with orthonormal basis Q
+- coeffs_workspace: Pre-allocated vector of length cache.rank for Q'*v
+- proj_workspace: Pre-allocated vector of length(v) for Q*coeffs and residual
+"""
+function is_in_span!(
+    v::AbstractVector{Float64},
+    cache::CachedColumnSpan,
+    coeffs_workspace::Vector{Float64},
+    proj_workspace::Vector{Float64}
+)
+    if cache.rank == 0
+        return norm(v) < cache.tolerance
+    end
+
+    Q = cache.Q_reduced
+
+    # coeffs = Q' * v  (BLAS gemv: y = α*A'*x + β*y)
+    LinearAlgebra.BLAS.gemv!('T', 1.0, Q, v, 0.0, coeffs_workspace)
+
+    # proj = Q * coeffs  (BLAS gemv)
+    LinearAlgebra.BLAS.gemv!('N', 1.0, Q, coeffs_workspace, 0.0, proj_workspace)
+
+    # Compute ||proj - v|| without allocating (proj_workspace -= v, then norm)
+    # Use axpy!: y = α*x + y, so proj_workspace = -1.0*v + proj_workspace
+    LinearAlgebra.BLAS.axpy!(-1.0, v, proj_workspace)
+
+    return norm(proj_workspace) < cache.tolerance
 end
 
 """
@@ -1448,6 +1750,173 @@ function find_balanced_weak_linkage_classes(
 end
 
 """
+    _detect_acr_acrr(kinetic_modules, Y_matrix, metabolite_ids, complex_to_idx; tolerance=1e-8, efficient=true)
+
+Internal helper for ACR/ACRR detection using pre-computed network data.
+Called by both `kinetic_analysis` (integrated) and `identify_acr_acrr` (standalone).
+"""
+function _detect_acr_acrr(
+    kinetic_modules::Vector{Set{Symbol}},
+    Y_matrix::AbstractMatrix,
+    metabolite_ids::Vector{Symbol},
+    complex_to_idx::Dict{Symbol,Int};
+    tolerance::Float64=1e-8,
+    efficient::Bool=true
+)
+    n_metabolites = length(metabolite_ids)
+
+    if efficient
+        # Fast efficient path: Direct pairwise comparison
+        max_tid = Threads.maxthreadid()
+        thread_acr = [Set{Symbol}() for _ in 1:max_tid]
+        thread_acrr = [Set{Tuple{Symbol,Symbol}}() for _ in 1:max_tid]
+        thread_nz_indices = [Vector{Int}(undef, 2) for _ in 1:max_tid]
+        thread_nz_vals = [Vector{Float64}(undef, 2) for _ in 1:max_tid]
+
+        Threads.@threads for module_set in kinetic_modules
+            tid = Threads.threadid()
+            local_acr = thread_acr[tid]
+            local_acrr = thread_acrr[tid]
+            nz_indices_buf = thread_nz_indices[tid]
+            nz_vals_buf = thread_nz_vals[tid]
+
+            complexes = collect(module_set)
+            k = length(complexes)
+            k < 2 && continue
+
+            @inbounds for i in 1:k
+                idx_a = get(complex_to_idx, complexes[i], 0)
+                idx_a == 0 && continue
+
+                for j in (i+1):k
+                    idx_b = get(complex_to_idx, complexes[j], 0)
+                    idx_b == 0 && continue
+
+                    nnz_count = 0
+                    for met_idx in 1:n_metabolites
+                        val_diff = Y_matrix[met_idx, idx_a] - Y_matrix[met_idx, idx_b]
+                        if abs(val_diff) > tolerance
+                            nnz_count += 1
+                            if nnz_count <= 2
+                                nz_indices_buf[nnz_count] = met_idx
+                                nz_vals_buf[nnz_count] = val_diff
+                            else
+                                break
+                            end
+                        end
+                    end
+
+                    if nnz_count == 1
+                        push!(local_acr, metabolite_ids[nz_indices_buf[1]])
+                    elseif nnz_count == 2
+                        if abs(nz_vals_buf[1] + nz_vals_buf[2]) < tolerance
+                            m1, m2 = metabolite_ids[nz_indices_buf[1]], metabolite_ids[nz_indices_buf[2]]
+                            push!(local_acrr, m1 < m2 ? (m1, m2) : (m2, m1))
+                        end
+                    end
+                end
+            end
+        end
+
+        acr_set = Set{Symbol}()
+        acrr_set = Set{Tuple{Symbol,Symbol}}()
+        for tid in 1:max_tid
+            union!(acr_set, thread_acr[tid])
+            union!(acrr_set, thread_acrr[tid])
+        end
+
+        return (acr_metabolites=collect(acr_set), acrr_pairs=collect(acrr_set))
+    else
+        # Full/thorough path: Do BOTH pairwise comparison AND column span check
+        # This finds all ACR/ACRR relationships
+
+        acr_set = Set{Symbol}()
+        acrr_set = Set{Tuple{Symbol,Symbol}}()
+
+        # --- Part 1: Pairwise comparison (same as efficient=true) ---
+        # This finds direct ACR/ACRR from stoichiometric differences
+        for module_set in kinetic_modules
+            complexes = collect(module_set)
+            k = length(complexes)
+            k < 2 && continue
+
+            for i in 1:k
+                idx_a = get(complex_to_idx, complexes[i], 0)
+                idx_a == 0 && continue
+
+                for j in (i+1):k
+                    idx_b = get(complex_to_idx, complexes[j], 0)
+                    idx_b == 0 && continue
+
+                    # Count non-zero differences
+                    nz_indices = Int[]
+                    nz_vals = Float64[]
+                    for met_idx in 1:n_metabolites
+                        val_diff = Y_matrix[met_idx, idx_a] - Y_matrix[met_idx, idx_b]
+                        if abs(val_diff) > tolerance
+                            push!(nz_indices, met_idx)
+                            push!(nz_vals, val_diff)
+                            length(nz_indices) > 2 && break
+                        end
+                    end
+
+                    if length(nz_indices) == 1
+                        push!(acr_set, metabolite_ids[nz_indices[1]])
+                    elseif length(nz_indices) == 2
+                        if abs(nz_vals[1] + nz_vals[2]) < tolerance
+                            m1, m2 = metabolite_ids[nz_indices[1]], metabolite_ids[nz_indices[2]]
+                            push!(acrr_set, m1 < m2 ? (m1, m2) : (m2, m1))
+                        end
+                    end
+                end
+            end
+        end
+
+        # --- Part 2: Column span check (Propositions S3-5, S3-6) ---
+        # This finds ACR/ACRR from linear combinations of coupling relations
+        Y_Delta = build_coupling_companion_matrix(kinetic_modules, Y_matrix, complex_to_idx)
+
+        if size(Y_Delta, 2) > 0
+            cache = build_cached_column_span(Y_Delta; tolerance=tolerance)
+
+            if cache.rank > 0
+                Q_reduced = cache.Q_reduced
+                coeffs = Q_reduced'
+
+                # ACR: Check if e_S ∈ im(Y∆) for each metabolite
+                for i in 1:n_metabolites
+                    coeff_col = @view coeffs[:, i]
+                    coeff_norm_sq = sum(abs2, coeff_col)
+                    proj_diag = sum(Q_reduced[i, k] * coeff_col[k] for k in 1:cache.rank)
+                    residual_norm_sq = coeff_norm_sq - 2 * proj_diag + 1.0
+
+                    if residual_norm_sq < tolerance^2
+                        push!(acr_set, metabolite_ids[i])
+                    end
+                end
+
+                # ACRR: Check if e_i - e_j ∈ im(Y∆) for each metabolite pair
+                diff_vec = zeros(Float64, n_metabolites)
+                for i in 1:n_metabolites
+                    for j in (i+1):n_metabolites
+                        fill!(diff_vec, 0.0)
+                        diff_vec[i] = 1.0
+                        diff_vec[j] = -1.0
+
+                        if is_in_span(diff_vec, cache)
+                            m1, m2 = metabolite_ids[i], metabolite_ids[j]
+                            push!(acrr_set, m1 < m2 ? (m1, m2) : (m2, m1))
+                        end
+                    end
+                end
+            end
+        end
+
+        return (acr_metabolites=collect(acr_set), acrr_pairs=collect(acrr_set))
+    end
+end
+
+"""
     identify_acr_acrr(kinetic_modules, model; tolerance=1e-8, efficient=true)
 
 Identify metabolites with Absolute Concentration Robustness (ACR) and
@@ -1486,256 +1955,12 @@ function identify_acr_acrr(
     tolerance::Float64=1e-8,
     efficient::Bool=true
 )
-    # Extract network topology
+    # Extract network topology and delegate to helper
     Y_matrix, metabolite_ids, complex_ids = complex_stoichiometry(model; return_ids=true)
+    complex_to_idx = Dict{Symbol,Int}(id => i for (i, id) in enumerate(complex_ids))
 
-    if efficient
-        # Fast efficient path: Direct pairwise comparison
-        # No matrix inversions or column span checks
-        # O(N_modules * N_complexes^2) but usually N_complexes is small per module
-
-        complex_to_idx = Dict{Symbol,Int}(id => i for (i, id) in enumerate(complex_ids))
-        n_metabolites = length(metabolite_ids)
-
-        # Thread-safe accumulation using locks
-        acr_set = Set{Symbol}()
-        acrr_set = Set{Tuple{Symbol,Symbol}}()
-        acr_lock = ReentrantLock()
-        acrr_lock = ReentrantLock()
-
-        # Parallelize over modules for scalability on HPC
-        Threads.@threads for module_set in kinetic_modules
-            # Local accumulation (thread-local, no locks needed)
-            local_acr = Set{Symbol}()
-            local_acrr = Set{Tuple{Symbol,Symbol}}()
-
-            complexes = collect(module_set)
-            k = length(complexes)
-            if k < 2
-                continue
-            end
-
-            # Preallocate buffers for difference computation (avoid allocations in loop)
-            nz_indices_buf = Vector{Int}(undef, 2)
-            nz_vals_buf = Vector{Float64}(undef, 2)
-
-            # Check all pairs in the module
-            @inbounds for i in 1:k
-                idx_a = get(complex_to_idx, complexes[i], 0)
-                idx_a == 0 && continue
-
-                for j in (i+1):k
-                    idx_b = get(complex_to_idx, complexes[j], 0)
-                    idx_b == 0 && continue
-
-                    # Compute stoichiometric difference efficiently
-                    # Manual sparse diff to avoid allocations and early-exit for >2 differences
-                    nnz_count = 0
-                    for met_idx in 1:n_metabolites
-                        val_diff = Y_matrix[met_idx, idx_a] - Y_matrix[met_idx, idx_b]
-                        if abs(val_diff) > tolerance
-                            nnz_count += 1
-                            if nnz_count <= 2
-                                nz_indices_buf[nnz_count] = met_idx
-                                nz_vals_buf[nnz_count] = val_diff
-                            else
-                                break  # Early exit if more than 2 differences
-                            end
-                        end
-                    end
-
-                    if nnz_count == 1
-                        # ACR detected
-                        push!(local_acr, metabolite_ids[nz_indices_buf[1]])
-
-                    elseif nnz_count == 2
-                        # Potential ACRR - check if opposite changes
-                        if abs(nz_vals_buf[1] + nz_vals_buf[2]) < tolerance
-                            m1 = metabolite_ids[nz_indices_buf[1]]
-                            m2 = metabolite_ids[nz_indices_buf[2]]
-                            # Store sorted pair for uniqueness
-                            if m1 < m2
-                                push!(local_acrr, (m1, m2))
-                            else
-                                push!(local_acrr, (m2, m1))
-                            end
-                        end
-                    end
-                end
-            end
-
-            # Merge local results into global sets (with locks)
-            if !isempty(local_acr)
-                lock(acr_lock) do
-                    union!(acr_set, local_acr)
-                end
-            end
-            if !isempty(local_acrr)
-                lock(acrr_lock) do
-                    union!(acrr_set, local_acrr)
-                end
-            end
-        end
-
-        return (acr_metabolites=collect(acr_set), acrr_pairs=collect(acrr_set))
-
-    else
-        # Full matrix path with BATCH OPTIMIZATIONS
-        # Uses batch matrix operations instead of per-element loops
-        complex_to_idx = Dict(id => i for (i, id) in enumerate(complex_ids))
-        n_metabolites = length(metabolite_ids)
-
-        # Build Y𝚫 from final kinetic modules
-        Y_Delta = build_coupling_companion_matrix(kinetic_modules, Y_matrix, complex_to_idx)
-
-        if size(Y_Delta, 2) == 0
-            # No coupling information - no ACR/ACRR possible
-            return (acr_metabolites=Symbol[], acrr_pairs=Tuple{Symbol,Symbol}[])
-        end
-
-        # OPTIMIZATION: Use cached column span structure
-        cache = build_cached_column_span(Y_Delta; tolerance=tolerance)
-        Q_reduced = cache.Q_reduced
-        rank_ydelta = cache.rank
-
-        if rank_ydelta == 0
-            return (acr_metabolites=Symbol[], acrr_pairs=Tuple{Symbol,Symbol}[])
-        end
-
-        @debug "QR decomposition complete" rank_ydelta n_metabolites size_Y_Delta = size(Y_Delta)
-
-        # OPTIMIZATION: BATCH ACR detection using matrix multiplication
-        # Instead of looping: P = Q Q^T, then check diag(P) and ||P[:,i] - e_i|| for all i
-        # Compute projection matrix P = Q Q^T (m × m matrix)
-        # For ACR: e_m ∈ im(Y𝚫) ⟺ P[m,m] ≈ 1 AND ||P[:,m]||² ≈ 1
-
-        # More efficient: compute Q^T directly, then check column norms
-        # Q_reduced is m × k, so Q_reduced' is k × m
-        # Q_reduced' * I_m = Q_reduced' (each column is Q^T e_i)
-        # Then Q_reduced * (Q_reduced') gives P
-
-        # For ACR check: ||P e_i - e_i|| < tol ⟺ ||Q Q^T e_i - e_i|| < tol
-        # Equivalent to checking if row i of Q_reduced has norm ≈ 1 when considering projection
-
-        # Batch compute: P = Q_reduced * Q_reduced' (projection matrix)
-        # Then ACR for metabolite i ⟺ ||P[:,i] - e_i|| < tol ⟺ P[i,i] ≈ 1 AND sum(P[:,i].^2) ≈ P[i,i]^2
-
-        # Even more efficient: Compute Q_reduced' (k × m), then Q_reduced * Q_reduced' col-by-col
-        # But simplest batch: just compute the full projection for each unit vector via matrix mult
-
-        # Compute projections for all unit vectors at once
-        # coeffs = Q_reduced' * I = Q_reduced' (k × m matrix, each col is projection coefficients)
-        coeffs = Q_reduced'  # k × m
-
-        # Projected vectors = Q_reduced * coeffs = Q_reduced * Q_reduced' = P (m × m)
-        # But P is dense m×m which can be large. Instead, compute residual norms directly.
-
-        # For each metabolite i: residual = P[:,i] - e_i, ||residual||² = ||P[:,i]||² - 2*P[i,i] + 1
-        # ||P[:,i]||² = ||Q_reduced * coeffs[:,i]||² = ||coeffs[:,i]||² (since Q_reduced has orthonormal cols)
-        # P[i,i] = (Q_reduced * coeffs[:,i])[i] = sum(Q_reduced[i,:] .* coeffs[:,i])
-
-        # So: residual_norm² = ||coeffs[:,i]||² - 2 * dot(Q_reduced[i,:], coeffs[:,i]) + 1
-
-        acr_metabolites = Symbol[]
-        projection_norms_sq = zeros(Float64, n_metabolites)  # For ACRR candidate filtering
-
-        @inbounds for met_idx in 1:n_metabolites
-            # coeffs[:,met_idx] is Q^T e_i
-            coeff_col = @view coeffs[:, met_idx]
-            coeff_norm_sq = sum(abs2, coeff_col)  # ||Q^T e_i||² = ||P e_i||²
-
-            # P[i,i] = e_i^T P e_i = e_i^T Q Q^T e_i = (Q^T e_i)^T (Q^T e_i) [wrong, need Q[i,:] dot coeffs]
-            # Actually P[i,i] = (Q Q^T)[i,i] = sum_k Q[i,k]^2 = ||Q[i,:]||²
-            # And P[:,i] = Q Q^T e_i = Q * coeffs[:,i]
-            # So P[i,i] = dot(Q[i,:], coeffs[:,i])
-
-            Q_row = @view Q_reduced[met_idx, :]
-            P_ii = dot(Q_row, coeff_col)
-
-            # ||P e_i - e_i||² = ||P e_i||² - 2 P[i,i] + 1 = coeff_norm_sq - 2*P_ii + 1
-            residual_norm_sq = coeff_norm_sq - 2 * P_ii + 1
-
-            projection_norms_sq[met_idx] = coeff_norm_sq  # Store for ACRR filtering
-
-            if residual_norm_sq < tolerance^2
-                push!(acr_metabolites, metabolite_ids[met_idx])
-            end
-        end
-
-        @debug "ACR identification complete (batch)" n_acr = length(acr_metabolites)
-
-        # OPTIMIZATION: Smart ACRR detection with batch precomputation
-        # For ACRR: check if e_i - e_j ∈ im(Y𝚫)
-        # ||P(e_i - e_j) - (e_i - e_j)||² < tol²
-
-        # Identify candidates: metabolites with non-zero projection
-        candidate_indices = findall(projection_norms_sq .> tolerance^2)
-
-        @debug "ACRR candidate filtering" n_candidates = length(candidate_indices) n_total = n_metabolites
-
-        # Build pairs to check (only involving candidates)
-        pair_indices = Vector{Tuple{Int,Int}}()
-        for i in candidate_indices
-            for j in (i+1):n_metabolites
-                push!(pair_indices, (i, j))
-            end
-            for j in 1:(i-1)
-                if !(j in candidate_indices)
-                    push!(pair_indices, (j, i))
-                end
-            end
-        end
-
-        acrr_set = Set{Tuple{Symbol,Symbol}}()
-        acrr_lock = ReentrantLock()
-
-        # OPTIMIZATION: Batch ACRR check with precomputed coefficients
-        # For e_i - e_j: Q^T(e_i - e_j) = coeffs[:,i] - coeffs[:,j]
-        # Then compute residual norm as before
-
-        # Preallocate thread-local workspace for coeff_diff
-        max_tid = Threads.maxthreadid()
-        coeff_workspaces = [Vector{Float64}(undef, rank_ydelta) for _ in 1:max_tid]
-
-        Threads.@threads for pair in pair_indices
-            i, j = pair
-            tid = Threads.threadid()
-            coeff_diff = coeff_workspaces[tid]
-
-            # Compute projection coefficients for difference (in-place)
-            coeff_i = @view coeffs[:, i]
-            coeff_j = @view coeffs[:, j]
-            @inbounds for k in 1:rank_ydelta
-                coeff_diff[k] = coeff_i[k] - coeff_j[k]
-            end
-            coeff_norm_sq = sum(abs2, coeff_diff)
-
-            # ||Q c - (e_i - e_j)||² where c = Q^T(e_i - e_j)
-            # = ||c||² - 2((Q c)[i] - (Q c)[j]) + 2
-            Q_row_i = @view Q_reduced[i, :]
-            Q_row_j = @view Q_reduced[j, :]
-            Qc_i = dot(Q_row_i, coeff_diff)
-            Qc_j = dot(Q_row_j, coeff_diff)
-
-            residual_norm_sq = coeff_norm_sq - 2 * (Qc_i - Qc_j) + 2
-
-            if residual_norm_sq < tolerance^2
-                lock(acrr_lock) do
-                    if metabolite_ids[i] < metabolite_ids[j]
-                        push!(acrr_set, (metabolite_ids[i], metabolite_ids[j]))
-                    else
-                        push!(acrr_set, (metabolite_ids[j], metabolite_ids[i]))
-                    end
-                end
-            end
-        end
-
-        acrr_pairs = collect(acrr_set)
-
-        @debug "ACR/ACRR identification complete (QR-optimized matrix method)" n_acr = length(acr_metabolites) n_acrr = length(acrr_pairs) pairs_checked = length(pair_indices)
-
-        return (acr_metabolites=acr_metabolites, acrr_pairs=acrr_pairs)
-    end
+    return _detect_acr_acrr(kinetic_modules, Y_matrix, metabolite_ids, complex_to_idx;
+        tolerance=tolerance, efficient=efficient)
 end
 
 """

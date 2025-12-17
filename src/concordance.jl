@@ -842,23 +842,23 @@ function activity_concordance_analysis(
     start_variables_list = Vector{Vector{Float64}}()
     sizehint!(start_variables_list, sample_size)
 
-    # Strategy 1: Use extreme boundary points for maximum activity ranges
+    # Strategy 1: Random sample from AVA extreme points (polytope vertices/boundaries)
     if n_extreme_points > 0 && !isempty(warmup)
-        # Select most diverse extreme points (max distance from each other)
+        # Randomly select from warmup points (each from min/max optimization of an activity)
         extreme_indices = Random.rand(rng, 1:size(warmup, 1), n_extreme_points)
         for idx in extreme_indices
             push!(start_variables_list, warmup[idx, :])
         end
     end
 
-    # Strategy 2: Use center point for balanced exploration
+    # Strategy 2: Analytic center approximation for interior point exploration
     if n_center_points > 0 && !isempty(warmup)
-        # Create center point as average of all warmup points
+        # Average of extreme points approximates polytope center
         center_point = vec(Statistics.mean(warmup, dims=1))
         push!(start_variables_list, center_point)
     end
 
-    # Strategy 3: Generate diverse random points as convex combinations
+    # Strategy 3: Interior points via random convex combinations of extreme points
     # Optimized with pre-allocated buffers to minimize allocations
     if n_random_points > 0 && size(warmup, 1) >= 2
         # Pre-allocate reusable buffers
