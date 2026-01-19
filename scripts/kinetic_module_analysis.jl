@@ -205,7 +205,7 @@ function process_result_file(result_file::String, model_dir::String, output_dir:
     end
 
     # Construct output filename
-    output_filename = "kinetic_modules_$(model_name)_efficient_false.jld2"
+    output_filename = "kinetic_modules_$(model_name).jld2"
     output_path = joinpath(output_dir, output_filename)
 
     # Create output directory if needed
@@ -250,7 +250,7 @@ function process_result_file(result_file::String, model_dir::String, output_dir:
 
         # Analysis parameters
         "analysis_parameters", Dict(
-            "efficient" => false,
+            "efficient" => true,
             "min_module_size" => 1
         ),
 
