@@ -1,33 +1,32 @@
 #!/bin/bash
-#SBATCH --job-name=cocoa_random0
+#SBATCH --job-name=cocoa_master
 #SBATCH --chdir=/work/schaffran1/jobresults
-#SBATCH --output=/work/schaffran1/jobresults/master_logs/cocoa_random0_%A_%a.out
+#SBATCH --output=/work/schaffran1/jobresults/master_logs/cocoa_%A_%a.out
 #SBATCH --time=2-00:00:00
 #SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=128
+#SBATCH --cpus-per-task=64
 #SBATCH --mem=600G
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=schaffran1@uni-potsdam.de
 #SBATCH --hint=nomultithread
-#SBATCH --array=1-130
+#SBATCH --array=1-520
 
 # ============================================================================
-# COCOA Analysis for random_0 (0% splitting) across all seeds
+# Master script for running COCOA analysis across multiple variants and seeds
 # 
-# This script runs 13 models × 10 seeds = 130 total tasks
+# This script runs 13 models × 4 variants × 10 seeds = 520 total tasks
 # - Models: 13 recommended models
-# - Variant: random_0 only
-# - Seeds: 42-51
+# - Variants: random_25, random_50, random_75, random_100
+# - Seeds: 42, 44-52
 # 
-# Array jobs are limited to 50 concurrent tasks (%50)
 # ============================================================================
 
 # Define all parameters
-VARIANT="random_0"
+VARIANTS=("random_25" "random_50" "random_75" "random_100")
+MEMORY_PER_VARIANT=(150 300 600 600)  # GB per variant
 SEEDS=(42 43 44 45 46 47 48 49 50 51)
-KINETIC_ANALYSIS="false"
 
 # Define recommended models
 RECOMMENDED_MODELS=(
@@ -47,26 +46,27 @@ RECOMMENDED_MODELS=(
 )
 
 N_MODELS=${#RECOMMENDED_MODELS[@]}
+N_VARIANTS=${#VARIANTS[@]}
 N_SEEDS=${#SEEDS[@]}
 
-# Map array task ID to (seed_idx, model_idx)
-# Formula: task_id = seed_idx * N_MODELS + model_idx + 1
+# Map array task ID to (seed_idx, variant_idx, model_idx)
+# Formula: task_id = seed_idx * (N_VARIANTS * N_MODELS) + variant_idx * N_MODELS + model_idx + 1
 TASK_ID=$((SLURM_ARRAY_TASK_ID - 1))  # Convert to 0-indexed
 
-SEED_IDX=$((TASK_ID / N_MODELS))
-MODEL_IDX=$((TASK_ID % N_MODELS))
+SEED_IDX=$((TASK_ID / (N_VARIANTS * N_MODELS)))
+REMAINING=$((TASK_ID % (N_VARIANTS * N_MODELS)))
+VARIANT_IDX=$((REMAINING / N_MODELS))
+MODEL_IDX=$((REMAINING % N_MODELS))
 
 # Get actual values
 SEED=${SEEDS[$SEED_IDX]}
+VARIANT=${VARIANTS[$VARIANT_IDX]}
 MODEL_NAME=${RECOMMENDED_MODELS[$MODEL_IDX]}
 
-# Set paths based on seed
+# Set paths based on variant and seed
 MODELS_DIR="/work/schaffran1/toolbox/prpd_models/seed_${SEED}/${VARIANT}"
 RESULTS_DIR="/work/schaffran1/jobresults/${SEED}/${VARIANT}"
-
-# Set paths based on seed
-MODELS_DIR="/work/schaffran1/toolbox/prpd_models/seed_${SEED}/${VARIANT}"
-RESULTS_DIR="/work/schaffran1/jobresults/${SEED}/${VARIANT}"
+KINETIC_ANALYSIS="false"
 
 # Create master logs directory
 mkdir -p /work/schaffran1/jobresults/master_logs
@@ -75,7 +75,7 @@ mkdir -p /work/schaffran1/jobresults/master_logs
 mkdir -p "$RESULTS_DIR"
 
 echo "==================================="
-echo "Array Job ID: $SLURM_ARRAY_JOB_ID"
+echo "Master Job ID: $SLURM_ARRAY_JOB_ID"
 echo "Task ID: $SLURM_ARRAY_TASK_ID"
 echo "Seed: $SEED"
 echo "Variant: $VARIANT"
@@ -113,7 +113,7 @@ JULIA_OPTS="$JULIA_OPTS --history-file=no"
 cd /work/schaffran1/COCOA.jl/scripts
 
 # Save job mapping for later analysis
-JOB_MAPPING_FILE="$RESULTS_DIR/job_mapping_random0_${SLURM_ARRAY_JOB_ID}.txt"
+JOB_MAPPING_FILE="$RESULTS_DIR/job_mapping_master_${SLURM_ARRAY_JOB_ID}.txt"
 echo "${SLURM_ARRAY_TASK_ID}|${SEED}|${VARIANT}|${MODEL_NAME}|${MODEL_FILE}|$(date '+%Y-%m-%d %H:%M:%S')" >> "$JOB_MAPPING_FILE"
 
 # Precompile packages only once per job (first task)
