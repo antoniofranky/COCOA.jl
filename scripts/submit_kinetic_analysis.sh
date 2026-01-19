@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=kinetic_analysis
-#SBATCH --output=kinetic_%A_%a.out
-#SBATCH --error=kinetic_%A_%a.err
+#SBATCH --output=/work/schaffran1/jobresults/kinetic_analysis/random_0/logs/kinetic_%A_%a.out
+#SBATCH --error=/work/schaffran1/jobresults/kinetic_analysis/random_0/logs/kinetic_%A_%a.err
 #SBATCH --time=12:00:00
 #SBATCH --mem=128G
 #SBATCH --cpus-per-task=16
@@ -52,8 +52,8 @@ COCOA_DIR="/work/schaffran1/COCOA.jl"
 # Julia executable (adjust if using modules)
 JULIA_BIN="julia"
 
-# Number of threads for kinetic analysis
-export JULIA_NUM_THREADS=${SLURM_CPUS_PER_TASK:-4}
+# Julia threads: match SLURM allocation (--threads flag preferred over env var)
+JULIA_THREADS=${SLURM_CPUS_PER_TASK}
 
 # ========================= END CONFIGURATION =========================
 
@@ -64,11 +64,8 @@ echo "Job ID: ${SLURM_JOB_ID}"
 echo "Array Task ID: ${SLURM_ARRAY_TASK_ID}"
 echo "Node: $(hostname)"
 echo "Start time: $(date)"
-echo "Julia threads: ${JULIA_NUM_THREADS}"
+echo "Julia threads: ${JULIA_THREADS}"
 echo ""
-
-# Create output directory
-mkdir -p "${OUTPUT_DIR}"
 
 # Log configuration
 echo "Configuration:"
@@ -85,7 +82,7 @@ cd "${COCOA_DIR}"
 echo "Running kinetic analysis..."
 echo ""
 
-${JULIA_BIN} --threads=${JULIA_NUM_THREADS} --project="${COCOA_DIR}" \
+${JULIA_BIN} --threads=${JULIA_THREADS} --project="${COCOA_DIR}" \
     "${COCOA_DIR}/scripts/kinetic_module_analysis.jl" \
     "${RESULTS_DIR}" \
     "${MODELS_DIR}" \
