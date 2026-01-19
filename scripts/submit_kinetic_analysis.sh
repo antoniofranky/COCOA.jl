@@ -2,9 +2,10 @@
 #SBATCH --job-name=kinetic_analysis
 #SBATCH --output=kinetic_%A_%a.out
 #SBATCH --error=kinetic_%A_%a.err
-#SBATCH --time=04:00:00
-#SBATCH --mem=64G
+#SBATCH --time=12:00:00
+#SBATCH --mem=128G
 #SBATCH --cpus-per-task=16
+#SBATCH --array=1-330
 
 # Note on thread count:
 # - 8 threads is a good balance for most genome-scale models
@@ -84,7 +85,7 @@ cd "${COCOA_DIR}"
 echo "Running kinetic analysis..."
 echo ""
 
-${JULIA_BIN} --project="${COCOA_DIR}" \
+${JULIA_BIN} --threads=${JULIA_NUM_THREADS} --project="${COCOA_DIR}" \
     "${COCOA_DIR}/scripts/kinetic_module_analysis.jl" \
     "${RESULTS_DIR}" \
     "${MODELS_DIR}" \
