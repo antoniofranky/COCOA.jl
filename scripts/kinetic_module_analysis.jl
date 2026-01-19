@@ -156,9 +156,9 @@ function process_result_file(result_file::String, model_dir::String, output_dir:
     println("   Balanced complexes: $n_balanced")
     println("   Unbalanced concordance modules: $n_unbalanced_modules")
 
-    # Run kinetic analysis with efficient=false
-    println("\n4. Running kinetic module analysis (efficient=false)...")
-    println("   This performs thorough ACR/ACRR detection using Propositions S3-5 and S3-6")
+    # Run kinetic analysis with efficient=true
+    println("\n4. Running kinetic module analysis (efficient=true)...")
+    println("   Fast pairwise ACR/ACRR detection from stoichiometric differences")
     println("   Using $(Threads.nthreads()) threads for parallel operations")
 
     kinetic_timing = @timed begin
@@ -166,7 +166,7 @@ function process_result_file(result_file::String, model_dir::String, output_dir:
             concordance_modules,
             model;
             min_module_size=1,
-            efficient=false  # Full analysis with matrix-based ACR/ACRR
+            efficient=true  # Fast pairwise detection, avoids matrix rank computation
         )
     end
 
