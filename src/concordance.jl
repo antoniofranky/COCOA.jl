@@ -642,9 +642,11 @@ function activity_concordance_analysis(
     rng = StableRNGs.StableRNG(seed)
 
     # Use the separated AVA function with warmup point generation and external timing
-    ava_digits = max(1, -floor(Int, log10(concordance_tolerance)))
+    # Round AVA to one order of magnitude below balanced_threshold for safe margin
+    # This removes numerical noise while ensuring values don't round across the threshold
+    ava_digits = max(1, -floor(Int, log10(balanced_threshold)) + 1)
     ava_output_func = (dir, om) -> ava_output_with_warmup(dir, om; digits=ava_digits)
-    @info "Running Activity Variability Analysis (AVA)"
+    @info "Running Activity Variability Analysis (AVA)" ava_digits balanced_threshold
     ava_time = @elapsed ava_results = activity_variability_analysis(
         constraints,
         complex_ids;
@@ -744,8 +746,14 @@ function activity_concordance_analysis(
                 abs_min = abs(min_val)
                 abs_max = abs(max_val)
 
+                # Balanced: both min and max are effectively zero (within threshold)
+                # This means the complex has zero activity in all feasible solutions
                 is_balanced = (abs_min < balanced_threshold) & (abs_max < balanced_threshold)
+
+                # Positive: min >= 0 (allowing small numerical errors)
                 is_positive = !is_balanced & (min_val >= -balanced_threshold)
+
+                # Negative: max <= 0 (allowing small numerical errors)
                 is_negative = !is_balanced & !is_positive & (max_val <= balanced_threshold)
 
                 balanced_complexes[i] = is_balanced
@@ -803,9 +811,11 @@ function activity_concordance_analysis(
     end
     @info "Generating candidate pairs via coefficient of variance..."
 
-    decimals = max(0, -floor(Int, log10(concordance_tolerance)))
+    # Round sampled activities to one order below cv_threshold for robust CV calculation
+    # This removes numerical noise while providing safe margin for CV comparisons
+    decimals = max(0, -floor(Int, log10(cv_threshold)) + 1)
     aggregate = rows -> round.(vec(hcat(rows...)), digits=decimals)
-    @info "Sampling schedule"
+    @info "Sampling schedule" cv_threshold decimals
 
     # Sampling strategy for concordance analysis
     # Formula: n_samples_collected = n_chains × n_starting_points × n_iterations_collected
@@ -2338,62 +2348,4 @@ function calculate_final_concordance_statistics!(
     @debug "Full concordance analysis statistics" final_stats
 
     return final_stats
-end
-
-"""
-    extract_concordance_modules(results::ConcordanceResults)
-
-Extract concordance modules in the format required for kinetic analysis.
-
-Returns a `Vector{Set{Symbol}}` where:
-- First element: Set of balanced complexes (module ID = 0)
-- Remaining elements: Sets of complexes for each concordance module (module ID > 0)
-- Singleton modules: Each unbalanced complex with no concordant partners (module ID = -1)
-  forms its own singleton concordance module
-
-# Example
-```julia
-results = activity_concordance_analysis(model; optimizer=HiGHS.Optimizer)
-concordance_modules = extract_concordance_modules(results)
-kinetic_modules = kinetic_analysis(concordance_modules, model)
-```
-"""
-function extract_concordance_modules(results::ConcordanceResults)
-    # Group complexes by module ID (except singletons which are handled individually)
-    module_groups = Dict{Int,Set{Symbol}}()
-
-    for (i, module_id) in enumerate(results.concordance_modules)
-        complex_id = results.complex_ids[i]
-
-        # Skip singletons for now - we'll add them individually later
-        if module_id == -1
-            continue
-        end
-
-        if !haskey(module_groups, module_id)
-            module_groups[module_id] = Set{Symbol}()
-        end
-        push!(module_groups[module_id], complex_id)
-    end
-
-    # Build result vector: balanced first, then concordance modules, then singletons
-    concordance_vector = Vector{Set{Symbol}}()
-
-    # First element: balanced complexes (module_id = 0)
-    balanced = get(module_groups, 0, Set{Symbol}())
-    push!(concordance_vector, balanced)
-
-    # Multi-complex concordance modules (module_id > 0) in sorted order
-    for module_id in sort(filter(id -> id > 0, collect(keys(module_groups))))
-        push!(concordance_vector, module_groups[module_id])
-    end
-
-    # Singleton concordance modules: each singleton complex as its own module
-    for (i, module_id) in enumerate(results.concordance_modules)
-        if module_id == -1
-            push!(concordance_vector, Set([results.complex_ids[i]]))
-        end
-    end
-
-    return concordance_vector
 end

@@ -391,6 +391,7 @@ function add_random_reactions!(
     objective_coefficient = original_rxn.objective_coefficient
 
     # ALL steps in random mechanism are fully reversible
+    # TODO: Could adjust bounds based on original reaction if desired
     reversible_lb = -1000.0
     reversible_ub = 1000.0
 

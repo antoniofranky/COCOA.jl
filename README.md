@@ -37,7 +37,7 @@ model = COBREXA.load_model("ecoli_core.xml")
 model_canon = convert(A.CanonicalModel.Model,model)
 
 # Recommended preprocessing pipeline for kinetic module analysis (immutable - preserves original)
-model_processed = model |>
+model_processed = model_canon |>
     normalize_bounds |>
     m -> remove_blocked_reactions(m; optimizer=HiGHS.Optimizer) |>
     remove_orphans |>

@@ -30,7 +30,12 @@ using StableRNGs
 
     @testset "2. Concordance Analysis" begin
         model = create_envz_ompr_model()
-
+        highs_settings = [
+            COBREXA.set_optimizer_attribute("primal_feasibility_tolerance", 1e-10),
+            COBREXA.set_optimizer_attribute("dual_feasibility_tolerance", 1e-10),
+            COBREXA.set_optimizer_attribute("time_limit", 1200.0),  # 20 minutes per optimization
+            COBREXA.set_optimizer_attribute("presolve", "on"),
+        ]
         # Run concordance analysis
         results = activity_concordance_analysis(
             model;
@@ -38,6 +43,7 @@ using StableRNGs
             kinetic_analysis=false,
             use_transitivity=true,
             concordance_tolerance=0.01,
+            balanced_threshold=1e-8,
             cv_threshold=0.01
         )
 

@@ -68,8 +68,6 @@ function create_unidirectional_constraints(
 
 
 
-
-
     @info "Using symmetric unidirectional approach with variable pruning" var_count = C.var_count(constraints)
 
     # Count reactions that were split (all of them in this symmetric approach)

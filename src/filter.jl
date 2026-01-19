@@ -41,65 +41,7 @@ const DIRECTION_NEGATIVE = 0x02
     return bits
 end
 
-# ========================================================================================
-# Circular Buffer for Streaming
-# ========================================================================================
 
-"""
-Circular buffer for efficient streaming without reallocations.
-"""
-mutable struct CircularBuffer{T}
-    data::Vector{T}
-    capacity::Int
-    size::Int
-    head::Int
-    tail::Int
-
-    function CircularBuffer{T}(capacity::Int) where T
-        new(Vector{T}(undef, capacity), capacity, 0, 1, 1)
-    end
-end
-
-@inline function push!(buf::CircularBuffer{T}, item::T) where T
-    if buf.size < buf.capacity
-        buf.data[buf.tail] = item
-        buf.tail = mod1(buf.tail + 1, buf.capacity)
-        buf.size += 1
-    else
-        # Overwrite oldest
-        buf.data[buf.tail] = item
-        buf.tail = mod1(buf.tail + 1, buf.capacity)
-        buf.head = mod1(buf.head + 1, buf.capacity)
-    end
-end
-
-@inline function popfirst!(buf::CircularBuffer{T})::T where T
-    if buf.size == 0
-        throw(BoundsError("Buffer is empty"))
-    end
-    item = buf.data[buf.head]
-    buf.head = mod1(buf.head + 1, buf.capacity)
-    buf.size -= 1
-    return item
-end
-
-@inline isempty(buf::CircularBuffer) = buf.size == 0
-@inline length(buf::CircularBuffer) = buf.size
-
-"""
-Get all items as a view without copying.
-"""
-function view_all(buf::CircularBuffer{T})::SubArray{T} where T
-    if buf.size == 0
-        return view(buf.data, 1:0)
-    elseif buf.head <= buf.tail - 1
-        return view(buf.data, buf.head:buf.tail-1)
-    else
-        # Wrapped around - need to handle separately
-        # For now, return first contiguous segment
-        return view(buf.data, buf.head:buf.capacity)
-    end
-end
 
 """
 Custom OnlineStat for coefficient of variation computation using Welford's algorithm.
