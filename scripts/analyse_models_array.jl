@@ -4,7 +4,7 @@ using SBMLFBCModels, AbstractFBCModels, COBREXA, JLD2, Dates
 
 # Parse command line arguments
 if length(ARGS) < 4
-    error("Usage: julia analyse_models_array.jl <model_file> <results_dir> <model_name> <kinetic_analysis>")
+    error("Usage: julia analyse_models_array.jl <model_file> <results_dir> <model_name> <kinetic_analysis> [seed]")
 end
 
 model_file = ARGS[1]
@@ -12,21 +12,23 @@ results_dir = ARGS[2]
 model_name = ARGS[3]
 kinetic_analysis = parse(Bool, lowercase(ARGS[4]))
 
+# Optional seed parameter (defaults to 43 for backwards compatibility)
+seed = length(ARGS) >= 5 ? parse(Int, ARGS[5]) : 43
+
 # --- Analysis Parameters ---
 # Modify these parameters as needed
 sample_size = 1000
-seed = 42
 cv_threshold = 1e-2
 batch_size = 100_000
 use_transitivity = true
-balanced_threshold = 1e-8
+balanced_threshold = 1e-7
 concordance_tolerance = 1e-2
 
 # HiGHS solver settings
 highs_settings = [
-    COBREXA.set_optimizer_attribute("primal_feasibility_tolerance", 1e-10),
-    COBREXA.set_optimizer_attribute("dual_feasibility_tolerance", 1e-10),
-    COBREXA.set_optimizer_attribute("mip_feasibility_tolerance", 1e-10),
+    COBREXA.set_optimizer_attribute("primal_feasibility_tolerance", 1e-8),
+    COBREXA.set_optimizer_attribute("dual_feasibility_tolerance", 1e-8),
+    COBREXA.set_optimizer_attribute("mip_feasibility_tolerance", 1e-8),
     COBREXA.set_optimizer_attribute("random_seed", seed),
     COBREXA.set_optimizer_attribute("time_limit", 1200.0),  # 20 minutes per optimization
     COBREXA.set_optimizer_attribute("presolve", "on"),

@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=no_split
-#SBATCH --chdir=/work/schaffran1/jobresults/no_split
-#SBATCH --output=/work/schaffran1/jobresults/no_split/ka_cocoa_model_%A_%a.out
+#SBATCH --job-name=r50
+#SBATCH --chdir=/work/schaffran1/jobresults/random_50
+#SBATCH --output=/work/schaffran1/jobresults/random_50/ka_cocoa_model_%A_%a.out
 #SBATCH --time=2-00:00:00
 #SBATCH --qos=normal
 #SBATCH --nodes=1
@@ -16,8 +16,8 @@
 # ============================================================================
 # CONFIGURATION - Edit these paths to match your setup
 # ============================================================================
-MODELS_DIR="/work/schaffran1/toolbox/prpd_models/no_split"  # Directory containing model .xml files
-RESULTS_DIR="/work/schaffran1/jobresults/no_split"      # Directory where results will be saved
+MODELS_DIR="/work/schaffran1/toolbox/prpd_models/random_50"  # Directory containing model .xml files
+RESULTS_DIR="/work/schaffran1/jobresults/random_50"      # Directory where results will be saved
 KINETIC_ANALYSIS="false"  # Set to "true" or "false"
 # ============================================================================
 

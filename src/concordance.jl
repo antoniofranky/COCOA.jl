@@ -984,7 +984,7 @@ function activity_concordance_analysis(
         config;
         track_direct_pairs=!use_transitivity
     )
-
+    #TODO: FIx the time here
     concordance_time_str = Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, concordance_time * 1000)), "HH:MM:SS.s")
     @info "Building concordance modules [$concordance_time_str]"
     modules = extract_modules(concordance_tracker)

@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=no_split
-#SBATCH --chdir=/work/schaffran1/jobresults/no_split
-#SBATCH --output=/work/schaffran1/jobresults/no_split/ka_cocoa_model_%A_%a.out
+#SBATCH --job-name=r25
+#SBATCH --chdir=/work/schaffran1/jobresults/random_25
+#SBATCH --output=/work/schaffran1/jobresults/random_25/ka_cocoa_model_%A_%a.out
 #SBATCH --time=2-00:00:00
 #SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=64
-#SBATCH --mem=300G
+#SBATCH --mem=150G
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=schaffran1@uni-potsdam.de
 #SBATCH --hint=nomultithread
@@ -16,8 +16,8 @@
 # ============================================================================
 # CONFIGURATION - Edit these paths to match your setup
 # ============================================================================
-MODELS_DIR="/work/schaffran1/toolbox/prpd_models/no_split"  # Directory containing model .xml files
-RESULTS_DIR="/work/schaffran1/jobresults/no_split"      # Directory where results will be saved
+MODELS_DIR="/work/schaffran1/toolbox/prpd_models/random_25"  # Directory containing model .xml files
+RESULTS_DIR="/work/schaffran1/jobresults/random_25"      # Directory where results will be saved
 KINETIC_ANALYSIS="false"  # Set to "true" or "false"
 # ============================================================================
 
