@@ -835,40 +835,26 @@ function activity_concordance_analysis(
     # 4. Define single iteration to collect after burn-in
     iterations_to_collect = [n_burnin]  # Single well-converged sample per starting point
 
-    # 5. Generate exactly sample_size starting points using stratified approach
-    # Distribute across strategies to ensure comprehensive coverage
-    n_extreme_points = min(sample_size ÷ 3, size(warmup, 1))  # 1/3 from extremes
-    n_center_points = min(1, sample_size - n_extreme_points)  # 1 center point if space allows
-    n_random_points = sample_size - n_extreme_points - n_center_points  # Rest as random combinations
-
-    # Ensure we don't exceed sample_size
-    total_planned = n_extreme_points + n_center_points + n_random_points
-    if total_planned != sample_size
-        @warn "Starting point allocation mismatch" planned = total_planned target = sample_size
-        n_random_points = sample_size - n_extreme_points - n_center_points
-    end
+    # 5. Generate exactly sample_size starting points — all strictly interior
+    # AVA boundary vectors (LP optima) are polytope vertices and poor ACHR starts;
+    # with only n_burnin steps the chains cannot mix away from the boundary.
+    # Instead we use only the centroid and random convex combinations of AVA vectors,
+    # which are guaranteed to lie inside the polytope.
+    n_center_points = min(1, sample_size)  # 1 centroid (interior approximation)
+    n_random_points = sample_size - n_center_points  # All remaining as convex combinations
 
     # Pre-allocate start_variables_list with exact size for better performance
     start_variables_list = Vector{Vector{Float64}}()
     sizehint!(start_variables_list, sample_size)
 
-    # Strategy 1: Random sample from AVA extreme points (polytope vertices/boundaries)
-    if n_extreme_points > 0 && !isempty(warmup)
-        # Randomly select from warmup points (each from min/max optimization of an activity)
-        extreme_indices = Random.rand(rng, 1:size(warmup, 1), n_extreme_points)
-        for idx in extreme_indices
-            push!(start_variables_list, warmup[idx, :])
-        end
-    end
-
-    # Strategy 2: Analytic center approximation for interior point exploration
+    # Strategy 1: Analytic center approximation for interior point exploration
     if n_center_points > 0 && !isempty(warmup)
         # Average of extreme points approximates polytope center
         center_point = vec(Statistics.mean(warmup, dims=1))
         push!(start_variables_list, center_point)
     end
 
-    # Strategy 3: Interior points via random convex combinations of extreme points
+    # Strategy 2: Interior points via random convex combinations of extreme points
     # Optimized with pre-allocated buffers to minimize allocations
     if n_random_points > 0 && size(warmup, 1) >= 2
         # Pre-allocate reusable buffers
@@ -920,7 +906,7 @@ function activity_concordance_analysis(
         start_matrix
     end
 
-    @info "Starting point composition" extreme_points = n_extreme_points center_points = n_center_points random_combinations = n_random_points total = size(start_variables, 1)    # 6. Run the sampler with deterministic seeding for reproducible results
+    @info "Starting point composition" center_points = n_center_points random_combinations = n_random_points total = size(start_variables, 1)    # 6. Run the sampler with deterministic seeding for reproducible results
 
     @info "Sampling..."
     samples_tree = COBREXA.sample_constraints(
