@@ -1,8 +1,8 @@
 """
-filter.jl - Revolutionary streaming candidate filter for 1B+ candidates
+filter.jl - Streaming candidate filter for concordance pair generation
 
-Streaming producer-consumer architecture that processes unlimited candidates 
-with constant memory usage (<1MB) through bidirectional filter-analysis communication.
+Streaming producer-consumer architecture that traverses the pair space with O(1)
+incremental memory per candidate through bidirectional filter-analysis communication.
 """
 
 import OnlineStatsBase
@@ -18,7 +18,7 @@ import Base: push!, length, isempty, popfirst!
 
 """
 Packed candidate structure optimized for memory efficiency.
-15 bytes total vs 25+ bytes in previous versions.
+24 bytes on 64-bit systems (two Int indices, UInt8 direction bits, Float32 CV, UInt16 sample count).
 """
 struct PairCandidate
     c1_idx::Int           # Use Int for direct compatibility with ConcordanceTracker
@@ -97,8 +97,9 @@ end
 # ========================================================================================
 
 """
-Revolutionary streaming candidate filter supporting 1B+ candidates with <1MB memory.
-Implements Julia iterator protocol for zero-allocation candidate generation.
+Streaming candidate filter that traverses the pair space with O(1) incremental
+memory per candidate. Implements Julia iterator protocol; no O(n²) candidate list
+is materialised.
 """
 mutable struct StreamingCandidateFilter
     # Pair iteration state

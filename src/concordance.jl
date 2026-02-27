@@ -509,9 +509,9 @@ results = activity_concordance_analysis(
 - `balanced_threshold::Float64=NaN`: Threshold for balanced complex detection
 - `cv_threshold::Float64=NaN`: Coefficient of variation threshold for filtering
 - `cv_epsilon::Float64=1e-16`: Small value added to avoid division by zero in CV calculation
-- `sample_size::Int=100`: Number of samples for coefficient of variation estimation
+- `sample_size::Int=1000`: Number of samples for coefficient of variation estimation
 - `min_valid_samples::Int=10`: Minimum valid samples required for CV calculation
-- `seed::Int=0`: Random seed for reproducible sampling (0 uses global RNG)
+- `seed::UInt=rand(UInt)`: Random seed for reproducible sampling (pass a fixed value, e.g. `UInt(42)`, for deterministic results)
 
 ## Performance Settings
 - `batch_size::Int=50_000`: Number of candidate pairs processed per batch
@@ -562,7 +562,7 @@ function activity_concordance_analysis(
     concordance_tolerance::Float64=0.01,
     cv_threshold::Float64=0.01,
     cv_epsilon::Float64=1e-16,
-    sample_size::Int=100,
+    sample_size::Int=1000,
     batch_size::Int=50_000,
     min_valid_samples::Int=10,
     seed::UInt=rand(UInt),
