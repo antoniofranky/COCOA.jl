@@ -47,10 +47,19 @@ using StableRNGs
             cv_threshold=0.01
         )
 
-        @test results isa COCOA.ConcordanceResults
+        @test results isa NamedTuple
+        @test haskey(results, :complexes)
+        @test haskey(results, :acr)
+        @test haskey(results, :acrr)
 
-        # Extract concordance modules
-        concordance_modules = extract_concordance_modules(results)
+        # Verify complexes table structure
+        @test results.complexes.complex_id isa Vector{String}
+        @test results.complexes.concordance_module isa Vector{Int}
+        @test results.complexes.kinetic_module isa Vector{Int}
+        @test results.complexes.classification isa Vector{String}
+
+        # Extract concordance modules from NamedTuple
+        concordance_modules = COCOA.extract_concordance_modules(results)
 
         # Expected: 4 concordance modules (1 balanced + 3 unbalanced)
         @test length(concordance_modules) == 4
@@ -163,8 +172,8 @@ using StableRNGs
     @testset "5. Complete Pipeline Integration" begin
         model = create_envz_ompr_model()
 
-        # Step 1: Concordance analysis
-        concordance_results = activity_concordance_analysis(
+        # Step 1: Concordance analysis (returns NamedTuple)
+        concordance_result = activity_concordance_analysis(
             model;
             optimizer=HiGHS.Optimizer,
             kinetic_analysis=false,
@@ -173,27 +182,39 @@ using StableRNGs
             cv_threshold=0.01
         )
 
-        # Step 2: Extract concordance modules
-        concordance_modules = extract_concordance_modules(concordance_results)
+        @test concordance_result isa NamedTuple
 
-        # Step 3: Kinetic analysis (now returns ACR/ACRR directly)
-        results = kinetic_analysis(concordance_modules, model; min_module_size=1, efficient=false)
-        kinetic_modules = results.kinetic_modules
+        # Step 2: Extract concordance modules from NamedTuple
+        concordance_modules = COCOA.extract_concordance_modules(concordance_result)
+
+        # Step 3a: Kinetic analysis via Vector{Set{Symbol}} (original method)
+        results_old = kinetic_analysis(concordance_modules, model; min_module_size=1, efficient=false)
+        kinetic_modules = results_old.kinetic_modules
 
         # Verify final outputs
         expected_giant_module = Set([:XD, :XT, Symbol("Xp+Y"), Symbol("XT+Yp"), :XDYp, :XTYp, Symbol("XD+Yp"), :XpY, :X])
-        expected_acr = Set([:Yp])
         @test length(concordance_modules) == 4
         @test length(kinetic_modules) == 5
         @test kinetic_modules[1] == expected_giant_module
-        @test :Yp in results.acr_metabolites
-        @test length(results.acrr_pairs) == 15
+        @test :Yp in results_old.acr_metabolites
+        @test length(results_old.acrr_pairs) == 15
 
-        # Verify structural deficiency calculation (should be 2 for EnvZ-OmpR)
-        # This is computed internally during kinetic_analysis
-        # We can verify by checking the log output or running the calculation directly
+        # Step 3b: Kinetic analysis via NamedTuple (new convenience method)
+        results_new = kinetic_analysis(concordance_result, model; min_module_size=1, efficient=false)
 
-        @info "Complete pipeline validated" concordance_modules = length(concordance_modules) kinetic_modules = length(kinetic_modules) acr = results.acr_metabolites acrr_pairs = length(results.acrr_pairs)
+        @test results_new isa NamedTuple
+        @test haskey(results_new, :complexes)
+        @test haskey(results_new, :acr)
+        @test haskey(results_new, :acrr)
+
+        # Verify kinetic_module assignments are non-zero for complexes in kinetic modules
+        @test any(results_new.complexes.kinetic_module .> 0)
+
+        # Verify ACR/ACRR from NamedTuple method
+        @test "Yp" in results_new.acr.metabolite_id
+        @test length(results_new.acrr.metabolite_1) == 15
+
+        @info "Complete pipeline validated" concordance_modules = length(concordance_modules) kinetic_modules = length(kinetic_modules)
     end
 
     @testset "6. Mathematical Properties" begin
@@ -465,6 +486,88 @@ end
     @test !isempty(results.kinetic_modules)
 
     @info "Return type structure verified"
+end
+
+@testset "NamedTuple Return Type (Layer 1 and Layer 2)" begin
+    model = create_envz_ompr_model()
+
+    # Layer 1: default (no detailed_results)
+    result_l1 = activity_concordance_analysis(
+        model;
+        optimizer=HiGHS.Optimizer,
+        kinetic_analysis=false,
+        use_transitivity=true,
+        concordance_tolerance=0.01,
+        cv_threshold=0.01
+    )
+
+    @test result_l1 isa NamedTuple
+    @test haskey(result_l1, :complexes)
+    @test haskey(result_l1, :acr)
+    @test haskey(result_l1, :acrr)
+    @test !haskey(result_l1, :lambda_pairs)
+
+    # Layer 1 complexes table has exactly 4 columns
+    c = result_l1.complexes
+    @test haskey(c, :complex_id)
+    @test haskey(c, :concordance_module)
+    @test haskey(c, :kinetic_module)
+    @test haskey(c, :classification)
+    @test !haskey(c, :min_activity)
+
+    # Verify types
+    @test c.complex_id isa Vector{String}
+    @test c.concordance_module isa Vector{Int}
+    @test c.kinetic_module isa Vector{Int}
+    @test c.classification isa Vector{String}
+
+    # Verify classification values are valid
+    @test all(cl -> cl in ("balanced", "positive", "negative", "unrestricted"), c.classification)
+
+    # All kinetic_module should be 0 (kinetic analysis not run)
+    @test all(c.kinetic_module .== 0)
+
+    # Layer 2: detailed_results=true
+    result_l2 = activity_concordance_analysis(
+        model;
+        optimizer=HiGHS.Optimizer,
+        kinetic_analysis=false,
+        use_transitivity=true,
+        concordance_tolerance=0.01,
+        cv_threshold=0.01,
+        detailed_results=true
+    )
+
+    @test result_l2 isa NamedTuple
+    @test haskey(result_l2, :lambda_pairs)
+
+    # Layer 2 complexes table has additional columns
+    c2 = result_l2.complexes
+    @test haskey(c2, :min_activity)
+    @test haskey(c2, :max_activity)
+    @test haskey(c2, :lambda)
+    @test haskey(c2, :trivially_balanced)
+
+    @test c2.min_activity isa Vector{Float64}
+    @test c2.max_activity isa Vector{Float64}
+    @test c2.lambda isa Vector{Float64}
+    @test c2.trivially_balanced isa Vector{Bool}
+
+    # Lambda pairs table
+    lp = result_l2.lambda_pairs
+    @test haskey(lp, :complex_1)
+    @test haskey(lp, :complex_2)
+    @test haskey(lp, :lambda)
+    @test length(lp.complex_1) == length(lp.lambda)
+
+    # Balanced complexes should have lambda = 1.0
+    for i in eachindex(c2.concordance_module)
+        if c2.concordance_module[i] == 0
+            @test c2.lambda[i] == 1.0
+        end
+    end
+
+    @info "NamedTuple return type tests passed (Layer 1 and Layer 2)"
 end
 
 @testset "Efficient vs Non-Efficient Path Equivalence" begin

@@ -89,10 +89,12 @@ function get_or_create_intermediate!(
     end
     unique_met_compartments = sort(unique(metabolite_compartments))
 
-    # Build systematic identifier following BiGG/MetaNetX conventions
-    # Format: CPLX_<enzyme>_<sorted_metabolites>_<compartment>
-    # CPLX = Complex (enzyme-substrate intermediate)
-    # Extract enzyme number (e.g., "E3" -> "3")
+    # Build systematic identifier following BiGG/COBRA/SBML conventions.
+    # Format: M_CPLX_<enzyme>_<sorted_metabolites>_<compartment>
+    # The M_ prefix follows the COBRA species convention (all SBML species,
+    # including enzyme-substrate intermediates, carry the M_ prefix). Without
+    # it, SBMLFBCModels would silently add M_ on save, corrupting IDs on
+    # round-trip and breaking any subsequent analysis that uses these IDs.
     enz_num = replace(enzyme_id, "E" => "")
 
     # Get clean metabolite names (sorted for consistency)
@@ -101,11 +103,11 @@ function get_or_create_intermediate!(
     # Create intermediate ID with systematic naming
     if isempty(met_names)
         # Enzyme-only intermediate (rare edge case)
-        intermediate_id = "CPLX_E$(enz_num)_$(compartment)"
+        intermediate_id = "M_CPLX_E$(enz_num)_$(compartment)"
     else
         # Standard enzyme-substrate complex
         # Join with double underscore to separate logical groups
-        intermediate_id = "CPLX_E$(enz_num)__" * join(met_names, "__") * "_$(compartment)"
+        intermediate_id = "M_CPLX_E$(enz_num)__" * join(met_names, "__") * "_$(compartment)"
     end
 
     intermediate_registry[intermediate_key] = intermediate_id

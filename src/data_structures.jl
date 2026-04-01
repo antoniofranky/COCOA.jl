@@ -698,3 +698,195 @@ function extract_concordance_modules(results::ConcordanceResults)
 
     return concordance_vector
 end
+
+"""
+    extract_concordance_modules(result::NamedTuple)
+
+Extract concordance modules from the NamedTuple returned by `activity_concordance_analysis`.
+Returns a `Vector{Set{Symbol}}` in the same format as the `ConcordanceResults` method.
+"""
+function extract_concordance_modules(result::NamedTuple)
+    complexes = result.complexes
+    complex_ids = Symbol.(complexes.complex_id)
+    module_mapping = complexes.concordance_module
+
+    module_groups = Dict{Int,Set{Symbol}}()
+    for (i, mod) in enumerate(module_mapping)
+        mod == -1 && continue
+        members = get!(Set{Symbol}, module_groups, mod)
+        push!(members, complex_ids[i])
+    end
+
+    concordance_vector = Vector{Set{Symbol}}()
+    push!(concordance_vector, get(module_groups, 0, Set{Symbol}()))
+    for mod_id in sort(filter(id -> id > 0, collect(keys(module_groups))))
+        push!(concordance_vector, module_groups[mod_id])
+    end
+    for (i, mod) in enumerate(module_mapping)
+        if mod == -1
+            push!(concordance_vector, Set([complex_ids[i]]))
+        end
+    end
+
+    return concordance_vector
+end
+
+
+"""
+    to_namedtuple(results::ConcordanceResults; detailed::Bool=false)
+
+Convert a `ConcordanceResults` struct to a NamedTuple-of-Vectors (columnar table format).
+
+The returned NamedTuple has three tables that can each be converted to a DataFrame
+via `DataFrame(result.complexes)`, without requiring DataFrames as a dependency of COCOA.
+
+# Layer 1 (default)
+
+Returns `(complexes, acr, acrr)` where:
+- `complexes`: per-complex table with `complex_id`, `concordance_module`, `kinetic_module`, `classification`
+- `acr`: table of ACR metabolite IDs
+- `acrr`: table of ACRR metabolite pairs
+
+# Layer 2 (`detailed=true`)
+
+Additionally includes per-complex `min_activity`, `max_activity`, `lambda`, `trivially_balanced`
+in the complexes table, plus a `lambda_pairs` table of directly-measured pairwise lambda values.
+
+Per-complex `lambda` is relative to the first complex in each concordance module (reference = 1.0).
+Lambda is multiplicatively transitive: `lambda(a,b) = lambda_a / lambda_b`.
+
+# Complex ordering
+
+Complex IDs and their order match `COCOA.complex_stoichiometry(model)` and `COCOA.incidence(model)`.
+
+# Example
+```julia
+result = activity_concordance_analysis(model; optimizer=HiGHS.Optimizer)
+using DataFrames
+df = DataFrame(result.complexes)  # convert to DataFrame
+```
+"""
+function to_namedtuple(results::ConcordanceResults; detailed::Bool=false)
+    n = length(results.complex_ids)
+
+    # Classification from activity ranges and concordance modules
+    classification = Vector{String}(undef, n)
+    for i in 1:n
+        mod = results.concordance_modules[i]
+        if mod == 0
+            classification[i] = "balanced"
+        else
+            (min_a, max_a) = results.activity_ranges[i]
+            if isnan(min_a) || isnan(max_a)
+                classification[i] = "unrestricted"
+            elseif min_a >= 0
+                classification[i] = "positive"
+            elseif max_a <= 0
+                classification[i] = "negative"
+            else
+                classification[i] = "unrestricted"
+            end
+        end
+    end
+
+    # Kinetic module mapping (0 = not assigned)
+    km = results.kinetic_modules === nothing ? zeros(Int, n) : results.kinetic_modules
+
+    # ACR / ACRR tables
+    acr_mets = results.acr_metabolites === nothing ? Symbol[] : results.acr_metabolites
+    acrr_ps = results.acrr_pairs === nothing ? Tuple{Symbol,Symbol}[] : results.acrr_pairs
+
+    acr = (metabolite_id = String.(acr_mets),)
+    acrr = (
+        metabolite_1 = String[String(p[1]) for p in acrr_ps],
+        metabolite_2 = String[String(p[2]) for p in acrr_ps],
+    )
+
+    if detailed
+        # Compute per-complex lambda relative to module reference
+        lambda_vec = fill(NaN, n)
+        trivially_balanced_vec = falses(n)
+
+        # Get trivially_balanced set from stats if available
+        tb_set = get(results.stats, "trivially_balanced_set", Set{Symbol}())
+
+        for i in 1:n
+            trivially_balanced_vec[i] = results.complex_ids[i] in tb_set
+        end
+
+        # Group complexes by concordance module for lambda computation
+        module_members = Dict{Int,Vector{Int}}()
+        for i in 1:n
+            mod = results.concordance_modules[i]
+            if mod > 0  # only for concordance modules (not balanced/singleton)
+                members = get!(Vector{Int}, module_members, mod)
+                push!(members, i)
+            end
+        end
+
+        # For each module, pick first member as reference (lambda=1.0)
+        for (_, members) in module_members
+            ref_idx = first(members)
+            lambda_vec[ref_idx] = 1.0
+            for m_idx in members
+                m_idx == ref_idx && continue
+                key = ref_idx < m_idx ? (ref_idx, m_idx) : (m_idx, ref_idx)
+                if haskey(results.lambda_dict, key)
+                    # lambda_dict stores lambda(c1, c2) for canonical pair (c1 < c2)
+                    # Per-complex lambda relative to ref: lambda_m / lambda_ref
+                    lambda_vec[m_idx] = results.lambda_dict[key]
+                end
+            end
+        end
+
+        # Balanced complexes: lambda is trivially 1.0 (all zero activity)
+        for i in 1:n
+            if results.concordance_modules[i] == 0
+                lambda_vec[i] = 1.0
+            end
+        end
+
+        # Decompose activity_ranges in-place (avoid intermediate allocation)
+        min_activity = Vector{Float64}(undef, n)
+        max_activity = Vector{Float64}(undef, n)
+        @inbounds for i in 1:n
+            min_activity[i] = results.activity_ranges[i][1]
+            max_activity[i] = results.activity_ranges[i][2]
+        end
+
+        complexes = (
+            complex_id         = String.(results.complex_ids),
+            concordance_module = results.concordance_modules,
+            kinetic_module     = km,
+            classification     = classification,
+            min_activity       = min_activity,
+            max_activity       = max_activity,
+            lambda             = lambda_vec,
+            trivially_balanced = Vector{Bool}(trivially_balanced_vec),
+        )
+
+        # Sparse lambda pairs from lambda_dict
+        n_pairs = length(results.lambda_dict)
+        c1_vec = Vector{String}(undef, n_pairs)
+        c2_vec = Vector{String}(undef, n_pairs)
+        lam_vec = Vector{Float64}(undef, n_pairs)
+        for (k, (pair, lam)) in enumerate(results.lambda_dict)
+            c1_vec[k] = String(results.complex_ids[pair[1]])
+            c2_vec[k] = String(results.complex_ids[pair[2]])
+            lam_vec[k] = lam
+        end
+        lambda_pairs = (complex_1 = c1_vec, complex_2 = c2_vec, lambda = lam_vec)
+
+        return (complexes=complexes, acr=acr, acrr=acrr, lambda_pairs=lambda_pairs)
+    end
+
+    # Layer 1: minimal — no copies, ConcordanceResults is discarded after this
+    complexes = (
+        complex_id         = String.(results.complex_ids),
+        concordance_module = results.concordance_modules,
+        kinetic_module     = km,
+        classification     = classification,
+    )
+
+    return (complexes=complexes, acr=acr, acrr=acrr)
+end

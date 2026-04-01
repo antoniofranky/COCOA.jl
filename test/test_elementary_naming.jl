@@ -1,6 +1,6 @@
 """
 Quick test to verify the elementary splitting changes work correctly.
-Tests the new CPLX_ naming and elementary_mechanism annotations.
+Tests the new M_CPLX_ naming and elementary_mechanism annotations.
 """
 
 using Pkg
@@ -46,8 +46,8 @@ println("Elementary model: $(length(model_elem.reactions)) reactions, $(length(m
 
 # Check metabolite categories
 enzymes = [mid for mid in keys(model_elem.metabolites) if occursin(r"^E\d+$", mid)]
-complexes = [mid for mid in keys(model_elem.metabolites) if startswith(mid, "CPLX_")]
-original = [mid for mid in keys(model_elem.metabolites) if !occursin(r"^E\d+$", mid) && !startswith(mid, "CPLX_")]
+complexes = [mid for mid in keys(model_elem.metabolites) if startswith(mid, "M_CPLX_")]
+original = [mid for mid in keys(model_elem.metabolites) if !occursin(r"^E\d+$", mid) && !startswith(mid, "M_CPLX_")]
 
 println("\nMetabolite breakdown:")
 println("  Enzymes (E<n>): $(length(enzymes))")
@@ -55,7 +55,7 @@ for enz in enzymes
     println("    - $enz")
 end
 
-println("  Complexes (CPLX_): $(length(complexes))")
+println("  Complexes (M_CPLX_): $(length(complexes))")
 for cplx in sort(complexes)
     println("    - $cplx")
 end

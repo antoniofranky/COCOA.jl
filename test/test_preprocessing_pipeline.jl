@@ -247,9 +247,9 @@ println("="^80)
 println()
 
 julia_final = stats[end]
-julia_regular = count(p -> !startswith(p[1], "CPLX_") && !occursin(r"^E\d+$", p[1]), model.metabolites)
+julia_regular = count(p -> !startswith(p[1], "M_CPLX_") && !occursin(r"^E\d+$", p[1]), model.metabolites)
 julia_enzymes = count(p -> occursin(r"^E\d+$", p[1]), model.metabolites)
-julia_complexes = count(p -> startswith(p[1], "CPLX_"), model.metabolites)
+julia_complexes = count(p -> startswith(p[1], "M_CPLX_"), model.metabolites)
 
 function print_comparison(label, julia_val, matlab_val)
     diff = julia_val - matlab_val

@@ -68,7 +68,7 @@ julia_enzymes = String[]
 julia_complexes = String[]
 
 for met_id in julia_mets_all
-    if startswith(met_id, "CPLX_E")
+    if startswith(met_id, "M_CPLX_E")
         push!(julia_complexes, met_id)
     elseif match(r"^E\d+$", met_id) !== nothing
         # Match E1, E2, E3, ... E118 (enzyme metabolites without underscore)
@@ -189,14 +189,14 @@ println("  ┌─────────────┬────────
 println("  │   Aspect    │                  Format                            │")
 println("  ├─────────────┼────────────────────────────────────────────────────┤")
 println("  │ MATLAB      │ E<n>_<met1>[<comp>]_<met2>[<comp>]_complex       │")
-println("  │ Julia       │ CPLX_E<n>__M_<met1>_<comp>__M_<met2>_<comp>_<comp>│")
+println("  │ Julia       │ M_CPLX_E<n>__M_<met1>_<comp>__M_<met2>_<comp>_<comp>│")
 println("  └─────────────┴────────────────────────────────────────────────────┘")
 
 # Extract enzyme numbers from complexes to see if same reactions were split
 function extract_enzyme_number(complex_name::String)
-    if startswith(complex_name, "CPLX_E")
-        # CPLX_E58__M_adp_c_c -> 58
-        m = match(r"CPLX_E(\d+)__", complex_name)
+    if startswith(complex_name, "M_CPLX_E")
+        # M_CPLX_E58__M_adp_c_c -> 58
+        m = match(r"M_CPLX_E(\d+)__", complex_name)
         return m !== nothing ? parse(Int, m.captures[1]) : nothing
     elseif startswith(complex_name, "E")
         # E58_cit[m]_complex -> 58

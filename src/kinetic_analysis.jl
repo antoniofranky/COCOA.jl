@@ -355,6 +355,86 @@ function kinetic_analysis(
 end
 
 """
+    kinetic_analysis(concordance_result::NamedTuple, model; kwargs...)
+
+Run kinetic module analysis on the output of `activity_concordance_analysis`.
+
+Returns an updated NamedTuple with `kinetic_module`, `acr`, and `acrr` fields populated.
+
+# Example
+```julia
+result = activity_concordance_analysis(model; optimizer=HiGHS.Optimizer)
+result = kinetic_analysis(result, model)
+
+# Or in one call:
+result = activity_concordance_analysis(model; optimizer=HiGHS.Optimizer, kinetic_analysis=true)
+```
+"""
+function kinetic_analysis(
+    concordance_result::NamedTuple,
+    model::A.AbstractFBCModel;
+    min_module_size::Int=1,
+    known_acr::Vector{Symbol}=Symbol[],
+    efficient::Bool=true
+)
+    complexes = concordance_result.complexes
+    complex_ids = Symbol.(complexes.complex_id)
+
+    # Use extract_concordance_modules to get Vector{Set{Symbol}} for the core algorithm
+    concordance_modules = extract_concordance_modules(concordance_result)
+
+    # Run the core kinetic analysis
+    kin_result = kinetic_analysis(concordance_modules, model;
+        min_module_size=min_module_size, known_acr=known_acr, efficient=efficient)
+
+    # Map kinetic modules (Vector{Set{Symbol}}) back to per-complex Int assignments
+    n = length(complex_ids)
+    km_mapping = zeros(Int, n)
+    complex_to_idx = Dict{Symbol,Int}(id => i for (i, id) in enumerate(complex_ids))
+    for (mod_id, mod_set) in enumerate(kin_result.kinetic_modules)
+        for cid in mod_set
+            if haskey(complex_to_idx, cid)
+                km_mapping[complex_to_idx[cid]] = mod_id
+            end
+        end
+    end
+
+    # Build updated complexes table with kinetic_module filled in
+    updated_complexes = if haskey(complexes, :min_activity)
+        (
+            complex_id         = complexes.complex_id,
+            concordance_module = complexes.concordance_module,
+            kinetic_module     = km_mapping,
+            classification     = complexes.classification,
+            min_activity       = complexes.min_activity,
+            max_activity       = complexes.max_activity,
+            lambda             = complexes.lambda,
+            trivially_balanced = complexes.trivially_balanced,
+        )
+    else
+        (
+            complex_id         = complexes.complex_id,
+            concordance_module = complexes.concordance_module,
+            kinetic_module     = km_mapping,
+            classification     = complexes.classification,
+        )
+    end
+
+    # Build updated ACR/ACRR tables
+    acr = (metabolite_id = String.(kin_result.acr_metabolites),)
+    acrr = (
+        metabolite_1 = String[String(p[1]) for p in kin_result.acrr_pairs],
+        metabolite_2 = String[String(p[2]) for p in kin_result.acrr_pairs],
+    )
+
+    if haskey(concordance_result, :lambda_pairs)
+        return (complexes=updated_complexes, acr=acr, acrr=acrr,
+                lambda_pairs=concordance_result.lambda_pairs)
+    end
+    return (complexes=updated_complexes, acr=acr, acrr=acrr)
+end
+
+"""
     upstream_algorithm(extended_module, network)
 
 Apply simplified 2-phase upstream algorithm to identify kinetic module (Remark S2-1 from paper).

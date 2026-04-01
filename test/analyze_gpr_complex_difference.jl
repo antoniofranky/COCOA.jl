@@ -37,7 +37,7 @@ regular_mets = String[]
 for (mid, met) in model_irr.metabolites
     if match(r"^E\d+$", mid) !== nothing
         push!(enzyme_mets, mid)
-    elseif startswith(mid, "CPLX_E")
+    elseif startswith(mid, "M_CPLX_E")
         push!(complex_mets, mid)
     else
         push!(regular_mets, mid)
@@ -50,7 +50,7 @@ println("  Regular metabolites: $(length(regular_mets))")
 
 # Extract enzyme numbers from complexes
 function extract_enzyme_from_complex(complex_id::String)
-    m = match(r"CPLX_E(\d+)__", complex_id)
+    m = match(r"M_CPLX_E(\d+)__", complex_id)
     return m !== nothing ? parse(Int, m.captures[1]) : nothing
 end
 

@@ -571,6 +571,8 @@ function activity_concordance_analysis(
     n_burnin::Int=50,
     n_chains::Int=1,
     kinetic_analysis::Bool=false,
+    kinetic_efficient::Bool=true,
+    detailed_results::Bool=false,
 )
     start_time = time()
 
@@ -985,6 +987,7 @@ function activity_concordance_analysis(
         "n_complexes" => n_complexes,
         "n_balanced" => n_balanced_complexes,
         "n_trivially_balanced" => n_trivially_balanced_complexes,
+        "trivially_balanced_set" => trivially_balanced,  # Set{Symbol} for to_namedtuple
         "n_trivial_pairs" => length(trivial_pairs),
 
         # Processing statistics (keep the useful logging info)
@@ -1120,10 +1123,25 @@ function activity_concordance_analysis(
 
     # Apply kinetic analysis if requested
     if kinetic_analysis
-        apply_kinetic_analysis!(complete_model, constraints, model)
+        conc_modules = extract_concordance_modules(complete_model)
+        kin_result = COCOA.kinetic_analysis(conc_modules, model; efficient=kinetic_efficient)
+
+        # Map kinetic modules (Vector{Set{Symbol}}) back to per-complex Int assignments
+        km_mapping = zeros(Int, length(complete_model.complex_ids))
+        for (mod_id, mod_set) in enumerate(kin_result.kinetic_modules)
+            for cid in mod_set
+                if haskey(complete_model.complex_idx, cid)
+                    km_mapping[complete_model.complex_idx[cid]] = mod_id
+                end
+            end
+        end
+
+        complete_model.kinetic_modules = km_mapping
+        complete_model.acr_metabolites = kin_result.acr_metabolites
+        complete_model.acrr_pairs = kin_result.acrr_pairs
     end
 
-    return complete_model
+    return to_namedtuple(complete_model; detailed=detailed_results)
 end
 
 

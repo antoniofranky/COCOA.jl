@@ -31,7 +31,7 @@ println("TEST 1: Components field should be vector with one entry per component"
 println("="^80)
 
 # Find a complex with multiple metabolites
-test_complex_id = "CPLX_E96__M_atp_c__M_dtdp_c_c"
+test_complex_id = "M_CPLX_E96__M_atp_c__M_dtdp_c_c"
 if haskey(model_irr.metabolites, test_complex_id)
     cplx = model_irr.metabolites[test_complex_id]
 
@@ -61,7 +61,7 @@ println("="^80)
 # Find a complex with metabolites from different compartments
 multi_comp_complex = nothing
 for (cplx_id, cplx) in model_irr.metabolites
-    if startswith(cplx_id, "CPLX_") && haskey(cplx.annotations, "compartments_involved")
+    if startswith(cplx_id, "M_CPLX_") && haskey(cplx.annotations, "compartments_involved")
         compartments = cplx.annotations["compartments_involved"]
         if length(compartments) > 1
             multi_comp_complex = (cplx_id, cplx)
@@ -95,7 +95,7 @@ if !isnothing(multi_comp_complex)
     println("\n✓ PASS: Multi-compartment complex properly documented")
 else
     # Try the example from the user's question
-    test_id = "CPLX_E93__M_ficytc_m__M_h2o_m__M_h_c_m"
+    test_id = "M_CPLX_E93__M_ficytc_m__M_h2o_m__M_h_c_m"
     if haskey(model_irr.metabolites, test_id)
         cplx = model_irr.metabolites[test_id]
         println("\nFound user's example: $test_id")
@@ -125,7 +125,7 @@ multi_compartment_count = 0
 compartment_distribution = Dict{Int,Int}()
 
 for (met_id, met) in model_irr.metabolites
-    if startswith(met_id, "CPLX_") && haskey(met.annotations, "compartments_involved")
+    if startswith(met_id, "M_CPLX_") && haskey(met.annotations, "compartments_involved")
         total_complexes += 1
         n_comps = length(met.annotations["compartments_involved"])
         compartment_distribution[n_comps] = get(compartment_distribution, n_comps, 0) + 1
