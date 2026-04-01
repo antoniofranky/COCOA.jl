@@ -1,19 +1,21 @@
 
 using Test
 using SparseArrays
-using LinearAlgebra
-using AbstractFBCModels
 import AbstractFBCModels as A
-import AbstractFBCModels.CanonicalModel as CM
-import ConstraintTrees as C
-import JuMP as J
-using Graphs
-using DocStringExtensions
-using COBREXA
 using COCOA
 using HiGHS
-import Distributed as D
-using StableRNGs
+
+envz_concordance_modules() = [
+    Set([:XD, :XT, :XpY, :XTYp, :XDYp]),
+    Set([:X, :Xp, Symbol("Xp+Y"), Symbol("X+Yp")]),
+    Set([Symbol("XT+Yp"), Symbol("XT+Y")]),
+    Set([Symbol("XD+Yp"), Symbol("XD+Y")]),
+]
+
+envz_expected_giant_module() = Set([
+    :XD, :X, :XT, Symbol("Xp+Y"), :XpY,
+    Symbol("XT+Yp"), :XTYp, Symbol("XD+Yp"), :XDYp,
+])
 
 
 @testset "EnvZ-OmpR Complete Pipeline" begin
@@ -30,12 +32,6 @@ using StableRNGs
 
     @testset "2. Concordance Analysis" begin
         model = create_envz_ompr_model()
-        highs_settings = [
-            COBREXA.set_optimizer_attribute("primal_feasibility_tolerance", 1e-10),
-            COBREXA.set_optimizer_attribute("dual_feasibility_tolerance", 1e-10),
-            COBREXA.set_optimizer_attribute("time_limit", 1200.0),  # 20 minutes per optimization
-            COBREXA.set_optimizer_attribute("presolve", "on"),
-        ]
         # Run concordance analysis
         results = activity_concordance_analysis(
             model;
@@ -86,12 +82,7 @@ using StableRNGs
         model = create_envz_ompr_model()
 
         # Manually specify concordance modules (as extracted from concordance analysis)
-        concordance_modules = [
-            Set([:XD, :XT, :XpY, :XTYp, :XDYp]),                           # balanced
-            Set([:X, :Xp, Symbol("Xp+Y"), Symbol("X+Yp")]),                 # 𝒞m1
-            Set([Symbol("XT+Yp"), Symbol("XT+Y")]),                         # 𝒞m2
-            Set([Symbol("XD+Yp"), Symbol("XD+Y")])                          # 𝒞m3
-        ]
+        concordance_modules = envz_concordance_modules()
 
         results = kinetic_analysis(concordance_modules, model; min_module_size=1, efficient=false)
         kinetic_modules = results.kinetic_modules
@@ -103,10 +94,7 @@ using StableRNGs
         # After merging and Theorem S4-6:
         # - Giant module with 9 non-terminal complexes
         # - 4 terminal singleton modules
-        expected_giant_module = Set([
-            :XD, :X, :XT, Symbol("Xp+Y"), :XpY,        # from 𝒞1
-            Symbol("XT+Yp"), :XTYp, Symbol("XD+Yp"), :XDYp  # from 𝒞4
-        ])
+        expected_giant_module = envz_expected_giant_module()
 
         expected_terminal_singletons = Set([
             Set([:Xp]),
@@ -129,12 +117,7 @@ using StableRNGs
     @testset "4. ACR/ACRR Identification" begin
         model = create_envz_ompr_model()
 
-        concordance_modules = [
-            Set([:XD, :XT, :XpY, :XTYp, :XDYp]),
-            Set([:X, :Xp, Symbol("Xp+Y"), Symbol("X+Yp")]),
-            Set([Symbol("XT+Yp"), Symbol("XT+Y")]),
-            Set([Symbol("XD+Yp"), Symbol("XD+Y")])
-        ]
+        concordance_modules = envz_concordance_modules()
 
         # kinetic_analysis now returns ACR/ACRR directly - no need for separate call
         results = kinetic_analysis(concordance_modules, model; min_module_size=1, efficient=false)
@@ -331,12 +314,7 @@ using StableRNGs
     @testset "8. Deficiency Calculations" begin
         model = create_envz_ompr_model()
 
-        concordance_modules = [
-            Set([:XD, :XT, :XpY, :XTYp, :XDYp]),
-            Set([:X, :Xp, Symbol("Xp+Y"), Symbol("X+Yp")]),
-            Set([Symbol("XT+Yp"), Symbol("XT+Y")]),
-            Set([Symbol("XD+Yp"), Symbol("XD+Y")])
-        ]
+        concordance_modules = envz_concordance_modules()
 
         # Test structural deficiency
         δ = structural_deficiency(concordance_modules, model)
@@ -370,6 +348,62 @@ using StableRNGs
 
         # Verify the paper's claim: after proper merging, δₖ = 1
         @test bounds_after_1_merge.is_exact && bounds_after_1_merge.lower == 1
+    end
+
+    @testset "9. Supplementary Matrix And Mass-Action Fixtures" begin
+        model = create_envz_ompr_model()
+        Y_matrix, metabolite_ids, complex_ids = COCOA.complex_stoichiometry(model; return_ids=true)
+        A_matrix, complex_ids_A, _ = COCOA.incidence(model; return_ids=true)
+
+        expected_complexes = Set([
+            :X, Symbol("X+Yp"), :XD, Symbol("XD+Y"), Symbol("XD+Yp"), :XDYp,
+            :XT, Symbol("XT+Y"), Symbol("XT+Yp"), :XTYp, :Xp, Symbol("Xp+Y"), :XpY,
+        ])
+        expected_metabolites = Set([:X, :XD, :XDYp, :XT, :XTYp, :Xp, :XpY, :Y, :Yp])
+
+        # Fig S-9 / S.5.2 fixture checks for the paper-style EnvZ-OmpR model.
+        @test size(Y_matrix) == (9, 13)
+        @test size(A_matrix) == (13, 14)
+        @test nnz(Y_matrix) == 19
+        @test nnz(A_matrix) == 28
+        @test Set(complex_ids) == expected_complexes
+        @test Set(complex_ids_A) == expected_complexes
+        @test Set(metabolite_ids) == expected_metabolites
+        N_matrix = Y_matrix * A_matrix
+        @test size(N_matrix) == (9, 14)
+        @test nnz(N_matrix) > 0
+
+        # Every reaction column in incidence has exactly one source (-1) and one target (+1).
+        rows = SparseArrays.rowvals(A_matrix)
+        vals = SparseArrays.nonzeros(A_matrix)
+        for col in 1:size(A_matrix, 2)
+            col_vals = [vals[k] for k in SparseArrays.nzrange(A_matrix, col)]
+            @test count(==(1), col_vals) == 1
+            @test count(==(-1), col_vals) == 1
+        end
+
+        # Fig S-11 style assertion: all reactant complexes belong to the giant coupled set.
+        reactant_complexes = Set{Symbol}()
+        for col in 1:size(A_matrix, 2)
+            for k in SparseArrays.nzrange(A_matrix, col)
+                if vals[k] < 0
+                    push!(reactant_complexes, complex_ids_A[rows[k]])
+                end
+            end
+        end
+        full_results = kinetic_analysis(envz_concordance_modules(), model; min_module_size=1, efficient=false)
+        @test !isempty(full_results.kinetic_modules)
+        @test reactant_complexes == envz_expected_giant_module()
+        @test reactant_complexes == full_results.kinetic_modules[1]
+
+        # S.4.3 logic for EnvZ-OmpR: non-weakly reversible and Proposition S4-8 bounds imply δ_k = 1.
+        bounds_0 = mass_action_deficiency_bounds(envz_concordance_modules(), model; n_concordance_merges=0)
+        bounds_1 = mass_action_deficiency_bounds(envz_concordance_modules(), model; n_concordance_merges=1)
+        @test bounds_0.lower == 1
+        @test bounds_0.upper == 2
+        @test bounds_1.lower == 1
+        @test bounds_1.upper == 1
+        @test bounds_1.is_exact
     end
 end
 

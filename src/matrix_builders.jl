@@ -437,12 +437,12 @@ function complex_stoichiometry(constraints::C.ConstraintTree; return_ids::Bool=f
         if constraint_complex_set != model_complex_set
             missing_in_constraints = setdiff(model_complex_set, constraint_complex_set)
             extra_in_constraints = setdiff(constraint_complex_set, model_complex_set)
-            @warn "Complex mismatch between model and constraints" n_missing=length(missing_in_constraints) n_extra=length(extra_in_constraints)
+            @warn "Complex mismatch between model and constraints" n_missing = length(missing_in_constraints) n_extra = length(extra_in_constraints)
             if !isempty(missing_in_constraints)
-                @warn "Complexes in model but not constraints (first 5)" missing=collect(missing_in_constraints)[1:min(5, end)]
+                @warn "Complexes in model but not constraints (first 5)" missing = collect(missing_in_constraints)[1:min(5, end)]
             end
             if !isempty(extra_in_constraints)
-                @warn "Complexes in constraints but not model (first 5)" extra=collect(extra_in_constraints)[1:min(5, end)]
+                @warn "Complexes in constraints but not model (first 5)" extra = collect(extra_in_constraints)[1:min(5, end)]
             end
         end
 
@@ -665,12 +665,12 @@ function incidence(constraints::C.ConstraintTree; return_ids::Bool=false, model:
         if constraint_complex_set != model_complex_set
             missing_in_constraints = setdiff(model_complex_set, constraint_complex_set)
             extra_in_constraints = setdiff(constraint_complex_set, model_complex_set)
-            @warn "Complex mismatch between model and constraints" n_missing=length(missing_in_constraints) n_extra=length(extra_in_constraints)
+            @warn "Complex mismatch between model and constraints" n_missing = length(missing_in_constraints) n_extra = length(extra_in_constraints)
             if !isempty(missing_in_constraints)
-                @warn "Complexes in model but not constraints (first 5)" missing=collect(missing_in_constraints)[1:min(5, end)]
+                @warn "Complexes in model but not constraints (first 5)" missing = collect(missing_in_constraints)[1:min(5, end)]
             end
             if !isempty(extra_in_constraints)
-                @warn "Complexes in constraints but not model (first 5)" extra=collect(extra_in_constraints)[1:min(5, end)]
+                @warn "Complexes in constraints but not model (first 5)" extra = collect(extra_in_constraints)[1:min(5, end)]
             end
         end
 
@@ -866,4 +866,5 @@ function incidence(model::A.AbstractFBCModel; return_ids::Bool=false)
         return A_matrix
     end
 end
+
 

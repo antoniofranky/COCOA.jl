@@ -26,196 +26,37 @@ in biochemical networks" (Science Advances, 2025).
 Returns a CanonicalModel representing the EnvZ-OmpR system.
 """
 function create_envz_ompr_model()
-    # Create empty model
     model = CM.Model()
 
-    # Add metabolites (species A through J)
+    # Paper-style species naming used throughout the strict validation tests.
     model.metabolites = Dict(
-        "A" => CM.Metabolite(name="Species A"),
-        "B" => CM.Metabolite(name="Species B"),
-        "C" => CM.Metabolite(name="Species C"),
-        "D" => CM.Metabolite(name="Species D"),
-        "E" => CM.Metabolite(name="Species E"),
-        "F" => CM.Metabolite(name="Species F"),
-        "G" => CM.Metabolite(name="Species G"),
-        "H" => CM.Metabolite(name="Species H"),
-        "I" => CM.Metabolite(name="Species I"),
-        "J" => CM.Metabolite(name="Complex J")
+        "X" => CM.Metabolite(name="X"),
+        "Xp" => CM.Metabolite(name="Xp"),
+        "XD" => CM.Metabolite(name="XD"),
+        "XT" => CM.Metabolite(name="XT"),
+        "XpY" => CM.Metabolite(name="XpY"),
+        "XTYp" => CM.Metabolite(name="XTYp"),
+        "XDYp" => CM.Metabolite(name="XDYp"),
+        "Y" => CM.Metabolite(name="Y"),
+        "Yp" => CM.Metabolite(name="Yp")
     )
 
-    # Add reactions based on Figure 1A
-    # The figure shows 14 reactions connecting 13 complexes
-    # Complexes: A, B, C, D, D+E, F, B+G, C+G, H, C+I, A+G, J, A+I, J
-
-    # R1: A → B (forward direction of A ⇄ B)
-    model.reactions["R1"] = CM.Reaction(
-        name="Reaction 1: A to B",
-        stoichiometry=Dict("A" => -1.0, "B" => 1.0),
-        lower_bound=0.0,  # Forward reaction
-        upper_bound=1000.0
-    )
-
-    # R2: B → A (reverse direction of A ⇄ B)
-    model.reactions["R2"] = CM.Reaction(
-        name="Reaction 2: B to A",
-        stoichiometry=Dict("B" => -1.0, "A" => 1.0),
-        lower_bound=0.0,  # Reverse reaction
-        upper_bound=1000.0
-    )
-
-    # R3: B → C (forward direction of B ⇄ C)
-    model.reactions["R3"] = CM.Reaction(
-        name="Reaction 3: B to C",
-        stoichiometry=Dict("B" => -1.0, "C" => 1.0),
-        lower_bound=0.0,
-        upper_bound=1000.0
-    )
-
-    # R4: C → B (reverse direction of B ⇄ C)
-    model.reactions["R4"] = CM.Reaction(
-        name="Reaction 4: C to B",
-        stoichiometry=Dict("C" => -1.0, "B" => 1.0),
-        lower_bound=0.0,
-        upper_bound=1000.0
-    )
-
-    # R5: C → D (irreversible)
-    model.reactions["R5"] = CM.Reaction(
-        name="Reaction 5: C to D",
-        stoichiometry=Dict("C" => -1.0, "D" => 1.0),
-        lower_bound=0.0,  # Irreversible
-        upper_bound=1000.0
-    )
-
-    # R6: D + E → F (forward direction of D+E ⇄ F)
-    model.reactions["R6"] = CM.Reaction(
-        name="Reaction 6: D+E to F",
-        stoichiometry=Dict("D" => -1.0, "E" => -1.0, "F" => 1.0),
-        lower_bound=0.0,
-        upper_bound=1000.0
-    )
-
-    # R7: F → D + E (reverse direction of D+E ⇄ F)
-    model.reactions["R7"] = CM.Reaction(
-        name="Reaction 7: F to D+E",
-        stoichiometry=Dict("F" => -1.0, "D" => 1.0, "E" => 1.0),
-        lower_bound=0.0,
-        upper_bound=1000.0
-    )
-
-    # R8: F → B + G (irreversible)
-    model.reactions["R8"] = CM.Reaction(
-        name="Reaction 8: F to B+G",
-        stoichiometry=Dict("F" => -1.0, "B" => 1.0, "G" => 1.0),
-        lower_bound=0.0,  # Irreversible
-        upper_bound=1000.0
-    )
-
-    # R9: C + G → H (forward direction of C+G ⇄ H)
-    model.reactions["R9"] = CM.Reaction(
-        name="Reaction 9: C+G to H",
-        stoichiometry=Dict("C" => -1.0, "G" => -1.0, "H" => 1.0),
-        lower_bound=0.0,
-        upper_bound=1000.0
-    )
-
-    # R10: H → C + G (reverse direction of C+G ⇄ H)
-    model.reactions["R10"] = CM.Reaction(
-        name="Reaction 10: H to C+G",
-        stoichiometry=Dict("H" => -1.0, "C" => 1.0, "G" => 1.0),
-        lower_bound=0.0,
-        upper_bound=1000.0
-    )
-
-    # R11: H → C + I (irreversible - produces C and I separately, not as complex)
-    model.reactions["R11"] = CM.Reaction(
-        name="Reaction 11: H to C and I",
-        stoichiometry=Dict("H" => -1.0, "C" => 1.0, "I" => 1.0),
-        lower_bound=0.0,  # Irreversible
-        upper_bound=1000.0
-    )
-
-    # R12: A + G → J (forward direction of A+G ⇄ J)
-    # Note: J is represented as a complex in the stoichiometry, we model it implicitly
-    # Since J is not a metabolite but a complex state, we can represent this as 
-    # consumption of A and G with appropriate products in R14
-    model.reactions["R12"] = CM.Reaction(
-        name="Reaction 12: A+G to complex J",
-        stoichiometry=Dict("A" => -1.0, "G" => -1.0),
-        lower_bound=0.0,
-        upper_bound=1000.0
-    )
-
-    # R13: J → A + G (reverse direction of A+G ⇄ J)
-    # This represents the dissociation back from complex J
-    model.reactions["R13"] = CM.Reaction(
-        name="Reaction 13: complex J to A+G",
-        stoichiometry=Dict("A" => 1.0, "G" => 1.0),
-        lower_bound=0.0,
-        upper_bound=1000.0
-    )
-
-    # Update reactions to properly use J
-    model.reactions["R12"] = CM.Reaction(
-        name="Reaction 12: A+G to J",
-        stoichiometry=Dict("A" => -1.0, "G" => -1.0, "J" => 1.0),
-        lower_bound=0.0,
-        upper_bound=1000.0
-    )
-
-    model.reactions["R13"] = CM.Reaction(
-        name="Reaction 13: J to A+G",
-        stoichiometry=Dict("J" => -1.0, "A" => 1.0, "G" => 1.0),
-        lower_bound=0.0,
-        upper_bound=1000.0
-    )
-
-    model.reactions["R14"] = CM.Reaction(
-        name="Reaction 14: J to A and I",
-        stoichiometry=Dict("J" => -1.0, "A" => 1.0, "I" => 1.0),
-        lower_bound=0.0,  # Irreversible
-        upper_bound=1000.0
-    )
-
-    # Add exchange reactions for boundary conditions (to make system feasible)
-    # These allow for input/output of metabolites at the system boundary
-
-    # Source reactions for initial substrates
-    model.reactions["EX_A"] = CM.Reaction(
-        name="Exchange A",
-        stoichiometry=Dict("A" => 1.0),
-        lower_bound=-10.0,  # Can import or export
-        upper_bound=10.0
-    )
-
-    model.reactions["EX_E"] = CM.Reaction(
-        name="Exchange E",
-        stoichiometry=Dict("E" => 1.0),
-        lower_bound=-10.0,
-        upper_bound=10.0
-    )
-
-    model.reactions["EX_G"] = CM.Reaction(
-        name="Exchange G",
-        stoichiometry=Dict("G" => 1.0),
-        lower_bound=-10.0,
-        upper_bound=10.0
-    )
-
-    # Sink reactions for terminal products
-    model.reactions["EX_D"] = CM.Reaction(
-        name="Exchange D",
-        stoichiometry=Dict("D" => -1.0),
-        lower_bound=0.0,
-        upper_bound=10.0
-    )
-
-    model.reactions["EX_I"] = CM.Reaction(
-        name="Exchange I",
-        stoichiometry=Dict("I" => -1.0),
-        lower_bound=0.0,
-        upper_bound=10.0
-    )
+    # 14 irreversible reactions that realize the 13-complex EnvZ-OmpR paper network:
+    # {XD, X, XT, Xp, Xp+Y, XpY, X+Yp, XT+Yp, XTYp, XT+Y, XD+Yp, XDYp, XD+Y}
+    model.reactions["R1"] = CM.Reaction(name="XD_to_X", stoichiometry=Dict("XD" => -1.0, "X" => 1.0), lower_bound=0.0, upper_bound=1000.0)
+    model.reactions["R2"] = CM.Reaction(name="X_to_XD", stoichiometry=Dict("X" => -1.0, "XD" => 1.0), lower_bound=0.0, upper_bound=1000.0)
+    model.reactions["R3"] = CM.Reaction(name="X_to_XT", stoichiometry=Dict("X" => -1.0, "XT" => 1.0), lower_bound=0.0, upper_bound=1000.0)
+    model.reactions["R4"] = CM.Reaction(name="XT_to_X", stoichiometry=Dict("XT" => -1.0, "X" => 1.0), lower_bound=0.0, upper_bound=1000.0)
+    model.reactions["R5"] = CM.Reaction(name="XT_to_Xp", stoichiometry=Dict("XT" => -1.0, "Xp" => 1.0), lower_bound=0.0, upper_bound=1000.0)
+    model.reactions["R6"] = CM.Reaction(name="XpY_binding", stoichiometry=Dict("Xp" => -1.0, "Y" => -1.0, "XpY" => 1.0), lower_bound=0.0, upper_bound=1000.0)
+    model.reactions["R7"] = CM.Reaction(name="XpY_dissociation", stoichiometry=Dict("XpY" => -1.0, "Xp" => 1.0, "Y" => 1.0), lower_bound=0.0, upper_bound=1000.0)
+    model.reactions["R8"] = CM.Reaction(name="XpY_to_X_plus_Yp", stoichiometry=Dict("XpY" => -1.0, "X" => 1.0, "Yp" => 1.0), lower_bound=0.0, upper_bound=1000.0)
+    model.reactions["R9"] = CM.Reaction(name="XT_plus_Yp_to_XTYp", stoichiometry=Dict("XT" => -1.0, "Yp" => -1.0, "XTYp" => 1.0), lower_bound=0.0, upper_bound=1000.0)
+    model.reactions["R10"] = CM.Reaction(name="XTYp_to_XT_plus_Yp", stoichiometry=Dict("XTYp" => -1.0, "XT" => 1.0, "Yp" => 1.0), lower_bound=0.0, upper_bound=1000.0)
+    model.reactions["R11"] = CM.Reaction(name="XTYp_to_XT_plus_Y", stoichiometry=Dict("XTYp" => -1.0, "XT" => 1.0, "Y" => 1.0), lower_bound=0.0, upper_bound=1000.0)
+    model.reactions["R12"] = CM.Reaction(name="XD_plus_Yp_to_XDYp", stoichiometry=Dict("XD" => -1.0, "Yp" => -1.0, "XDYp" => 1.0), lower_bound=0.0, upper_bound=1000.0)
+    model.reactions["R13"] = CM.Reaction(name="XDYp_to_XD_plus_Yp", stoichiometry=Dict("XDYp" => -1.0, "XD" => 1.0, "Yp" => 1.0), lower_bound=0.0, upper_bound=1000.0)
+    model.reactions["R14"] = CM.Reaction(name="XDYp_to_XD_plus_Y", stoichiometry=Dict("XDYp" => -1.0, "XD" => 1.0, "Y" => 1.0), lower_bound=0.0, upper_bound=1000.0)
 
     return model
 end

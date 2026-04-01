@@ -402,34 +402,34 @@ function kinetic_analysis(
     # Build updated complexes table with kinetic_module filled in
     updated_complexes = if haskey(complexes, :min_activity)
         (
-            complex_id         = complexes.complex_id,
-            concordance_module = complexes.concordance_module,
-            kinetic_module     = km_mapping,
-            classification     = complexes.classification,
-            min_activity       = complexes.min_activity,
-            max_activity       = complexes.max_activity,
-            lambda             = complexes.lambda,
-            trivially_balanced = complexes.trivially_balanced,
+            complex_id=complexes.complex_id,
+            concordance_module=complexes.concordance_module,
+            kinetic_module=km_mapping,
+            classification=complexes.classification,
+            min_activity=complexes.min_activity,
+            max_activity=complexes.max_activity,
+            lambda=complexes.lambda,
+            trivially_balanced=complexes.trivially_balanced,
         )
     else
         (
-            complex_id         = complexes.complex_id,
-            concordance_module = complexes.concordance_module,
-            kinetic_module     = km_mapping,
-            classification     = complexes.classification,
+            complex_id=complexes.complex_id,
+            concordance_module=complexes.concordance_module,
+            kinetic_module=km_mapping,
+            classification=complexes.classification,
         )
     end
 
     # Build updated ACR/ACRR tables
-    acr = (metabolite_id = String.(kin_result.acr_metabolites),)
+    acr = (metabolite_id=String.(kin_result.acr_metabolites),)
     acrr = (
-        metabolite_1 = String[String(p[1]) for p in kin_result.acrr_pairs],
-        metabolite_2 = String[String(p[2]) for p in kin_result.acrr_pairs],
+        metabolite_1=String[String(p[1]) for p in kin_result.acrr_pairs],
+        metabolite_2=String[String(p[2]) for p in kin_result.acrr_pairs],
     )
 
     if haskey(concordance_result, :lambda_pairs)
         return (complexes=updated_complexes, acr=acr, acrr=acrr,
-                lambda_pairs=concordance_result.lambda_pairs)
+            lambda_pairs=concordance_result.lambda_pairs)
     end
     return (complexes=updated_complexes, acr=acr, acrr=acrr)
 end
@@ -706,14 +706,15 @@ A terminal SCC has no complex that converts to any complex outside the SCC
 (but still within the current set of complexes being considered).
 """
 function is_terminal_scc_idx(scc::Set{Int}, all_complexes::Set{Int}, A_matrix::SparseArrays.SparseMatrixCSC{Int,Int})
-    # Check if any complex in SCC has outgoing edge to complex outside SCC (but in all_complexes)
+    # Check if any complex in SCC has outgoing edge to another complex in the
+    # reduced graph (all_complexes) that is outside this SCC.
     for cidx in scc
         for rxn_idx in SparseArrays.findnz(A_matrix[cidx, :])[1]
             if A_matrix[cidx, rxn_idx] < 0  # Complex is substrate
                 # Check products
                 products = SparseArrays.findnz(A_matrix[:, rxn_idx])[1]
                 for pidx in products
-                    if A_matrix[pidx, rxn_idx] > 0 && pidx ∉ scc
+                    if A_matrix[pidx, rxn_idx] > 0 && pidx ∈ all_complexes && pidx ∉ scc
                         @debug "SCC contains complex $cidx which converts (via rxn $rxn_idx) to $pidx outside SCC → NON-TERMINAL"
                         return false  # Has edge outside SCC
                     end
@@ -796,7 +797,7 @@ Check if SCC is terminal using cached adjacency (optimized version).
 function is_terminal_scc_cached(scc::Set{Int}, all_complexes::Set{Int}, cached_adj::CachedAdjacency)
     @inbounds for cidx in scc
         for neighbor in cached_adj.out_neighbors[cidx]
-            if neighbor ∉ scc
+            if neighbor ∈ all_complexes && neighbor ∉ scc
                 return false  # Has edge outside SCC
             end
         end
