@@ -60,3 +60,45 @@ function create_envz_ompr_model()
 
     return model
 end
+
+"""
+Create a compact EnvZ-OmpR source model for preprocessing tests.
+
+This model keeps reversible reactions unsplit. Running
+`split_into_elementary |> split_into_irreversible` should produce an
+analysis-equivalent network to `create_envz_ompr_model`.
+"""
+function create_envz_ompr_preprocessing_model()
+    model = CM.Model()
+
+    model.metabolites = Dict(
+        "X" => CM.Metabolite(name="X"),
+        "Xp" => CM.Metabolite(name="Xp"),
+        "XD" => CM.Metabolite(name="XD"),
+        "XT" => CM.Metabolite(name="XT"),
+        "XpY" => CM.Metabolite(name="XpY"),
+        "XTYp" => CM.Metabolite(name="XTYp"),
+        "XDYp" => CM.Metabolite(name="XDYp"),
+        "Y" => CM.Metabolite(name="Y"),
+        "Yp" => CM.Metabolite(name="Yp")
+    )
+
+    # Reversible reactions kept in compact form.
+    model.reactions["R1"] = CM.Reaction(name="XD_rev_X", stoichiometry=Dict("XD" => -1.0, "X" => 1.0), lower_bound=-1000.0, upper_bound=1000.0)
+    model.reactions["R2"] = CM.Reaction(name="X_rev_XT", stoichiometry=Dict("X" => -1.0, "XT" => 1.0), lower_bound=-1000.0, upper_bound=1000.0)
+    model.reactions["R3"] = CM.Reaction(name="XT_to_Xp", stoichiometry=Dict("XT" => -1.0, "Xp" => 1.0), lower_bound=0.0, upper_bound=1000.0)
+    model.reactions["R4"] = CM.Reaction(name="Xp_plus_Y_rev_XpY", stoichiometry=Dict("Xp" => -1.0, "Y" => -1.0, "XpY" => 1.0), lower_bound=-1000.0, upper_bound=1000.0)
+    model.reactions["R5"] = CM.Reaction(name="XpY_to_X_plus_Yp", stoichiometry=Dict("XpY" => -1.0, "X" => 1.0, "Yp" => 1.0), lower_bound=0.0, upper_bound=1000.0)
+    model.reactions["R6"] = CM.Reaction(name="XT_plus_Yp_rev_XTYp", stoichiometry=Dict("XT" => -1.0, "Yp" => -1.0, "XTYp" => 1.0), lower_bound=-1000.0, upper_bound=1000.0)
+    model.reactions["R7"] = CM.Reaction(name="XTYp_to_XT_plus_Y", stoichiometry=Dict("XTYp" => -1.0, "XT" => 1.0, "Y" => 1.0), lower_bound=0.0, upper_bound=1000.0)
+    model.reactions["R8"] = CM.Reaction(name="XD_plus_Yp_rev_XDYp", stoichiometry=Dict("XD" => -1.0, "Yp" => -1.0, "XDYp" => 1.0), lower_bound=-1000.0, upper_bound=1000.0)
+    model.reactions["R9"] = CM.Reaction(name="XDYp_to_XD_plus_Y", stoichiometry=Dict("XDYp" => -1.0, "XD" => 1.0, "Y" => 1.0), lower_bound=0.0, upper_bound=1000.0)
+
+    return model
+end
+
+"""Run the full preprocessing pipeline used for expansion tests."""
+function create_envz_ompr_preprocessed_model()
+    model = create_envz_ompr_preprocessing_model()
+    return split_into_irreversible(split_into_elementary(model))
+end

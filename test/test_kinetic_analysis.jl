@@ -1093,3 +1093,50 @@ end
     @info "Module sorting invariant verified" sizes
 end
 
+@testset "Preprocessing Pipeline Equivalence" begin
+    expanded_model = create_envz_ompr_model()
+    preprocessed_model = create_envz_ompr_preprocessed_model()
+
+    # Structural expectations after preprocessing.
+    @test length(A.metabolites(preprocessed_model)) >= 9
+    @test length(A.reactions(preprocessed_model)) >= 14
+
+    expanded_conc = activity_concordance_analysis(
+        expanded_model;
+        optimizer=HiGHS.Optimizer,
+        kinetic_analysis=false,
+        use_transitivity=true,
+        use_unidirectional_constraints=false,
+        concordance_tolerance=0.01,
+        cv_threshold=0.01,
+    )
+    preprocessed_conc = activity_concordance_analysis(
+        preprocessed_model;
+        optimizer=HiGHS.Optimizer,
+        kinetic_analysis=false,
+        use_transitivity=true,
+        use_unidirectional_constraints=false,
+        concordance_tolerance=0.01,
+        cv_threshold=0.01,
+    )
+
+    expanded_modules = COCOA.extract_concordance_modules(expanded_conc)
+    preprocessed_modules = COCOA.extract_concordance_modules(preprocessed_conc)
+
+    # We compare high-level equivalence, not exact intermediate reaction IDs.
+    @test length(expanded_modules) == 4
+    @test length(preprocessed_modules) == 4
+
+    expanded_k = kinetic_analysis(expanded_modules, expanded_model; min_module_size=1, efficient=false)
+    preprocessed_k = kinetic_analysis(preprocessed_modules, preprocessed_model; min_module_size=1, efficient=false)
+
+    @test length(expanded_k.kinetic_modules) == 5
+    @test length(preprocessed_k.kinetic_modules) == 5
+    @test length(expanded_k.kinetic_modules[1]) == 9
+    @test length(preprocessed_k.kinetic_modules[1]) == 9
+    @test :Yp in expanded_k.acr_metabolites
+    @test :Yp in preprocessed_k.acr_metabolites
+    @test length(expanded_k.acrr_pairs) == 15
+    @test length(preprocessed_k.acrr_pairs) == 15
+end
+
