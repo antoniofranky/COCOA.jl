@@ -6,7 +6,7 @@
 
 ## Overview
 
-COCOA.jl identifies **concordant complexes** in biochemical networks - pairs of complexes that maintain constant activity ratios across all feasible steady states. This property can then be used for the identificaion kinetic modules and metabolites exhibiting absolute concentration robustness (ACR) or pairs of metabolites with absolute concentration ratio robustness (ACRR).
+COCOA.jl identifies **concordant complexes** in biochemical networks - pairs of complexes that maintain constant activity ratios across all feasible steady states. This property can then be used for the identification of kinetic modules and metabolites exhibiting absolute concentration robustness (ACR) or pairs of metabolites with absolute concentration ratio robustness (ACRR).
 ## Installation
 
 ```julia
@@ -48,7 +48,7 @@ model_processed = model_canon |>
 results = activity_concordance_analysis(
     model_processed;
     optimizer=HiGHS.Optimizer,
-    objective_bound=COBREXA.relative_tolerance_bound(0.999)
+    objective_bound=COBREXA.relative_tolerance_bound(0.999),
     kinetic_analysis=true # false, if you only want concordance modules
 )
 ```
@@ -87,52 +87,109 @@ results = activity_concordance_analysis(
     seed=1234,                       # Random seed for reproducibility
 
     # Additional analysis
-    kinetic_analysis=true            # Identify ACR metabolites and modules
+    kinetic_analysis=true,           # Identify ACR metabolites and modules
+    detailed_results=false           # Include activity ranges, lambda, and lambda_pairs table
 )
 ```
 
 ## Results Structure
 
-The `ConcordanceResults` object contains:
+`activity_concordance_analysis` returns a NamedTuple of columnar tables that can be converted to DataFrames:
 
 ```julia
-# Core results
-results.concordance_matrix        # Sparse matrix: 0=non-concordant, 1=concordant,
-                                  # 2=trivially concordant, 3=balanced, 4=trivially balanced
-results.activity_ranges           # Min/max activity for each complex
-results.concordance_modules       # Module assignment for each complex
-results.lambda_dict              # Activity ratios for concordant pairs
-
-# Kinetic analysis (if enabled)
-results.kinetic_modules          # Kinetic module assignments
-results.interface_reactions      # Interface reactions between modules
-results.acr_metabolites         # ACR metabolite candidates
-
-# Statistics and diagnostics
-results.stats                    # Comprehensive analysis metrics
+using DataFrames
+df_complexes = DataFrame(result.complexes)   # one row per complex
+df_acr       = DataFrame(result.acr)         # ACR metabolites
+df_acrr      = DataFrame(result.acrr)        # ACRR metabolite pairs
 ```
 
-### Key Statistics
+### `result.complexes`
+
+One row per complex in the model (order matches `COCOA.complex_stoichiometry(model)`):
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `complex_id` | `String` | Complex identifier |
+| `concordance_module` | `Int` | Module ID: `0` = balanced, `-1` = singleton, positive = module index |
+| `kinetic_module` | `Int` | Kinetic module ID (`0` = not assigned; requires `kinetic_analysis=true`) |
+| `classification` | `String` | `"balanced"`, `"positive"`, `"negative"`, or `"unrestricted"` |
+
+### `result.acr`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `metabolite_id` | `String` | ID of an ACR metabolite candidate (requires `kinetic_analysis=true`) |
+
+### `result.acrr`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `metabolite_1` | `String` | First metabolite of an ACRR pair (requires `kinetic_analysis=true`) |
+| `metabolite_2` | `String` | Second metabolite of an ACRR pair |
+
+### Detailed results (`detailed_results=true`)
+
+Pass `detailed_results=true` to include additional columns in `result.complexes` and an extra `result.lambda_pairs` table:
 
 ```julia
-stats = results.stats
+result = activity_concordance_analysis(model; optimizer=HiGHS.Optimizer, detailed_results=true)
+```
 
+Additional columns in `result.complexes`:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `min_activity` | `Float64` | Minimum activity across feasible steady states |
+| `max_activity` | `Float64` | Maximum activity across feasible steady states |
+| `lambda` | `Float64` | Activity ratio relative to the first complex in the concordance module (`1.0` for balanced; `NaN` for singletons) |
+| `trivially_balanced` | `Bool` | Whether the complex is trivially balanced |
+
+Additional table `result.lambda_pairs` — directly measured pairwise lambda values:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `complex_1` | `String` | First complex in the concordant pair |
+| `complex_2` | `String` | Second complex in the concordant pair |
+| `lambda` | `Float64` | Measured activity ratio `λ(complex_1, complex_2)` |
+
+`result.stats` — a `Dict{String,Any}` with comprehensive analysis metrics:
+
+```julia
 # Model information
-stats["n_complexes"]             # Total complexes
-stats["n_reactions"]             # Total reactions (after splitting)
-stats["n_metabolites"]           # Total metabolites
-stats["n_balanced"]              # Balanced complexes
+result.stats["n_complexes"]                       # Total complexes
+result.stats["n_reactions"]                       # Total reactions (after splitting)
+result.stats["n_metabolites"]                     # Total metabolites
+result.stats["n_balanced"]                        # Balanced complexes
+result.stats["n_trivially_balanced"]              # Trivially balanced complexes
 
 # Concordance results
-stats["n_concordant_pairs"]      # Total concordant pairs
-stats["n_trivial_pairs"]         # Trivially concordant pairs
-stats["n_non_concordant_pairs"]  # Non-concordant pairs
-stats["n_modules"]               # Concordance modules found
+result.stats["n_concordant_total"]                # Total concordant pairs
+result.stats["n_concordant_opt"]                  # Pairs found by optimization
+result.stats["n_concordant_inferred"]             # Pairs inferred via transitivity
+result.stats["n_trivially_concordant"]            # Trivially concordant pairs
+result.stats["n_trivial_pairs"]                   # Trivially concordant pairs (pre-optimization)
+result.stats["n_non_concordant_pairs"]            # Non-concordant pairs
+result.stats["n_concordance_modules"]             # Concordance modules found
+result.stats["n_candidate_pairs"]                 # Pairs tested by optimization
 
-# Processing information
-stats["batches_completed"]       # Optimization batches run
-stats["elapsed_time"]            # Total analysis time (seconds)
-stats["n_total_optimizations"]   # Total LP/QP solves
+# Error accounting
+result.stats["n_timeout_pairs"]                   # Pairs that timed out
+result.stats["n_infeasible_or_unbounded_pairs"]   # Infeasible or unbounded pairs
+result.stats["n_numerical_error_pairs"]           # Numerical error pairs
+
+# Performance
+result.stats["batches_completed"]                 # Optimization batches run
+result.stats["n_total_optimizations"]             # Total LP solves
+result.stats["elapsed_time"]                      # Total analysis time (seconds)
+result.stats["n_workers"]                         # Workers used
+
+# Algorithm parameters
+result.stats["concordance_tolerance"]
+result.stats["balanced_threshold"]
+result.stats["cv_threshold"]
+result.stats["batch_size"]
+result.stats["use_transitivity"]
+result.stats["seed"]
 ```
 
 ## Preprocessing Functions
@@ -238,6 +295,10 @@ For parallel optimizations use the Distributed.jl package.
 
 
 ## Requirements
+
+- Julia ≥ 1.12
+- A supported LP solver (e.g. [HiGHS.jl](https://github.com/jump-dev/HiGHS.jl))
+- Metabolic models loadable via [AbstractFBCModels.jl](https://github.com/COBREXA/AbstractFBCModels.jl) (e.g. SBML via SBMLFBCModels.jl)
 
 
 ## Citation

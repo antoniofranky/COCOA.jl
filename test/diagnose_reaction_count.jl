@@ -25,16 +25,16 @@ println("  Reactions: $(length(model.reactions))")
 println("  Metabolites: $(length(model.metabolites))")
 
 # Step by step
-COCOA.normalize_bounds!(model)
-println("\nAfter normalize_bounds!:")
+model = COCOA.normalize_bounds(model)
+println("\nAfter normalize_bounds:")
 println("  Reactions: $(length(model.reactions))")
 
-COCOA.remove_orphans!(model)
-println("\nAfter remove_orphans!:")
+model = COCOA.remove_orphans(model)
+println("\nAfter remove_orphans:")
 println("  Reactions: $(length(model.reactions))")
 
-COCOA.remove_blocked_reactions!(model, optimizer=HiGHS.Optimizer)
-println("\nAfter remove_blocked_reactions!:")
+model, _ = COCOA.remove_blocked_reactions(model, optimizer=HiGHS.Optimizer)
+println("\nAfter remove_blocked_reactions:")
 println("  Reactions: $(length(model.reactions))")
 
 model_elem = COCOA.split_into_elementary_steps(model, random=0.0)

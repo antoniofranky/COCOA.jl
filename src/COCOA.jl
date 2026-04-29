@@ -89,9 +89,9 @@ include("preprocessing/irreversible_splitting.jl")
 # Export preprocessing functions
 export split_into_elementary
 export split_into_irreversible
-export find_blocked_reactions, remove_blocked_reactions!, remove_blocked_reactions
-export normalize_bounds!, normalize_bounds
-export remove_orphans!, remove_orphans
+export find_blocked_reactions, remove_blocked_reactions
+export normalize_bounds
+export remove_orphans
 
 
 # Export main analysis functions

@@ -877,7 +877,7 @@ function to_namedtuple(results::ConcordanceResults; detailed::Bool=false)
         end
         lambda_pairs = (complex_1 = c1_vec, complex_2 = c2_vec, lambda = lam_vec)
 
-        return (complexes=complexes, acr=acr, acrr=acrr, lambda_pairs=lambda_pairs)
+        return (complexes=complexes, acr=acr, acrr=acrr, lambda_pairs=lambda_pairs, stats=results.stats)
     end
 
     # Layer 1: minimal — no copies, ConcordanceResults is discarded after this
