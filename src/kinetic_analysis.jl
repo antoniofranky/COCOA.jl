@@ -706,23 +706,22 @@ A terminal SCC has no complex that converts to any complex outside the SCC
 (but still within the current set of complexes being considered).
 """
 function is_terminal_scc_idx(scc::Set{Int}, all_complexes::Set{Int}, A_matrix::SparseArrays.SparseMatrixCSC{Int,Int})
-    # Check if any complex in SCC has outgoing edge to another complex in the
-    # reduced graph (all_complexes) that is outside this SCC.
+    # An SCC is globally terminal iff no complex in it has any outgoing edge to a
+    # complex outside the SCC in the FULL graph (Remark S2-1: terminal classification
+    # uses the full network, not the reduced subgraph).
     for cidx in scc
         for rxn_idx in SparseArrays.findnz(A_matrix[cidx, :])[1]
             if A_matrix[cidx, rxn_idx] < 0  # Complex is substrate
-                # Check products
                 products = SparseArrays.findnz(A_matrix[:, rxn_idx])[1]
                 for pidx in products
-                    if A_matrix[pidx, rxn_idx] > 0 && pidx ∈ all_complexes && pidx ∉ scc
+                    if A_matrix[pidx, rxn_idx] > 0 && pidx ∉ scc
                         @debug "SCC contains complex $cidx which converts (via rxn $rxn_idx) to $pidx outside SCC → NON-TERMINAL"
-                        return false  # Has edge outside SCC
+                        return false
                     end
                 end
             end
         end
     end
-
     return true
 end
 
@@ -792,13 +791,15 @@ function tarjan_scc_cached(complexes::Set{Int}, cached_adj::CachedAdjacency)
 end
 
 """
-Check if SCC is terminal using cached adjacency (optimized version).
+Check if SCC is globally terminal using cached adjacency (optimized version).
+An SCC is globally terminal iff no complex in it converts to any complex outside
+the SCC in the full graph (Remark S2-1: terminal classification uses the full network).
 """
 function is_terminal_scc_cached(scc::Set{Int}, all_complexes::Set{Int}, cached_adj::CachedAdjacency)
     @inbounds for cidx in scc
         for neighbor in cached_adj.out_neighbors[cidx]
-            if neighbor ∈ all_complexes && neighbor ∉ scc
-                return false  # Has edge outside SCC
+            if neighbor ∉ scc
+                return false  # Has edge outside SCC in full graph → non-terminal
             end
         end
     end
@@ -1479,17 +1480,41 @@ function robust_rank(M::AbstractMatrix; tolerance::Float64=1e-10)
         return 0
     end
 
-    # Use SVD for robust rank computation
-    svd_result = LinearAlgebra.svd(M)
-    max_sv = maximum(svd_result.S)
-
-    if max_sv < tolerance
+    # Guard against malformed inputs that can break LAPACK routines.
+    if any(!isfinite, M)
+        @warn "robust_rank received non-finite values; treating as rank 0"
         return 0
     end
 
-    # Count singular values above relative tolerance
-    threshold = tolerance * max_sv
-    return count(s -> s > threshold, svd_result.S)
+    # Prefer SVD for robust rank computation; fall back to QR if SVD fails.
+    try
+        svd_result = LinearAlgebra.svd(M)
+        max_sv = maximum(svd_result.S)
+
+        if max_sv < tolerance
+            return 0
+        end
+
+        # Count singular values above relative tolerance.
+        threshold = tolerance * max_sv
+        return count(s -> s > threshold, svd_result.S)
+    catch e
+        @warn "SVD failed in robust_rank; falling back to QR-based rank" exception = e
+
+        # QR fallback is less robust than SVD on ill-conditioned matrices,
+        # but avoids hard failures for large/problematic instances.
+        try
+            _, R = LinearAlgebra.qr(M)
+            r_diag = abs.(LinearAlgebra.diag(R))
+            isempty(r_diag) && return 0
+            max_r = maximum(r_diag)
+            max_r < tolerance && return 0
+            return count(x -> x > tolerance * max_r, r_diag)
+        catch e2
+            @warn "QR fallback also failed in robust_rank; returning 0" exception = e2
+            return 0
+        end
+    end
 end
 
 """

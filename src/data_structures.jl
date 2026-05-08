@@ -37,7 +37,7 @@ mutable struct ConcordanceTracker
     # BitVector-based boolean flags for memory-efficient tracking (8x memory reduction)
     # These are optional and only allocated when needed for large-scale analyses
     balanced_mask::Union{BitVector,Nothing}     # Tracks balanced complexes
-    positive_mask::Union{BitVector,Nothing}     # Tracks positive-only complexes  
+    positive_mask::Union{BitVector,Nothing}     # Tracks positive-only complexes
     negative_mask::Union{BitVector,Nothing}     # Tracks negative-only complexes
     unrestricted_mask::Union{BitVector,Nothing} # Tracks unrestricted complexes
     processed_mask::Union{BitVector,Nothing}    # Tracks which complexes have been processed
@@ -282,7 +282,7 @@ end
 """
     ensure_mask_allocated!(tracker::ConcordanceTracker, mask_type::Symbol)
 
-Ensure that the specified BitVector mask is allocated. 
+Ensure that the specified BitVector mask is allocated.
 Mask types: :balanced, :positive, :negative, :unrestricted, :processed
 """
 function ensure_mask_allocated!(tracker::ConcordanceTracker, mask_type::Symbol)
@@ -368,7 +368,7 @@ Get a boolean flag for a specific complex. Returns false if mask is not allocate
 end
 
 # ========================================================================================
-# Memory-Efficient Sparse Data Structures  
+# Memory-Efficient Sparse Data Structures
 # ========================================================================================
 
 """
@@ -796,10 +796,10 @@ function to_namedtuple(results::ConcordanceResults; detailed::Bool=false)
     acr_mets = results.acr_metabolites === nothing ? Symbol[] : results.acr_metabolites
     acrr_ps = results.acrr_pairs === nothing ? Tuple{Symbol,Symbol}[] : results.acrr_pairs
 
-    acr = (metabolite_id = String.(acr_mets),)
+    acr = (metabolite_id=String.(acr_mets),)
     acrr = (
-        metabolite_1 = String[String(p[1]) for p in acrr_ps],
-        metabolite_2 = String[String(p[2]) for p in acrr_ps],
+        metabolite_1=String[String(p[1]) for p in acrr_ps],
+        metabolite_2=String[String(p[2]) for p in acrr_ps],
     )
 
     if detailed
@@ -855,14 +855,14 @@ function to_namedtuple(results::ConcordanceResults; detailed::Bool=false)
         end
 
         complexes = (
-            complex_id         = String.(results.complex_ids),
-            concordance_module = results.concordance_modules,
-            kinetic_module     = km,
-            classification     = classification,
-            min_activity       = min_activity,
-            max_activity       = max_activity,
-            lambda             = lambda_vec,
-            trivially_balanced = Vector{Bool}(trivially_balanced_vec),
+            complex_id=String.(results.complex_ids),
+            concordance_module=results.concordance_modules,
+            kinetic_module=km,
+            classification=classification,
+            min_activity=min_activity,
+            max_activity=max_activity,
+            lambda=lambda_vec,
+            trivially_balanced=Vector{Bool}(trivially_balanced_vec),
         )
 
         # Sparse lambda pairs from lambda_dict
@@ -875,17 +875,44 @@ function to_namedtuple(results::ConcordanceResults; detailed::Bool=false)
             c2_vec[k] = String(results.complex_ids[pair[2]])
             lam_vec[k] = lam
         end
-        lambda_pairs = (complex_1 = c1_vec, complex_2 = c2_vec, lambda = lam_vec)
+        lambda_pairs = (complex_1=c1_vec, complex_2=c2_vec, lambda=lam_vec)
 
-        return (complexes=complexes, acr=acr, acrr=acrr, lambda_pairs=lambda_pairs, stats=results.stats)
+        # All concordant pairs with their ConcordanceType, extracted from the
+        # upper-triangular concordance_matrix.  Encoding mirrors MATLAB's CC:
+        #   Concordant (1)          ↔  CC(i,j) =  2  (non-trivially concordant)
+        #   Trivially_concordant(2) ↔  CC(i,j) = -1  (trivially concordant)
+        #   Balanced (3)            ↔  CC(i,i) =  1  (balanced, diagonal)
+        #   Trivially_balanced (4)  ↔  CC(i,i) =  1  (trivially balanced, diagonal)
+        let mat = results.concordance_matrix
+            ci_rows, ci_cols, ci_vals = SparseArrays.findnz(mat)
+            n_cx_pairs = length(ci_rows)
+            cp_c1 = Vector{String}(undef, n_cx_pairs)
+            cp_c2 = Vector{String}(undef, n_cx_pairs)
+            cp_type = Vector{Int}(undef, n_cx_pairs)
+            cp_diagonal = Vector{Bool}(undef, n_cx_pairs)
+            for k in 1:n_cx_pairs
+                cp_c1[k] = String(results.complex_ids[ci_rows[k]])
+                cp_c2[k] = String(results.complex_ids[ci_cols[k]])
+                cp_type[k] = ci_vals[k]   # raw ConcordanceType integer
+                cp_diagonal[k] = ci_rows[k] == ci_cols[k]
+            end
+            concordance_pairs = (
+                complex_1=cp_c1,
+                complex_2=cp_c2,
+                concordance_type=cp_type,   # 1=Concordant 2=Trivially_concordant 3=Balanced 4=Trivially_balanced
+                is_diagonal=cp_diagonal,
+            )
+            return (complexes=complexes, acr=acr, acrr=acrr,
+                lambda_pairs=lambda_pairs, concordance_pairs=concordance_pairs)
+        end
     end
 
     # Layer 1: minimal — no copies, ConcordanceResults is discarded after this
     complexes = (
-        complex_id         = String.(results.complex_ids),
-        concordance_module = results.concordance_modules,
-        kinetic_module     = km,
-        classification     = classification,
+        complex_id=String.(results.complex_ids),
+        concordance_module=results.concordance_modules,
+        kinetic_module=km,
+        classification=classification,
     )
 
     return (complexes=complexes, acr=acr, acrr=acrr)

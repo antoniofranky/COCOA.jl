@@ -432,6 +432,33 @@ include("envz_ompr_model.jl")
         println("✓ Architecture integration validated!")
     end
 
+    @testset "Robust Rank Fallback Safety" begin
+        # Non-finite values should not crash SVD/QR rank estimation.
+        bad_matrix = [1.0 NaN; 2.0 3.0]
+        @test COCOA.robust_rank(bad_matrix) == 0
+
+        # Sanity check on a rank-deficient finite matrix.
+        rank_def_matrix = [1.0 2.0; 2.0 4.0; 3.0 6.0]
+        @test COCOA.robust_rank(rank_def_matrix) == 1
+    end
+
+    @testset "Efficient False Stability" begin
+        model = create_envz_ompr_model()
+        concordance_modules = [
+            Set([:XD, :XT, :XpY, :XTYp, :XDYp]),
+            Set([:X, :Xp, Symbol("Xp+Y"), Symbol("X+Yp")]),
+            Set([Symbol("XT+Yp"), Symbol("XT+Y")]),
+            Set([Symbol("XD+Yp"), Symbol("XD+Y")]),
+        ]
+
+        # Explicit regression check for the full (matrix/deficiency) path.
+        res = kinetic_analysis(concordance_modules, model; efficient=false, min_module_size=1)
+        @test haskey(res, :kinetic_modules)
+        @test haskey(res, :acr_metabolites)
+        @test haskey(res, :acrr_pairs)
+        @test length(res.kinetic_modules) == 5
+    end
+
 end # end of testset "COCOA.jl - EnvZ-OmpR Paper Validation"
 
 # Run the stricter paper example validation suite as part of default tests.
