@@ -22,7 +22,8 @@ For optimal results, preprocess your model following the recommended workflow:
 ```julia
 import COBREXA
 import SBMLFBCModels
-# For parallel optimizations us Distributed
+import AbstractFBCModels as A
+# For parallel optimizations use Distributed
 using Distributed
 # You can add a maximum of n-1 processes, where n is the number of available cores (one process is the main process already running, here n=16)
 
@@ -31,10 +32,10 @@ addprocs(15)
 #Load required packages on worker processes 
 @everywhere using HiGHS, COCOA
 
-# Load model
-model = COBREXA.load_model("ecoli_core.xml")
+# Load the bundled example model (resolves to the copy shipped with COCOA.jl)
+model = COBREXA.load_model(joinpath(pkgdir(COCOA), "test", "e_coli_core.xml"))
 
-model_canon = convert(A.CanonicalModel.Model,model)
+model_canon = convert(A.CanonicalModel.Model, model)
 
 # Recommended preprocessing pipeline for kinetic module analysis (immutable - preserves original)
 model_processed = model_canon |>
@@ -72,10 +73,10 @@ results = activity_concordance_analysis(
     # Objective constraint
     objective_bound=COBREXA.relative_tolerance_bound(0.999),
 
-    # Analysis parameters
-    concordance_tolerance=1e-7,      # Tolerance for concordance detection
-    balanced_threshold=1e-8,         # Threshold for balanced complexes
-    cv_threshold=1e-7,               # Coefficient of variation filtering
+    # Analysis parameters (values shown are the defaults)
+    concordance_tolerance=0.01,      # Tolerance for concordance detection
+    balanced_threshold=1e-7,         # Threshold for balanced complexes
+    cv_threshold=0.01,               # Coefficient of variation filtering
 
     # Performance settings
     batch_size=50_000,               # Candidates per optimization batch
@@ -83,14 +84,21 @@ results = activity_concordance_analysis(
     use_transitivity=true,           # Exploit transitivity to reduce tests
 
     # Sampling configuration
-    sample_size=100,                 # Samples for CV estimation
-    seed=1234,                       # Random seed for reproducibility
+    sample_size=1000,                # Samples for CV estimation
+    seed=UInt(1234),                 # Random seed (deterministic by default)
 
     # Additional analysis
     kinetic_analysis=true,           # Identify ACR metabolites and modules
+    kinetic_efficient=true,          # Fast ACR/ACRR path (see note below)
     detailed_results=false           # Include activity ranges, lambda, and lambda_pairs table
 )
 ```
+
+> **ACR/ACRR detection completeness.** `kinetic_efficient=true` (the default) uses a fast pairwise
+> search that scales to genome-scale networks, but it is inherently *less exhaustive* than the full
+> matrix/deficiency path and can under-report ACR metabolites / ACRR pairs. We have confirmed it under-reports on the
+> EnvZ-OmpR example (verified against the analytically known result); the exhaustive path. Pass `kinetic_efficient=false` whenever exhaustive
+> ACR/ACRR detection matters more than runtime.
 
 ## Results Structure
 
@@ -287,12 +295,55 @@ model_irreversible = split_into_irreversible(model)
 
 ### Parallelization
 
-For parallel optimizations use the Distributed.jl package.
+Concordance testing scales with the number of available worker processes. Add workers with
+`Distributed.jl` **before** loading `COCOA` on the workers, then pass `workers=workers()` to the
+analysis:
 
 ```julia
+using Distributed
+addprocs(15)                         # n-1 workers, where n = number of physical cores
+@everywhere using HiGHS, COCOA
 
+results = activity_concordance_analysis(
+    model_processed;
+    optimizer=HiGHS.Optimizer,
+    workers=workers(),               # distribute LP solves across all workers
+    kinetic_analysis=true,
+)
 ```
 
+
+## Calling COCOA.jl from Python
+
+COCOA.jl can be driven from Python through [JuliaCall](https://github.com/JuliaPy/PythonCall.jl).
+
+```bash
+pip install juliacall
+```
+
+```python
+from juliacall import Main as jl
+
+jl.seval("import Pkg")
+for pkg in ("COCOA", "COBREXA", "HiGHS", "SBMLFBCModels", "AbstractFBCModels"):
+    jl.seval(f'haskey(Pkg.project().dependencies, "{pkg}") || Pkg.add("{pkg}")')
+
+jl.seval("import COBREXA; import SBMLFBCModels; import AbstractFBCModels as A")
+jl.seval("using HiGHS, COCOA")
+
+jl.seval('model = COBREXA.load_model(joinpath(pkgdir(COCOA), "test", "e_coli_core.xml"))')
+jl.seval("model_canon = convert(A.CanonicalModel.Model, model)")
+result = jl.seval("activity_concordance_analysis(model_canon; optimizer=HiGHS.Optimizer, kinetic_analysis=true)")
+
+print("ACR metabolites:", list(result.acr.metabolite_id))
+```
+
+A complete, runnable script (with preprocessing) is in
+[`examples/python_quickstart.py`](examples/python_quickstart.py).
+
+> **Clean shutdown.** Let the Python process return normally rather than calling `os._exit()` while
+> Julia objects are still alive — forcing an abrupt teardown can trigger a *bus error* as the Julia
+> GC finalizers run against an already–torn-down runtime.
 
 ## Requirements
 
@@ -305,8 +356,18 @@ For parallel optimizations use the Distributed.jl package.
 
 If you use COCOA.jl in your research, please cite:
 
+```bibtex
+@article{Schaffranke2026COCOA,
+  author  = {Schaffranke, Anton and K{\"u}ken, Anika and Nikoloski, Zoran},
+  title   = {COCOA.jl: A Julia package for high-performance analysis of concordance and kinetic modules in biochemical networks},
+  journal = {Bioinformatics},
+  year    = {2026},
+  note    = {In revision}
+}
 ```
-```
+
+An archival snapshot of the code is available on Zenodo: <!-- DOI-PLACEHOLDER: replace after minting the Zenodo release (WP4) -->
+[DOI pending].
 
 ## License
 
@@ -318,3 +379,7 @@ Contributions are welcome! Please feel free to submit issues or pull requests.
 
 ## References
 
+- Küken, A., Langary, D. and Nikoloski, Z. (2022) The hidden simplicity of metabolic networks is revealed by multireaction dependencies. *Sci. Adv.*, **8**, eabl6962. https://doi.org/10.1126/sciadv.abl6962
+- Langary, D., Küken, A. and Nikoloski, Z. (2025) Kinetic modules are sources of concentration robustness in biochemical networks. *Sci. Adv.*, **11**, eads7269. https://doi.org/10.1126/sciadv.ads7269
+- Kratochvíl, M., Wilken, S.E., Ebenhöh, O., Schneider, R. and Satagopam, V.P. (2025) COBREXA 2: tidy and scalable construction of complex metabolic models. *Bioinformatics*, **41**, btaf056. https://doi.org/10.1093/bioinformatics/btaf056
+- Kaufman, D.E. and Smith, R.L. (1998) Direction choice for accelerated convergence in hit-and-run sampling. *Oper. Res.*, **46**, 84–95. https://doi.org/10.1287/opre.46.1.84

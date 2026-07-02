@@ -505,13 +505,14 @@ results = activity_concordance_analysis(
 ```
 
 ## Analysis Parameters
-- `concordance_tolerance::Float64=NaN`: Tolerance for concordance detection
-- `balanced_threshold::Float64=NaN`: Threshold for balanced complex detection
-- `cv_threshold::Float64=NaN`: Coefficient of variation threshold for filtering
+- `concordance_tolerance::Float64=0.01`: Tolerance for concordance detection
+- `balanced_threshold::Float64=1e-7`: Threshold for balanced complex detection
+- `cv_threshold::Float64=0.01`: Coefficient of variation threshold for candidate filtering
 - `cv_epsilon::Float64=1e-16`: Small value added to avoid division by zero in CV calculation
 - `sample_size::Int=1000`: Number of samples for coefficient of variation estimation
 - `min_valid_samples::Int=10`: Minimum valid samples required for CV calculation
-- `seed::UInt=rand(UInt)`: Random seed for reproducible sampling (pass a fixed value, e.g. `UInt(42)`, for deterministic results)
+- `seed::UInt=UInt(1234)`: Random seed for reproducible sampling. The analysis is deterministic by
+  default; pass a different value to assess seed sensitivity.
 
 ## Performance Settings
 - `batch_size::Int=50_000`: Number of candidate pairs processed per batch
@@ -565,7 +566,7 @@ function activity_concordance_analysis(
     sample_size::Int=1000,
     batch_size::Int=50_000,
     min_valid_samples::Int=10,
-    seed::UInt=rand(UInt),
+    seed::UInt=UInt(1234),
     use_unidirectional_constraints::Bool=false,
     use_transitivity::Bool=true,
     n_burnin::Int=50,

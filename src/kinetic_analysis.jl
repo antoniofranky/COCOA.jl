@@ -67,6 +67,83 @@ function build_cached_adjacency(A_matrix::SparseArrays.SparseMatrixCSC, n_comple
 end
 
 """
+    ZERO_COMPLEX
+
+Symbol identifying the zero complex ∅ used to represent the empty side of
+boundary/exchange reactions in the kinetic-module graph (see [`augment_with_zero_complex`](@ref)).
+Never appears in a concordance module and is excluded from all reported kinetic
+modules, so it never surfaces to callers.
+"""
+const ZERO_COMPLEX = Symbol("∅")
+
+"""
+    augment_with_zero_complex(A_matrix, Y_matrix, complex_ids)
+
+Add the zero complex ∅ (standard in CRN theory) to the kinetic-module graph and
+connect every boundary reaction to it:
+- inflow  (has products, no substrate complex): edge ∅ → product  (∅ is substrate, `A[∅,r] = -1`)
+- outflow (has substrate, no product complex):  edge substrate → ∅ (∅ is product,  `A[∅,r] = +1`)
+
+Without ∅, boundary metabolite complexes (e.g. an exchanged extracellular metabolite
+produced only by `∅ → met[e]`) have no in-neighbor, so Phase I of
+[`upstream_algorithm`](@ref) never prunes them as entry complexes. Being balanced,
+they then get injected into every extended module and
+[`merge_coupled_sets_tracked`](@ref)'s shared-complex trivial-merge step glues all
+concordance modules into one giant kinetic module, producing spurious ACR/ACRR pairs
+(confirmed against the MATLAB reference, which does represent boundary reactions via
+an explicit zero complex).
+
+∅ itself never appears in a concordance module (it is not part of network topology
+known to the concordance step), so `upstream_algorithm` never returns it as a member
+of an upstream set — it only participates as a graph node used to correctly prune
+neighbors. It therefore requires no special-casing in ACR/ACRR reporting or module
+output.
+
+Returns `(A_aug, Y_aug, complex_ids_aug)` with one extra row/column appended for ∅.
+"""
+function augment_with_zero_complex(
+    A_matrix::SparseArrays.SparseMatrixCSC,
+    Y_matrix::SparseArrays.AbstractSparseMatrix,
+    complex_ids::Vector{Symbol}
+)
+    n_complexes, n_reactions = size(A_matrix)
+    zero_idx = n_complexes + 1
+
+    I, J, V = SparseArrays.findnz(A_matrix)
+    I2 = collect(I)
+    J2 = collect(J)
+    V2 = collect(V)
+
+    vals = SparseArrays.nonzeros(A_matrix)
+    for r in 1:n_reactions
+        has_substrate = false
+        has_product = false
+        for idx in SparseArrays.nzrange(A_matrix, r)
+            v = vals[idx]
+            v < 0 && (has_substrate = true)
+            v > 0 && (has_product = true)
+        end
+        if has_product && !has_substrate
+            # Inflow: ∅ -> product, so ∅ is the substrate (A[∅,r] = -1)
+            push!(I2, zero_idx)
+            push!(J2, r)
+            push!(V2, -1)
+        elseif has_substrate && !has_product
+            # Outflow: substrate -> ∅, so ∅ is the product (A[∅,r] = +1)
+            push!(I2, zero_idx)
+            push!(J2, r)
+            push!(V2, 1)
+        end
+    end
+
+    A_aug = SparseArrays.sparse(I2, J2, V2, zero_idx, n_reactions)
+    Y_aug = hcat(Y_matrix, SparseArrays.spzeros(size(Y_matrix, 1), 1))
+    complex_ids_aug = vcat(complex_ids, [ZERO_COMPLEX])
+
+    return A_aug, Y_aug, complex_ids_aug
+end
+
+"""
     kinetic_analysis(concordance_modules, model; min_module_size=1, known_acr=Symbol[], efficient=true)
 
 Apply kinetic module analysis using set-based concordance module structure.
@@ -86,6 +163,11 @@ Implements the iterative refinement algorithm from Section S.4.1 with three feed
 - `efficient`: Boolean flag for performance optimization (default: `true`)
     - `true`: Fast pairwise ACR/ACRR detection, trivial merging only (no matrix inversions/rank checks).
     - `false`: Full analysis including matrix-based ACR/ACRR, Proposition S3-4 advanced merging, and deficiency checks.
+    !!! note "Completeness vs. speed"
+        The fast path (`efficient=true`) scales to genome-scale networks but is inherently a less
+        exhaustive search than the full matrix/deficiency path, and can under-report ACR
+        metabolites / ACRR pairs. Use `efficient=false`
+        whenever exhaustive detection matters more than runtime.
 
 # Returns
 - `Vector{Set{Symbol}}`: Kinetic modules (sets of complex IDs), sorted by size (largest first)
@@ -125,6 +207,12 @@ function kinetic_analysis(
     # Extract network topology and build ID mappings ONCE
     A_matrix, complex_ids = incidence(model; return_ids=true)
     Y_matrix, metabolite_ids, _ = complex_stoichiometry(model; return_ids=true)
+
+    # Augment with the zero complex ∅ so boundary/exchange reactions have an explicit
+    # in- or out-neighbor. Without this, boundary complexes are never pruned by Phase I
+    # of the upstream algorithm and spuriously glue concordance modules together (see
+    # `augment_with_zero_complex` docstring). ∅ never appears in the returned modules.
+    A_matrix, Y_matrix, complex_ids = augment_with_zero_complex(A_matrix, Y_matrix, complex_ids)
 
     # Build mappings once and reuse throughout
     complex_to_idx = Dict{Symbol,Int}(id => i for (i, id) in enumerate(complex_ids))

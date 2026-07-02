@@ -742,15 +742,18 @@ via `DataFrame(result.complexes)`, without requiring DataFrames as a dependency 
 
 # Layer 1 (default)
 
-Returns `(complexes, acr, acrr)` where:
+Returns `(complexes, acr, acrr, stats)` where:
 - `complexes`: per-complex table with `complex_id`, `concordance_module`, `kinetic_module`, `classification`
 - `acr`: table of ACR metabolite IDs
 - `acrr`: table of ACRR metabolite pairs
+- `stats`: `Dict{String,Any}` of analysis metrics (complex/reaction counts, concordance-pair
+  accounting, timing, and the algorithm parameters actually used)
 
 # Layer 2 (`detailed=true`)
 
 Additionally includes per-complex `min_activity`, `max_activity`, `lambda`, `trivially_balanced`
-in the complexes table, plus a `lambda_pairs` table of directly-measured pairwise lambda values.
+in the complexes table, plus a `lambda_pairs` table of directly-measured pairwise lambda values and a
+`concordance_pairs` table. `stats` is included in both layers.
 
 Per-complex `lambda` is relative to the first complex in each concordance module (reference = 1.0).
 Lambda is multiplicatively transitive: `lambda(a,b) = lambda_a / lambda_b`.
@@ -883,7 +886,7 @@ function to_namedtuple(results::ConcordanceResults; detailed::Bool=false)
         #   Trivially_concordant(2) ↔  CC(i,j) = -1  (trivially concordant)
         #   Balanced (3)            ↔  CC(i,i) =  1  (balanced, diagonal)
         #   Trivially_balanced (4)  ↔  CC(i,i) =  1  (trivially balanced, diagonal)
-        let mat = results.concordance_matrix
+        let mat = SparseArrays.sparse(results.concordance_matrix)
             ci_rows, ci_cols, ci_vals = SparseArrays.findnz(mat)
             n_cx_pairs = length(ci_rows)
             cp_c1 = Vector{String}(undef, n_cx_pairs)
@@ -903,7 +906,8 @@ function to_namedtuple(results::ConcordanceResults; detailed::Bool=false)
                 is_diagonal=cp_diagonal,
             )
             return (complexes=complexes, acr=acr, acrr=acrr,
-                lambda_pairs=lambda_pairs, concordance_pairs=concordance_pairs)
+                lambda_pairs=lambda_pairs, concordance_pairs=concordance_pairs,
+                stats=results.stats)
         end
     end
 
@@ -915,5 +919,5 @@ function to_namedtuple(results::ConcordanceResults; detailed::Bool=false)
         classification=classification,
     )
 
-    return (complexes=complexes, acr=acr, acrr=acrr)
+    return (complexes=complexes, acr=acr, acrr=acrr, stats=results.stats)
 end
