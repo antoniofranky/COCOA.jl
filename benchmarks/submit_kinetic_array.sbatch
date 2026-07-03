@@ -1,34 +1,31 @@
 #!/bin/bash
-#SBATCH --job-name=kin_fixed
+#SBATCH --job-name=kin_A
 #SBATCH --array=1-62
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=65536
 #SBATCH --time=04:00:00
-#SBATCH --output=/work/schaffran1/COCOA.jl/benchmarks/logs/kin_fixed_%A_%a.out
-#SBATCH --error=/work/schaffran1/COCOA.jl/benchmarks/logs/kin_fixed_%A_%a.out
+#SBATCH --output=/work/schaffran1/kinetic_rerun/logs/kinA_%A_%a.out
+#SBATCH --error=/work/schaffran1/kinetic_rerun/logs/kinA_%A_%a.out
+#SBATCH --mail-type=FAIL     # array: only email on a failed task (avoids 62 success mails)
+#SBATCH --mail-user=schaffran1@uni-potsdam.de   # <-- VERIFY: schaffran1 / schaffrank1 / schaffranke1 ?
 
-# Reruns the kinetic-analysis step of the 62-model benchmark with the
-# zero-complex fix (COCOA.jl branch: revision/zero-complex-fix). Resource
-# request matches the original pre-fix run (16 CPUs / 64 GB per task, see
-# application_note/kinetic/job_mapping_*.txt from the original run).
+# RUN A — recompute kinetic modules from COCOA's OWN concordance, WITH the zero-complex
+# fix (branch revision/zero-complex-fix). One array task per line of model_manifest.txt.
 #
-# Prerequisites on this machine:
-#   1. git clone (or pull) git@github.com:antoniofranky/COCOA.jl.git at
-#      /work/schaffran1/COCOA.jl, checked out to revision/zero-complex-fix
-#   2. Julia environment at /work/schaffran1/COCOA.jl/test instantiated
-#      (`julia --project=test -e 'using Pkg; Pkg.instantiate()'`) — this
-#      already has MATFBCModels, JLD2, HiGHS, GLPK etc.
-#   3. Concordance JLD2s already present at
-#      /work/schaffran1/application_note/results/matlab_preprocessed/concordance
-#      (unchanged by the fix — only the kinetic step needs rerunning)
-#   4. Elementary-step .mat models present at
-#      /work/schaffran1/Upstream_Algorithm/Models/models_with_elementary_steps
-#
-# Usage: sbatch submit_kinetic_array.sbatch
+# Prereqs (see CLUSTER_HANDOFF.md):
+#   - /work/schaffran1/COCOA.jl checked out to revision/zero-complex-fix
+#   - benchmark env instantiated at /work/schaffran1/kinetic_rerun/env
+#     (dev COCOA + MATFBCModels + JLD2 + HiGHS + AbstractFBCModels)
+#   - concordance JLD2s in       /work/schaffran1/kinetic_rerun/concordance
+#   - elementary .mat models in  /work/schaffran1/kinetic_rerun/models
 
-mkdir -p /work/schaffran1/COCOA.jl/benchmarks/logs
+export JULIA_DEPOT_PATH=/work/schaffran1/.julia
+export PATH=/work/schaffran1/.juliaup/bin:$PATH
+mkdir -p /work/schaffran1/kinetic_rerun/logs
 
-module load julia 2>/dev/null || true  # adjust to this cluster's module system if needed
+export CONC_DIR=/work/schaffran1/kinetic_rerun/concordance
+export MODEL_DIR=/work/schaffran1/kinetic_rerun/models
+export OUT_DIR=/work/schaffran1/kinetic_rerun/out_A
 
-julia -t "${SLURM_CPUS_PER_TASK}" --project=/work/schaffran1/COCOA.jl/test \
+julia -t "${SLURM_CPUS_PER_TASK}" --project=/work/schaffran1/kinetic_rerun/env \
     /work/schaffran1/COCOA.jl/benchmarks/run_kinetic_step.jl
