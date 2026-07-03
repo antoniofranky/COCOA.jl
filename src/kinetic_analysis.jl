@@ -67,83 +67,6 @@ function build_cached_adjacency(A_matrix::SparseArrays.SparseMatrixCSC, n_comple
 end
 
 """
-    ZERO_COMPLEX
-
-Symbol identifying the zero complex ∅ used to represent the empty side of
-boundary/exchange reactions in the kinetic-module graph (see [`augment_with_zero_complex`](@ref)).
-Never appears in a concordance module and is excluded from all reported kinetic
-modules, so it never surfaces to callers.
-"""
-const ZERO_COMPLEX = Symbol("∅")
-
-"""
-    augment_with_zero_complex(A_matrix, Y_matrix, complex_ids)
-
-Add the zero complex ∅ (standard in CRN theory) to the kinetic-module graph and
-connect every boundary reaction to it:
-- inflow  (has products, no substrate complex): edge ∅ → product  (∅ is substrate, `A[∅,r] = -1`)
-- outflow (has substrate, no product complex):  edge substrate → ∅ (∅ is product,  `A[∅,r] = +1`)
-
-Without ∅, boundary metabolite complexes (e.g. an exchanged extracellular metabolite
-produced only by `∅ → met[e]`) have no in-neighbor, so Phase I of
-[`upstream_algorithm`](@ref) never prunes them as entry complexes. Being balanced,
-they then get injected into every extended module and
-[`merge_coupled_sets_tracked`](@ref)'s shared-complex trivial-merge step glues all
-concordance modules into one giant kinetic module, producing spurious ACR/ACRR pairs
-(confirmed against the MATLAB reference, which does represent boundary reactions via
-an explicit zero complex).
-
-∅ itself never appears in a concordance module (it is not part of network topology
-known to the concordance step), so `upstream_algorithm` never returns it as a member
-of an upstream set — it only participates as a graph node used to correctly prune
-neighbors. It therefore requires no special-casing in ACR/ACRR reporting or module
-output.
-
-Returns `(A_aug, Y_aug, complex_ids_aug)` with one extra row/column appended for ∅.
-"""
-function augment_with_zero_complex(
-    A_matrix::SparseArrays.SparseMatrixCSC,
-    Y_matrix::SparseArrays.AbstractSparseMatrix,
-    complex_ids::Vector{Symbol}
-)
-    n_complexes, n_reactions = size(A_matrix)
-    zero_idx = n_complexes + 1
-
-    I, J, V = SparseArrays.findnz(A_matrix)
-    I2 = collect(I)
-    J2 = collect(J)
-    V2 = collect(V)
-
-    vals = SparseArrays.nonzeros(A_matrix)
-    for r in 1:n_reactions
-        has_substrate = false
-        has_product = false
-        for idx in SparseArrays.nzrange(A_matrix, r)
-            v = vals[idx]
-            v < 0 && (has_substrate = true)
-            v > 0 && (has_product = true)
-        end
-        if has_product && !has_substrate
-            # Inflow: ∅ -> product, so ∅ is the substrate (A[∅,r] = -1)
-            push!(I2, zero_idx)
-            push!(J2, r)
-            push!(V2, -1)
-        elseif has_substrate && !has_product
-            # Outflow: substrate -> ∅, so ∅ is the product (A[∅,r] = +1)
-            push!(I2, zero_idx)
-            push!(J2, r)
-            push!(V2, 1)
-        end
-    end
-
-    A_aug = SparseArrays.sparse(I2, J2, V2, zero_idx, n_reactions)
-    Y_aug = hcat(Y_matrix, SparseArrays.spzeros(size(Y_matrix, 1), 1))
-    complex_ids_aug = vcat(complex_ids, [ZERO_COMPLEX])
-
-    return A_aug, Y_aug, complex_ids_aug
-end
-
-"""
     kinetic_analysis(concordance_modules, model; min_module_size=1, known_acr=Symbol[], efficient=true)
 
 Apply kinetic module analysis using set-based concordance module structure.
@@ -204,15 +127,14 @@ function kinetic_analysis(
 
     @debug "Starting kinetic module analysis" n_concordance_modules = length(concordance_modules) - 1 efficient
 
-    # Extract network topology and build ID mappings ONCE
-    A_matrix, complex_ids = incidence(model; return_ids=true)
-    Y_matrix, metabolite_ids, _ = complex_stoichiometry(model; return_ids=true)
-
-    # Augment with the zero complex ∅ so boundary/exchange reactions have an explicit
-    # in- or out-neighbor. Without this, boundary complexes are never pruned by Phase I
-    # of the upstream algorithm and spuriously glue concordance modules together (see
-    # `augment_with_zero_complex` docstring). ∅ never appears in the returned modules.
-    A_matrix, Y_matrix, complex_ids = augment_with_zero_complex(A_matrix, Y_matrix, complex_ids)
+    # Extract network topology and build ID mappings ONCE, including the zero complex ∅
+    # so boundary/exchange reactions have an explicit in-/out-neighbor. Without ∅, boundary
+    # complexes are never pruned by Phase I of the upstream algorithm and spuriously glue
+    # concordance modules together (see `ZERO_COMPLEX`). ∅ is appended as the last complex
+    # (all-zero Y column ⇒ Y*A unchanged); it never belongs to a concordance module, so
+    # `upstream_algorithm` never returns it and it never surfaces in reported modules.
+    A_matrix, complex_ids = incidence(model; return_ids=true, include_zero_complex=true)
+    Y_matrix, metabolite_ids, _ = complex_stoichiometry(model; return_ids=true, include_zero_complex=true)
 
     # Build mappings once and reuse throughout
     complex_to_idx = Dict{Symbol,Int}(id => i for (i, id) in enumerate(complex_ids))
@@ -2169,8 +2091,10 @@ function identify_acr_acrr(
     efficient::Bool=true,
     known_acr::Vector{Symbol}=Symbol[]
 )
-    # Extract network topology and delegate to helper
-    Y_matrix, metabolite_ids, complex_ids = complex_stoichiometry(model; return_ids=true)
+    # Extract network topology and delegate to helper (include ∅ to match the Y used
+    # internally by kinetic_analysis; ∅ is an unused all-zero column here since kinetic
+    # modules never contain it)
+    Y_matrix, metabolite_ids, complex_ids = complex_stoichiometry(model; return_ids=true, include_zero_complex=true)
     complex_to_idx = Dict{Symbol,Int}(id => i for (i, id) in enumerate(complex_ids))
 
     return _detect_acr_acrr(kinetic_modules, Y_matrix, metabolite_ids, complex_to_idx;
@@ -2217,6 +2141,8 @@ function identify_acr_acrr_dce(
     seed::Integer=1234,
 )
     N = SparseArrays.SparseMatrixCSC{Float64,Int}(A.stoichiometry(model))  # metabolites × reactions (sparse)
+    # DCE operates on closed, explicit-complex autocatalytic CRNs (species on both sides of
+    # every reaction, no boundary reactions), so the zero complex never applies here.
     A_mat, _ = incidence(model; return_ids=true)
     Y_matrix, metabolite_ids, _ = complex_stoichiometry(model; return_ids=true)
     n_rxn = size(N, 2)
@@ -2412,8 +2338,8 @@ function structural_deficiency(
     concordance_modules::Vector{Set{Symbol}},
     model::A.AbstractFBCModel
 )
-    Y_matrix, _, complex_ids = complex_stoichiometry(model; return_ids=true)
-    A_matrix, _, _ = incidence(model; return_ids=true)
+    Y_matrix, _, complex_ids = complex_stoichiometry(model; return_ids=true, include_zero_complex=true)
+    A_matrix, _, _ = incidence(model; return_ids=true, include_zero_complex=true)
     complex_to_idx = Dict(id => i for (i, id) in enumerate(complex_ids))
 
     network = (
@@ -2459,8 +2385,8 @@ function mass_action_deficiency_bounds(
     model::A.AbstractFBCModel;
     n_concordance_merges::Int=0
 )
-    Y_matrix, _, complex_ids = complex_stoichiometry(model; return_ids=true)
-    A_matrix, _, _ = incidence(model; return_ids=true)
+    Y_matrix, _, complex_ids = complex_stoichiometry(model; return_ids=true, include_zero_complex=true)
+    A_matrix, _, _ = incidence(model; return_ids=true, include_zero_complex=true)
     complex_to_idx = Dict(id => i for (i, id) in enumerate(complex_ids))
 
     network = (

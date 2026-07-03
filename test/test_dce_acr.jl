@@ -23,7 +23,9 @@ A.stoichiometry(m::DCEToyModel) = A.stoichiometry(m.inner)
 A.bounds(m::DCEToyModel) = A.bounds(m.inner)
 A.objective(m::DCEToyModel) = A.objective(m.inner)
 A.reaction_stoichiometry(m::DCEToyModel, rid::String) = A.reaction_stoichiometry(m.inner, rid)
-COCOA._extract_complexes_from_model(m::DCEToyModel) =
+# These toy CRNs are closed (no boundary reactions) and carry explicit autocatalytic
+# complexes, so the zero-complex flag is accepted for signature compatibility but ignored.
+COCOA._extract_complexes_from_model(m::DCEToyModel; include_zero_complex::Bool=false) =
     (complexes=m.complex_compositions, reaction_complex_map=m.reaction_complex_map,
      complex_order=m.complex_order)
 

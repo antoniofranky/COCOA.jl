@@ -1140,80 +1140,79 @@ end
     @test length(preprocessed_k.acrr_pairs) == 15
 end
 
-@testset "Zero Complex Augmentation (boundary reaction fix)" begin
-    @testset "augment_with_zero_complex structural correctness" begin
-        # Complexes: 1=A, 2=B, 3=C. Reactions:
-        #   r1: ∅ -> A   (inflow,  1 product,  0 substrates)
-        #   r2: A -> B   (normal,  1 substrate, 1 product)
-        #   r3: B -> ∅   (outflow, 1 substrate, 0 products)
-        #   r4: C -> A   (normal,  1 substrate, 1 product)
-        A_matrix = SparseArrays.sparse(
-            [1, 1, 2, 2, 3, 1],
-            [1, 2, 2, 3, 4, 4],
-            [1, -1, 1, -1, -1, 1],
-            3, 4,
-        )
-        Y_matrix = SparseArrays.sparse([1, 2, 3], [1, 2, 3], [1.0, 1.0, 1.0], 3, 3)
-        complex_ids = [:A, :B, :C]
-
-        A_aug, Y_aug, complex_ids_aug = COCOA.augment_with_zero_complex(A_matrix, Y_matrix, complex_ids)
-
-        @test complex_ids_aug == [:A, :B, :C, COCOA.ZERO_COMPLEX]
-        @test size(A_aug) == (4, 4)
-        @test size(Y_aug) == (3, 4)
-        @test all(iszero, Y_aug[:, 4])  # ∅ carries no species
-
-        zero_idx = 4
-        @test A_aug[zero_idx, 1] == -1   # ∅ is substrate of the inflow reaction
-        @test A_aug[zero_idx, 3] == 1    # ∅ is product of the outflow reaction
-        @test A_aug[zero_idx, 2] == 0    # normal reaction untouched
-        @test A_aug[zero_idx, 4] == 0    # normal reaction (C -> A) untouched
-
-        # Original entries preserved exactly
-        @test A_aug[1:3, :] == A_matrix
-        @test Y_aug[:, 1:3] == Y_matrix
+@testset "Zero Complex (boundary reaction fix)" begin
+    # Minimal open network with genuine boundary/exchange reactions:
+    #   EX_S:  ∅ -> S   (inflow,  no substrate complex)
+    #   R1:    S -> P
+    #   EX_P:  P -> ∅   (outflow, no product complex)
+    function _open_boundary_model()
+        m = A.CanonicalModel.Model()
+        for met in ("S", "P")
+            m.metabolites[met] = A.CanonicalModel.Metabolite(name=met)
+        end
+        rxns = [
+            ("EX_S", Dict("S" => 1.0)),
+            ("R1", Dict("S" => -1.0, "P" => 1.0)),
+            ("EX_P", Dict("P" => -1.0)),
+        ]
+        for (rid, s) in rxns
+            m.reactions[rid] = A.CanonicalModel.Reaction(
+                name=rid, stoichiometry=s, lower_bound=0.0, upper_bound=1000.0)
+        end
+        return m
     end
 
-    @testset "augment_with_zero_complex is a no-op on closed networks" begin
-        # EnvZ-OmpR has no exchange/boundary reactions: every reaction has both a
-        # substrate and a product complex, so the augmentation must add an isolated,
-        # edgeless ∅ node that changes nothing about connectivity or ACR/ACRR results.
-        model = create_envz_ompr_model()
-        A_matrix, complex_ids = COCOA.incidence(model; return_ids=true)
-        Y_matrix, _, _ = COCOA.complex_stoichiometry(model; return_ids=true)
+    @testset "include_zero_complex=true adds one shared ∅ and preserves Y*A" begin
+        model = _open_boundary_model()
+        _, ids_plain = COCOA.incidence(model; return_ids=true)
+        A_z, ids_z = COCOA.incidence(model; return_ids=true, include_zero_complex=true)
+        Y_z, _, ids_z2 = COCOA.complex_stoichiometry(model; return_ids=true, include_zero_complex=true)
 
-        A_aug, _, complex_ids_aug = COCOA.augment_with_zero_complex(A_matrix, Y_matrix, complex_ids)
+        # ∅ appended exactly once, as the last complex; A and Y agree on complex order
+        @test COCOA.ZERO_COMPLEX ∉ ids_plain
+        @test ids_z == vcat(ids_plain, COCOA.ZERO_COMPLEX)
+        @test ids_z2 == ids_z
+        @test count(==(COCOA.ZERO_COMPLEX), ids_z) == 1
 
-        @test length(complex_ids_aug) == length(complex_ids) + 1
-        @test SparseArrays.nnz(A_aug[end, :]) == 0  # ∅ has no edges: no boundary reactions here
+        zi = length(ids_z)  # ∅ is last
+        # exactly one inflow (∅ substrate, -1) and one outflow (∅ product, +1)
+        @test sort(SparseArrays.nonzeros(A_z[zi, :])) == [-1, 1]
+        @test all(iszero, Y_z[:, zi])  # ∅ carries no species
+
+        # Y * A = S is preserved because ∅'s Y column is zero
+        N = SparseArrays.SparseMatrixCSC{Float64,Int}(A.stoichiometry(model))
+        @test Y_z * A_z ≈ N
+    end
+
+    @testset "no-op on closed networks (EnvZ-OmpR, deficiency-two)" begin
+        # Neither model has an empty-sided reaction, so ∅ is never introduced and the
+        # matrices are byte-identical — this is what preserves δ=2 and the exact
+        # analytically-known ACR/ACRR results.
+        for model in (create_envz_ompr_model(), create_deficiency_two_model())
+            A_plain, ids_plain = COCOA.incidence(model; return_ids=true)
+            A_z, ids_z = COCOA.incidence(model; return_ids=true, include_zero_complex=true)
+            @test ids_z == ids_plain
+            @test A_z == A_plain
+            @test COCOA.ZERO_COMPLEX ∉ ids_z
+        end
     end
 
     @testset "boundary complexes are pruned by Phase I once ∅ is present" begin
-        # Minimal open CRN with a genuine boundary/exchange reaction:
-        #   r1 (exchange): ∅ -> S   (S enters the system with no substrate complex)
-        #   r2: S -> P
-        # Without ∅, S has no in-neighbor and Phase I of upstream_algorithm can never
-        # prune it as an entry complex; with ∅, S is correctly recognised as an entry
-        # complex and removed. We test the underlying primitive directly (no need for
-        # a full AbstractFBCModel): build A/Y by hand exactly as kinetic_analysis does
-        # internally via `incidence`/`complex_stoichiometry`.
-        complex_ids = [:S, :P]
-        A_matrix = SparseArrays.sparse([1, 2], [1, 2], [1, -1], 2, 2)
-        # r1: A[S,1]=+1 (S is product, ∅ implicit substrate); r2: A[S,2]=-1, and P must be product of r2
-        A_matrix = SparseArrays.sparse([1, 1, 2], [1, 2, 2], [1, -1, 1], 2, 2)
-        Y_matrix = SparseArrays.sparse([1, 2], [1, 2], [1.0, 1.0], 2, 2)
-
-        A_aug, Y_aug, complex_ids_aug = COCOA.augment_with_zero_complex(A_matrix, Y_matrix, complex_ids)
-        complex_to_idx = Dict(id => i for (i, id) in enumerate(complex_ids_aug))
-        cached_adj = COCOA.build_cached_adjacency(A_aug, length(complex_ids_aug))
+        # The imported metabolite complex S (fed only by ∅ -> S) is an entry complex, so
+        # Phase I of upstream_algorithm must remove it; ∅ itself never surfaces.
+        model = _open_boundary_model()
+        A_z, complex_ids = COCOA.incidence(model; return_ids=true, include_zero_complex=true)
+        Y_z, met_ids, _ = COCOA.complex_stoichiometry(model; return_ids=true, include_zero_complex=true)
+        complex_to_idx = Dict(id => i for (i, id) in enumerate(complex_ids))
+        cached_adj = COCOA.build_cached_adjacency(A_z, length(complex_ids))
         network = (
-            A=A_aug, Y=Y_aug, complex_ids=complex_ids_aug, metabolite_ids=[:S, :P],
+            A=A_z, Y=Y_z, complex_ids=complex_ids, metabolite_ids=met_ids,
             complex_to_idx=complex_to_idx,
-            acr_augmentation=COCOA.build_acr_augmentation(Symbol[], [:S, :P], size(Y_aug, 1)),
+            acr_augmentation=COCOA.build_acr_augmentation(Symbol[], met_ids, size(Y_z, 1)),
             enable_advanced_merging=false, cached_adj=cached_adj,
         )
 
-        upstream = COCOA.upstream_algorithm(Set([:S, :P]), network)
+        upstream = COCOA.upstream_algorithm(Set([:S, Symbol("P")]), network)
         @test :S ∉ upstream  # correctly pruned as an entry complex thanks to ∅
         @test COCOA.ZERO_COMPLEX ∉ upstream  # ∅ never itself surfaces in results
     end

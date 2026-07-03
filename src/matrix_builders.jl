@@ -38,7 +38,25 @@ Defaults to `false`; models providing explicit complexes specialise this to `tru
 has_explicit_complexes(::Any) = false
 
 """
-    _extract_complexes_from_model(model::A.AbstractFBCModel)
+    ZERO_COMPLEX
+
+Symbol identifying the zero complex ∅ — the empty multiset of species that forms the
+absent side of a boundary/exchange reaction. In chemical reaction network theory ∅ is a
+legitimate complex (a zero column of the stoichiometric map `Y`), and because there is
+exactly one empty multiset it is represented by a single shared node used by every
+boundary reaction (an inflow `∅ → S` and an outflow `S → ∅` reference the same ∅).
+
+Omitting ∅ from the incidence matrix leaves boundary complexes without an in-/out-neighbor,
+so Phase I of [`upstream_algorithm`](@ref) never prunes them as entry complexes and they
+spuriously glue concordance modules together. Passing `include_zero_complex=true` to
+[`incidence`](@ref)/[`complex_stoichiometry`](@ref) (as `kinetic_analysis` does) adds ∅ as
+the last complex: an all-zero column in `Y` (so `Y * A` is unchanged) and a `±1` row in `A`.
+The MATLAB reference (`deficiency_sparse`) constructs the same single shared ∅ node.
+"""
+const ZERO_COMPLEX = Symbol("∅")
+
+"""
+    _extract_complexes_from_model(model::A.AbstractFBCModel; include_zero_complex::Bool=false)
 
 Extract unique complexes directly from model reactions without building constraints.
 
@@ -64,11 +82,17 @@ Named tuple with:
 - Deterministic: same model always produces same complex ordering
 - Memory-efficient: processes reactions one at a time
 - Preserves stoichiometric coefficients exactly as in model
+- With `include_zero_complex=true`, the empty side of a boundary/exchange reaction is
+  represented by the shared [`ZERO_COMPLEX`](@ref) ∅ (empty composition) instead of the
+  `:empty` sentinel, and ∅ is appended last to `complex_order` (only if some boundary
+  reaction exists, so it is a no-op on closed networks). Otherwise the empty side keeps the
+  `:empty` sentinel, which the matrix builders drop.
 """
-function _extract_complexes_from_model(model::A.AbstractFBCModel)
+function _extract_complexes_from_model(model::A.AbstractFBCModel; include_zero_complex::Bool=false)
     complex_compositions = Dict{Symbol,Vector{Tuple{Symbol,Float64}}}()
     reaction_to_complexes = Dict{Symbol,Tuple{Symbol,Symbol}}()
     complex_order = Symbol[]  # Track order complexes are first encountered
+    has_boundary = false      # any reaction with an empty substrate or product side
 
     # Process reactions in model order for deterministic results
     for rxn_id in A.reactions(model)
@@ -95,6 +119,19 @@ function _extract_complexes_from_model(model::A.AbstractFBCModel)
         substrate_id = generate_complex_id(substrates)
         product_id = generate_complex_id(products)
 
+        # Represent the empty side of a boundary reaction by the shared zero complex ∅
+        # (a single node reused by every inflow/outflow), rather than dropping it.
+        if include_zero_complex
+            if isempty(substrates)
+                substrate_id = ZERO_COMPLEX
+                has_boundary = true
+            end
+            if isempty(products)
+                product_id = ZERO_COMPLEX
+                has_boundary = true
+            end
+        end
+
         # Store unique complexes and track order
         if !isempty(substrates)
             if !haskey(complex_compositions, substrate_id)
@@ -111,6 +148,13 @@ function _extract_complexes_from_model(model::A.AbstractFBCModel)
 
         # Map reaction to its complexes
         reaction_to_complexes[Symbol(rxn_id)] = (substrate_id, product_id)
+    end
+
+    # Append the shared zero complex last (empty composition ⇒ all-zero Y column), so
+    # existing complex indices are unchanged and Y * A is preserved.
+    if include_zero_complex && has_boundary
+        complex_compositions[ZERO_COMPLEX] = Tuple{Symbol,Float64}[]
+        push!(complex_order, ZERO_COMPLEX)
     end
 
     return (complexes=complex_compositions, reaction_complex_map=reaction_to_complexes, complex_order=complex_order)
@@ -532,6 +576,9 @@ Uses AbstractFBCModels accessors for efficient direct model access, following CO
 # Arguments
 - `model::A.AbstractFBCModel`: FBC model containing reactions and metabolites
 - `return_ids::Bool=false`: If true, also return metabolite and complex ID vectors
+- `include_zero_complex::Bool=false`: If true, append the shared zero complex
+  [`ZERO_COMPLEX`](@ref) ∅ as the last complex (an all-zero column, so `Y * A` is unchanged).
+  No-op on closed networks. Pair with `incidence(model; include_zero_complex=true)`.
 
 # Returns
 - If `return_ids=false`: `SparseMatrixCSC{Float64,Int}` - The Y matrix (metabolites × complexes)
@@ -556,9 +603,9 @@ Y_split = complex_stoichiometry(model_split)  # Different complexes for _f/_b re
 - Preserves original model metabolite order
 - For concordance analysis with constraints, use `complex_stoichiometry(constraints)`
 """
-function complex_stoichiometry(model::A.AbstractFBCModel; return_ids::Bool=false)
+function complex_stoichiometry(model::A.AbstractFBCModel; return_ids::Bool=false, include_zero_complex::Bool=false)
     # Extract complexes directly from model structure
-    extracted = _extract_complexes_from_model(model)
+    extracted = _extract_complexes_from_model(model; include_zero_complex=include_zero_complex)
     complex_info = extracted.complexes
     complex_ids = extracted.complex_order  # Use deterministic order from reaction processing
 
@@ -800,6 +847,11 @@ Uses AbstractFBCModels accessors for efficient direct model access, following CO
 # Arguments
 - `model::A.AbstractFBCModel`: FBC model containing reactions and metabolites
 - `return_ids::Bool=false`: If true, also return complex and reaction ID vectors
+- `include_zero_complex::Bool=false`: If true, represent the empty side of boundary/exchange
+  reactions with the shared zero complex [`ZERO_COMPLEX`](@ref) ∅ (appended as the last
+  complex) instead of dropping it. No-op on closed networks. Required for a correct kinetic
+  module graph; pair with `complex_stoichiometry(model; include_zero_complex=true)` to keep
+  `Y * A = S`.
 
 # Returns
 - If `return_ids=false`: `SparseMatrixCSC{Int,Int}` - The A matrix (complexes × reactions)
@@ -809,6 +861,8 @@ Uses AbstractFBCModels accessors for efficient direct model access, following CO
 - Entry A[i,j] = -1 if complex i is consumed (substrate) in reaction j
 - Entry A[i,j] = +1 if complex i is produced (product) in reaction j
 - Entry A[i,j] = 0 otherwise
+- With `include_zero_complex=true`: inflow `∅ → S` gives `A[∅,j] = -1`; outflow `S → ∅`
+  gives `A[∅,j] = +1`
 
 # Examples
 ```julia
@@ -835,9 +889,9 @@ A_split = incidence(model_split)  # Includes _f/_b reactions
 - Guarantees Y * A = S when using same model for all matrices
 - For concordance analysis with constraints, use `incidence(constraints)`
 """
-function incidence(model::A.AbstractFBCModel; return_ids::Bool=false)
+function incidence(model::A.AbstractFBCModel; return_ids::Bool=false, include_zero_complex::Bool=false)
     # Extract complexes and reaction mappings directly from model
-    extracted = _extract_complexes_from_model(model)
+    extracted = _extract_complexes_from_model(model; include_zero_complex=include_zero_complex)
     complex_info = extracted.complexes
     reaction_complex_map = extracted.reaction_complex_map
     complex_ids = extracted.complex_order  # Use deterministic order from reaction processing
