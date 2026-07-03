@@ -99,14 +99,14 @@ _, cocoa_ids = COCOA.incidence(model; return_ids=true, include_zero_complex=true
 cocoa_set = Set(cocoa_ids)
 
 # --- map reference classes -> COCOA concordance modules -------------------------------
-mapped_ok = 0; mapped_tot = 0
-tocc(class) = begin
+mapped_ok = Ref(0); mapped_tot = Ref(0)
+function tocc(class)
     s = Set{Symbol}()
     for i in vec(class)
         id = ref_name_to_cocoa_id(String(ref_complexes[Int(i)]), ref_mets)
         id === nothing && continue          # ∅ excluded from concordance
-        mapped_tot += 1
-        (id in cocoa_set) && (mapped_ok += 1)
+        mapped_tot[] += 1
+        (id in cocoa_set) && (mapped_ok[] += 1)
         push!(s, id)
     end
     s
@@ -118,8 +118,8 @@ covered = union(balanced, others...)
 singletons = [Set([c]) for c in cocoa_ids if c != COCOA.ZERO_COMPLEX && !(c in covered)]
 conc_modules = vcat([balanced], others, singletons)
 
-match_rate = mapped_tot == 0 ? 0.0 : mapped_ok / mapped_tot
-println("\n2. Mapping: $mapped_ok/$mapped_tot reference complexes matched a COCOA id (rate=$(round(match_rate, digits=4)))")
+match_rate = mapped_tot[] == 0 ? 0.0 : mapped_ok[] / mapped_tot[]
+println("\n2. Mapping: $(mapped_ok[])/$(mapped_tot[]) reference complexes matched a COCOA id (rate=$(round(match_rate, digits=4)))")
 match_rate < 0.98 && @warn "Low match rate — reference name↔met mapping likely off; results suspect."
 
 # --- kinetic analysis on the reference partition --------------------------------------
