@@ -34,13 +34,20 @@ N=$(MODEL="$MODEL" SEEDS="$SEEDS" EXPERIMENTS="$EXPERIMENTS" COUNT_ONLY=1 \
 ARRAYSPEC="1-$N"; [ -n "$THROTTLE" ] && ARRAYSPEC="1-$N%$THROTTLE"
 echo "MODELTAG=$MODELTAG  configs=$N  array=$ARRAYSPEC  cpus=$CPUS mem=$MEM time=$TIME"
 
+# NOTE: sbatch --export treats commas as variable delimiters, which corrupts
+# comma-containing values like SEEDS="1234,42,..." and EXPERIMENTS="A,B,C,D".
+# So we export everything into the environment and pass a bare --export=ALL instead
+# of an inline VAR=val list.
+export MODEL MODELTAG OUTDIR SEEDS EXPERIMENTS
+export NPROCS=$((CPUS - 1))
+
 AID=$(sbatch --parsable \
   --job-name="cocoa-${MODELTAG}" \
   --output="$LOGDIR/%x-%A_%a.out" --error="$LOGDIR/%x-%A_%a.err" \
   --time="$TIME" --nodes=1 --ntasks=1 --cpus-per-task="$CPUS" --mem="$MEM" \
   --array="$ARRAYSPEC" \
   --mail-type=END,FAIL --mail-user="$MAIL" \
-  --export=ALL,MODEL="$MODEL",MODELTAG="$MODELTAG",OUTDIR="$OUTDIR",NPROCS=$((CPUS-1)),SEEDS="$SEEDS",EXPERIMENTS="$EXPERIMENTS" \
+  --export=ALL \
   --wrap="julia --project='$REPRO_DIR' '$REPRO_DIR/robustness_experiments.jl'")
 echo "array job: $AID  (tasks 1-$N)"
 
