@@ -55,7 +55,7 @@ end
         split_reactions::Vector{String}=String[],
         random_reactions::Vector{String}=String[],
         random::Float64=0.0,
-        seed::UInt=rand(UInt)
+        seed::UInt=UInt(1234)
     ) -> CM.Model
 
 Split reactions into elementary steps using ordered or random mechanisms.
@@ -97,7 +97,7 @@ function split_into_elementary(
     split_reactions::Vector{String}=String[],
     random_reactions::Vector{String}=String[],
     random::Float64=0.0,
-    seed::UInt=rand(UInt)
+    seed::UInt=UInt(1234)
 )
     @assert 0.0 <= random <= 1.0 "random must be between 0.0 and 1.0"
 
@@ -137,7 +137,10 @@ function split_into_elementary(
     enzyme_list = String[]
     enzyme_to_reactions = Dict{String,Vector{String}}()  # Track which reactions use each enzyme
 
-    for (rid, gpr) in reactions_with_fallback
+    # Iterate reactions in sorted id order so enzyme numbering (E1, E2, ...) is canonical
+    # and independent of Dict hash order (robust reproducibility).
+    for rid in sort(collect(keys(reactions_with_fallback)))
+        gpr = reactions_with_fallback[rid]
         rxn = model.reactions[rid]
         substrate_ids = [mid for (mid, coeff) in rxn.stoichiometry if coeff < 0]
         product_ids = [mid for (mid, coeff) in rxn.stoichiometry if coeff > 0]
@@ -274,9 +277,12 @@ function split_into_elementary(
             # Determine mechanism for this reaction
             use_random = rid in random_rxns
 
-            # Convert substrate/product IDs to (id, coefficient) tuples for mechanisms.jl
-            substrates = [(mid, -coeff) for (mid, coeff) in rxn.stoichiometry if coeff < 0]
-            products = [(mid, coeff) for (mid, coeff) in rxn.stoichiometry if coeff > 0]
+            # Convert substrate/product IDs to (id, coefficient) tuples for mechanisms.jl.
+            # Sort by metabolite id so the binding order is canonical and deterministic
+            # (not dependent on Dict hash order). This fixes the enzyme-intermediate
+            # complexes that the ordered/random mechanisms generate.
+            substrates = sort!([(mid, -coeff) for (mid, coeff) in rxn.stoichiometry if coeff < 0], by=first)
+            products = sort!([(mid, coeff) for (mid, coeff) in rxn.stoichiometry if coeff > 0], by=first)
 
             # FIX: Keep R_ prefix for SBML compatibility (prevents objective reference issues)
             rid_clean = startswith(rid, "R_") ? rid : "R_" * rid

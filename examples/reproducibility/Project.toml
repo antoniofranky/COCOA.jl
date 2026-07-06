@@ -1,0 +1,14 @@
+[deps]
+AbstractFBCModels = "5a4f3dfa-1789-40f8-8221-69268c29937c"
+COBREXA = "babc4406-5200-4a30-9033-bf5ae714c842"
+COCOA = "9ecc82ce-b930-45f2-8d28-709640a22783"
+CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
+GLPK = "60bf3e95-4087-53dc-ae20-288a0d20c6a6"
+HiGHS = "87dc4568-4c63-4d18-b0c0-bb2238e4078b"
+SBMLFBCModels = "3e8f9d1a-ffc1-486d-82d6-6c7276635980"
+SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
+
+[sources]
+COCOA = {path = "../.."}

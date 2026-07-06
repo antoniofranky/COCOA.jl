@@ -466,3 +466,6 @@ include("test_kinetic_analysis.jl")
 
 # Flux-coupling (DCE) ACR/ACRR detector regression tests.
 include("test_dce_acr.jl")
+
+# Determinism / reproducibility guardrails.
+include("test_reproducibility.jl")

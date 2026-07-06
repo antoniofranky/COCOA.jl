@@ -5,3 +5,9 @@ updates:
     directory: "/" # Location of package manifests
     schedule:
       interval: "weekly"
+  # Julia package (Pkg) compat updates. Replaces CompatHelper (now in maintenance
+  # mode); COCOA uses only the General registry, so Dependabot suffices.
+  - package-ecosystem: "julia"
+    directory: "/"
+    schedule:
+      interval: "weekly"
