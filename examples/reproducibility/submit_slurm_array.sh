@@ -22,6 +22,8 @@ EXPERIMENTS="${EXPERIMENTS:-A,B,C,D}"
 MODELTAG="${MODELTAG:-$(basename "${MODEL%.*}")}"
 CPUS="${CPUS:-16}"; MEM="${MEM:-64G}"; TIME="${TIME:-06:00:00}"
 THROTTLE="${THROTTLE:-}"   # max concurrent array tasks, e.g. 20; empty = unlimited
+QOS="${QOS:-}"            # optional SLURM QOS, e.g. "long" for walltime > 2 days
+PARTITION="${PARTITION:-}" # optional partition override
 LOGDIR="${LOGDIR:-$(dirname "$OUTDIR")/slurm_logs}"
 mkdir -p "$LOGDIR" "$OUTDIR"
 MAIL="schaffran1@uni-potsdam.de"
@@ -41,11 +43,15 @@ echo "MODELTAG=$MODELTAG  configs=$N  array=$ARRAYSPEC  cpus=$CPUS mem=$MEM time
 export MODEL MODELTAG OUTDIR SEEDS EXPERIMENTS
 export NPROCS=$((CPUS - 1))
 
+# Optional QOS / partition (e.g. QOS=long for walltime beyond the default 2-day cap).
+QOS_ARG=(); [ -n "$QOS" ] && QOS_ARG=(--qos="$QOS")
+PART_ARG=(); [ -n "$PARTITION" ] && PART_ARG=(--partition="$PARTITION")
+
 AID=$(sbatch --parsable \
   --job-name="cocoa-${MODELTAG}" \
   --output="$LOGDIR/%x-%A_%a.out" --error="$LOGDIR/%x-%A_%a.err" \
   --time="$TIME" --nodes=1 --ntasks=1 --cpus-per-task="$CPUS" --mem="$MEM" \
-  --array="$ARRAYSPEC" \
+  --array="$ARRAYSPEC" "${QOS_ARG[@]}" "${PART_ARG[@]}" \
   --mail-type=END,FAIL --mail-user="$MAIL" \
   --export=ALL \
   --wrap="julia --project='$REPRO_DIR' '$REPRO_DIR/robustness_experiments.jl'")
