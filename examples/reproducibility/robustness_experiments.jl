@@ -140,6 +140,18 @@ import CSV, DataFrames
 
 const OPTIMIZER = OPTNAME == "GLPK" ? GLPK.Optimizer : HiGHS.Optimizer
 
+# ---- solver (LP) tolerance -----------------------------------------------------------
+# We deliberately use the solver's DEFAULT feasibility tolerance (HiGHS ~1e-7) and set
+# no attributes. This was determined empirically: TIGHTENING the LP tolerance (tested at
+# 1e-9/1e-10) *degrades* determinism rather than improving it. Metabolic LPs are highly
+# degenerate (many alternate optima); a tighter feasibility tolerance makes HiGHS return
+# more numerically variable vertices, which propagate through the seed-dependent sampler
+# + CV pre-filter + transitivity into module-partition variability. At the default
+# tolerance, concordance is deterministic for concordance_tolerance >= ~1e-8; the
+# 1e-10 sweep point is below the resolvable precision of these degenerate LPs and cannot
+# be stabilised by tightening. If cross-version pinning is ever needed, pin at 1e-7
+# (the current default) rather than lower.
+
 # ---- model loading & preprocessing --------------------------------------------------
 function load_canon(model_spec::String)
     path = model_spec == "e_coli_core" ?
