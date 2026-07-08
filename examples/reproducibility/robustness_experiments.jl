@@ -20,7 +20,11 @@
 #   D. BLOCKED-TOLERANCE SWEEP remove_blocked_reactions flux_tolerance in the same set.
 #   E. EFFICIENT=FALSE         exhaustive ACR/ACRR via the full matrix/deficiency path
 #                              (kinetic_efficient=false); slow, reference-comparable.
-#                              Not in the default set; enable with EXPERIMENTS=E.
+#   F. SAMPLE-SIZE SWEEP       sample_size in {1000,5000,20000} x seeds; tests whether more
+#                              ACHR sampling removes genome-scale seed-dependence (needs RAM).
+#   G. CV-THRESHOLD SWEEP      cv_threshold in {0.01,0.05,0.1} x seeds; higher = more pairs go
+#                              to the exact LP test -> less CV-noise-driven seed-dependence.
+#                              E/F/G are not in the default set; enable via EXPERIMENTS=E / F / G.
 #
 # Every run records a LABEL-INVARIANT partition fingerprint of the concordance modules,
 # so "same counts" is distinguished from "identical partition".
@@ -72,9 +76,10 @@ const DEF_BLOCKED = 1e-9
 # schema (incl. kinetic_efficient) stays consistent.
 _cfg(; label, variant=:with, blocked_tol=DEF_BLOCKED, seed, use_transitivity=true,
        obj_mode=:none, concordance_tolerance=0.01, balanced_threshold=1e-7,
-       kinetic_efficient=true) =
+       kinetic_efficient=true, sample_size=1000, cv_threshold=0.01) =
     (; label, variant, blocked_tol, seed, use_transitivity, obj_mode,
-       concordance_tolerance, balanced_threshold, kinetic_efficient)
+       concordance_tolerance, balanced_threshold, kinetic_efficient,
+       sample_size, cv_threshold)
 
 function build_configs()
     cfgs = NamedTuple[]
@@ -112,6 +117,22 @@ function build_configs()
         # keep the grid small (few seeds) because it is very expensive at genome scale.
         for seed in b_seeds
             push!(cfgs, _cfg(label="E_efficient_false", seed=seed, kinetic_efficient=false))
+        end
+    end
+    if "F" in EXPERIMENTS
+        # Sample-size sweep: does more ACHR sampling resolve the CV pre-filter better and
+        # remove the genome-scale seed-dependence? Full cone, transitivity on. Higher
+        # sample_size needs MORE RAM (samples stored per complex).
+        for ss in (1000, 5000, 20000), seed in b_seeds
+            push!(cfgs, _cfg(label="F_samplesize_$(ss)", seed=seed, sample_size=ss))
+        end
+    end
+    if "G" in EXPERIMENTS
+        # CV-threshold sweep: raising cv_threshold sends MORE pairs to the exact (seed-
+        # independent) LP test instead of gating them on the noisy sampled CV, so it
+        # should reduce seed-dependence -- at higher compute cost. Full cone, transitivity on.
+        for cv in (0.01, 0.05, 0.1), seed in b_seeds
+            push!(cfgs, _cfg(label="G_cvthreshold_$(cv)", seed=seed, cv_threshold=cv))
         end
     end
     return cfgs
@@ -218,7 +239,8 @@ function run_config(cfg)
         objective_bound=objbound(cfg.obj_mode),
         concordance_tolerance=cfg.concordance_tolerance,
         balanced_threshold=cfg.balanced_threshold,
-        cv_threshold=0.01,
+        cv_threshold=cfg.cv_threshold,
+        sample_size=cfg.sample_size,
         seed=UInt(cfg.seed),
         use_transitivity=cfg.use_transitivity,
         kinetic_analysis=true,
@@ -233,6 +255,7 @@ function run_config(cfg)
         objective_bound=cfg.obj_mode == :rel999 ? "rel0.999" : "none",
         variant=String(cfg.variant), blocked_tol=cfg.blocked_tol,
         concordance_tolerance=cfg.concordance_tolerance, balanced_threshold=cfg.balanced_threshold,
+        cv_threshold=cfg.cv_threshold, sample_size=cfg.sample_size,
         n_concordance_modules=get(result.stats, "n_concordance_modules", missing),
         n_concordant_total=get(result.stats, "n_concordant_total", missing),
         n_acr=n_acr, n_acrr=n_acrr,
