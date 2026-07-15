@@ -1,6 +1,10 @@
 """
 Minimal Python quick-start for COCOA.jl via JuliaCall.
 
+Requirements
+------------
+- Python >= 3.10 (PythonCall.jl does not support 3.9 or older).
+
 Setup (one-time)
 ----------------
 1. Install Python bindings:      pip install juliacall
@@ -11,6 +15,13 @@ Setup (one-time)
 Run
 ---
     python examples/python_quickstart.py
+
+On HPC / locked-down systems
+----------------------------
+Running Pkg operations (below) from inside juliacall can segfault on some
+clusters. Use the offline, pre-built pattern in `examples/python/` instead:
+build the Julia project once with a NATIVE julia (`build_env.jl`), then point
+juliacall at it read-only (`run_offline.sh`). See `examples/python/README.md`.
 
 Notes
 -----

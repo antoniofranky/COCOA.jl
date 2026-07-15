@@ -39,7 +39,9 @@
 #      Per-task CSVs are written and later concatenated (see submit_slurm_array.sh).
 #
 # Environment variables:
-#   MODEL       SBML path, or "e_coli_core" (default)
+#   MODEL       "e_coli_core" (bundled, default), a BiGG id that is fetched from
+#               BiGG with SHA-256 verification (iJR904, iAF1260b, iMM904,
+#               iAB_RBC_283 — see bigg_models.jl), or an explicit SBML path.
 #   MODELTAG    output filename tag (default: basename of MODEL without extension)
 #   BIOMASS_IDS comma-separated biomass reaction ids (default: auto-detect)
 #   NPROCS      worker processes (default: min(15, nCPU-1))
@@ -158,6 +160,8 @@ end
     import GLPK
 end
 import CSV, DataFrames
+import SparseArrays
+include(joinpath(@__DIR__, "bigg_models.jl"))  # fetch_bigg_model / is_bigg_id
 
 const OPTIMIZER = OPTNAME == "GLPK" ? GLPK.Optimizer : HiGHS.Optimizer
 
@@ -175,8 +179,15 @@ const OPTIMIZER = OPTNAME == "GLPK" ? GLPK.Optimizer : HiGHS.Optimizer
 
 # ---- model loading & preprocessing --------------------------------------------------
 function load_canon(model_spec::String)
-    path = model_spec == "e_coli_core" ?
-        joinpath(pkgdir(COCOA), "test", "e_coli_core.xml") : model_spec
+    path = if model_spec == "e_coli_core"
+        joinpath(pkgdir(COCOA), "test", "e_coli_core.xml")   # bundled (no download)
+    elseif isfile(model_spec)
+        model_spec                                            # explicit path wins
+    elseif is_bigg_id(model_spec)
+        fetch_bigg_model(model_spec)                          # download + SHA-256 verify
+    else
+        model_spec
+    end
     isfile(path) || error("Model file not found: $path")
     return convert(A.CanonicalModel.Model, COBREXA.load_model(path))
 end
@@ -213,6 +224,21 @@ function partition_fingerprint(result)
     return bytes2hex(SHA.sha256(string(canon)))[1:16]
 end
 
+# ---- module-size statistics (giant module size, singleton count, #modules) -----------
+# `assignments` is the per-complex Int module id; `include_zero=false` ignores the 0
+# label (unassigned complexes for kinetic modules; balanced group is label 0 too but is
+# handled explicitly by the caller). Returns (n_modules, giant_size, n_singletons).
+function module_size_stats(assignments; include_zero::Bool=true)
+    sizes = Dict{Int,Int}()
+    for m in assignments
+        (!include_zero && m == 0) && continue
+        sizes[m] = get(sizes, m, 0) + 1
+    end
+    isempty(sizes) && return (0, 0, 0)
+    vals = collect(values(sizes))
+    return (length(vals), maximum(vals), count(==(1), vals))
+end
+
 # ---- model cache (per (variant, blocked_tol)) ---------------------------------------
 const BASE_CANON  = load_canon(MODEL)
 const BIOMASS_IDS = haskey(ENV, "BIOMASS_IDS") ? String.(split(ENV["BIOMASS_IDS"], ",")) :
@@ -229,8 +255,46 @@ end
 
 objbound(mode) = mode == :rel999 ? COBREXA.relative_tolerance_bound(0.999) : nothing
 
+# Persist the FULL result the package returns (not just summary scalars), so any
+# measure — per-complex module membership, giant-module composition, exact ACR/
+# ACRR sets — is recoverable without re-running. Controlled by SAVE_FULL (default on).
+const SAVE_FULL = lowercase(get(ENV, "SAVE_FULL", "true")) in ("1", "true", "yes")
+# metabolite composition per complex, from the model's Y matrix (mets x complexes) —
+# the canonical multiset key ("1*M_h_c + 1*M_accoa_c") for aligning complexes to the
+# reference, whose internal complex labels differ. Formatted like the reference exporter.
+function complex_compositions(model)
+    Yc, metids, cids = complex_stoichiometry(model; return_ids=true)
+    metstr = String.(metids)
+    cid2col = Dict(string(c) => j for (j, c) in enumerate(cids))
+    fmt(v) = isinteger(v) ? string(Int(v)) : string(v)
+    function comp_of(cid)
+        j = get(cid2col, string(cid), 0)
+        j == 0 && return missing
+        idxs, vals = SparseArrays.findnz(Yc[:, j])
+        isempty(idxs) && return "(zero)"
+        join(sort([fmt(vals[k]) * "*" * metstr[idxs[k]] for k in eachindex(idxs)]), " + ")
+    end
+    return comp_of
+end
+
+function save_full_result(result, run_id::AbstractString, model)
+    SAVE_FULL || return
+    dir = joinpath(OUTDIR, "full"); mkpath(dir)
+    # complexes: complex_id, concordance_module, kinetic_module, classification, [lambda]
+    # + composition (metabolite multiset from Y) for exact cross-tool alignment.
+    cdf = DataFrames.DataFrame(result.complexes)
+    comp_of = complex_compositions(model)
+    cdf.composition = [comp_of(c) for c in cdf.complex_id]
+    CSV.write(joinpath(dir, "$(run_id)_complexes.csv"), cdf)
+    CSV.write(joinpath(dir, "$(run_id)_acr.csv"),       DataFrames.DataFrame(result.acr))
+    CSV.write(joinpath(dir, "$(run_id)_acrr.csv"),      DataFrames.DataFrame(result.acrr))
+    CSV.write(joinpath(dir, "$(run_id)_stats.csv"),
+              DataFrames.DataFrame(key=collect(string.(keys(result.stats))),
+                                   value=collect(string.(values(result.stats)))))
+end
+
 # ---- single run ---------------------------------------------------------------------
-function run_config(cfg)
+function run_config(cfg; run_id::AbstractString="$(MODELTAG)_$(cfg.label)_seed$(cfg.seed)")
     mp = get_model(cfg.variant, cfg.blocked_tol)
     t0 = time()
     result = activity_concordance_analysis(
@@ -249,6 +313,10 @@ function run_config(cfg)
     elapsed = time() - t0
     n_acr  = length(Set(result.acr.metabolite_id))
     n_acrr = length(Set(zip(result.acrr.metabolite_1, result.acrr.metabolite_2)))
+    # Structural measures — capture ALL the important ones, per run:
+    # giant module size (concordance + kinetic), module counts, singletons, sizes.
+    conc_n, conc_giant, conc_single = module_size_stats(result.complexes.concordance_module)
+    kin_n,  kin_giant,  kin_single  = module_size_stats(result.complexes.kinetic_module; include_zero=false)
     row = (
         model=MODELTAG, label=cfg.label, seed=cfg.seed,
         use_transitivity=cfg.use_transitivity, kinetic_efficient=cfg.kinetic_efficient,
@@ -256,17 +324,22 @@ function run_config(cfg)
         variant=String(cfg.variant), blocked_tol=cfg.blocked_tol,
         concordance_tolerance=cfg.concordance_tolerance, balanced_threshold=cfg.balanced_threshold,
         cv_threshold=cfg.cv_threshold, sample_size=cfg.sample_size,
+        n_complexes=get(result.stats, "n_complexes", missing),
+        n_balanced=get(result.stats, "n_balanced", missing),
         n_concordance_modules=get(result.stats, "n_concordance_modules", missing),
         n_concordant_total=get(result.stats, "n_concordant_total", missing),
+        giant_concordance_size=conc_giant, n_singleton_concordance=conc_single,
+        n_kinetic_modules=kin_n, giant_kinetic_size=kin_giant, n_singleton_kinetic=kin_single,
         n_acr=n_acr, n_acrr=n_acrr,
         partition_fp=partition_fingerprint(result), elapsed_s=round(elapsed, digits=1),
     )
     println("[$(cfg.label) seed=$(cfg.seed) trans=$(cfg.use_transitivity) " *
             "eff=$(cfg.kinetic_efficient) obj=$(row.objective_bound) var=$(row.variant) " *
             "btol=$(cfg.blocked_tol) ctol=$(cfg.concordance_tolerance)] " *
-            "modules=$(row.n_concordance_modules) " *
+            "modules=$(row.n_concordance_modules) giant_conc=$conc_giant giant_kin=$kin_giant " *
             "acr=$n_acr acrr=$n_acrr fp=$(row.partition_fp) t=$(row.elapsed_s)s")
     flush(stdout)
+    save_full_result(result, run_id, mp)   # persist the full package result, not just the summary
     return row
 end
 
@@ -274,7 +347,7 @@ end
 if ARRAY_ID !== nothing
     # ---- SLURM array mode: run exactly one config -----------------------------------
     1 <= ARRAY_ID <= length(CONFIGS) || error("ARRAY_ID $ARRAY_ID out of range 1:$(length(CONFIGS))")
-    row = run_config(CONFIGS[ARRAY_ID])
+    row = run_config(CONFIGS[ARRAY_ID]; run_id="$(MODELTAG)_task_$(lpad(ARRAY_ID, 4, '0'))")
     taskfile = joinpath(OUTDIR, "$(MODELTAG)_task_$(lpad(ARRAY_ID, 4, '0')).csv")
     CSV.write(taskfile, DataFrames.DataFrame([row]))
     println("Wrote $taskfile")
@@ -282,7 +355,7 @@ else
     # ---- whole grid in one process --------------------------------------------------
     rows = NamedTuple[]
     for (i, cfg) in enumerate(CONFIGS)
-        push!(rows, run_config(cfg))
+        push!(rows, run_config(cfg; run_id="$(MODELTAG)_run_$(lpad(i, 4, '0'))"))
         CSV.write(joinpath(OUTDIR, "$(MODELTAG)_all_runs.csv"), DataFrames.DataFrame(rows))
     end
     println("\nDone. Wrote $(length(rows)) runs to $(joinpath(OUTDIR, "$(MODELTAG)_all_runs.csv"))")
