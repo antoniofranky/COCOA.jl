@@ -229,6 +229,14 @@ function kinetic_analysis(
     # Avoids repeated sparse matrix indexing in find_entry_complexes and tarjan_scc
     cached_adj = build_cached_adjacency(A_matrix, length(complex_ids))
 
+    # Remark S2-1: the simplified 2-phase Upstream Algorithm is equivalent to the
+    # full algorithm ONLY when terminal strong linkage classes are identified on
+    # the FULL network. Precompute the globally-terminal complexes once, on the
+    # whole complex graph, so Phase IV uses the network's terminal SLCs rather
+    # than per-module induced-subgraph SCCs (which broke S2-1's premise and
+    # diverged from the reference implementation on genome-scale networks).
+    global_terminal = compute_global_terminal_complexes(cached_adj, length(complex_ids))
+
     # Store in a named tuple for easy passing
     network = (
         A=A_matrix,
@@ -238,7 +246,8 @@ function kinetic_analysis(
         complex_to_idx=complex_to_idx,
         acr_augmentation=acr_augmentation,
         enable_advanced_merging=enable_advanced_merging,
-        cached_adj=cached_adj
+        cached_adj=cached_adj,
+        global_terminal=global_terminal
     )
 
     # Extract balanced and unbalanced modules (keep ALL modules including singletons)
@@ -308,7 +317,8 @@ function kinetic_analysis(
                 metabolite_ids=network.metabolite_ids, complex_to_idx=network.complex_to_idx,
                 acr_augmentation=acr_augmentation,
                 enable_advanced_merging=enable_advanced_merging,
-                cached_adj=network.cached_adj
+                cached_adj=network.cached_adj,
+                global_terminal=network.global_terminal
             )
             @debug "Updated network with ACR augmentation" n_acr = length(current_known_acr)
         end
@@ -599,59 +609,40 @@ function upstream_algorithm(
     remaining = [complex_ids[i] for i in current_indices]
     @debug "Phase IV: Removing terminal strong linkage classes" remaining
 
-    # Phase IV: Find and remove all terminal strong linkage classes using Tarjan's algorithm
-    # As per Remark S2-1, we identify terminal SCCs in the current set (C_-4).
-    # Exit complexes correspond to NON-TERMINAL SCCs (because they have edges to outside)
-    # and are thus preserved.
-    # Use cached adjacency if available for O(1) neighbor lookup
-    sccs = if has_cached_adj
-        tarjan_scc_cached(current_indices, network.cached_adj)
+    # Phase IV: Remove complexes that belong to a terminal strong linkage class.
+    # Remark S2-1 requires terminal SLCs to be identified on the FULL complex
+    # graph, not per-module. When `network.global_terminal` is available (the set
+    # of complexes in terminal SLCs of the full network, computed once), remove
+    # those; this reproduces the reference implementation's Phase IV. The legacy
+    # per-subset SCC path is kept as a fallback only when the global set is absent.
+    if haskey(network, :global_terminal)
+        n_before = length(current_indices)
+        setdiff!(current_indices, network.global_terminal)
+        @debug "  Removed globally-terminal complexes (full-network SLCs)" removed = n_before - length(current_indices)
     else
-        tarjan_scc(current_indices, A_matrix)
-    end
-    @debug "  Found $(length(sccs)) strongly connected components"
+        sccs = if has_cached_adj
+            tarjan_scc_cached(current_indices, network.cached_adj)
+        else
+            tarjan_scc(current_indices, A_matrix)
+        end
+        @debug "  Found $(length(sccs)) strongly connected components (subset fallback)"
 
-    # Debug: Show all SCCs with their terminal status
-    @debug "  SCC analysis:" begin
-        for (i, scc) in enumerate(sccs)
-            scc_symbols = [complex_ids[j] for j in scc]
+        # Identify terminal/non-terminal SCCs WITHOUT modifying current_indices
+        original_indices = copy(current_indices)
+        terminal_sccs = Set{Int}[]
+        for scc in sccs
             is_term = if has_cached_adj
-                is_terminal_scc_cached(scc, current_indices, network.cached_adj)
+                is_terminal_scc_cached(scc, original_indices, network.cached_adj)
             else
-                is_terminal_scc_idx(scc, current_indices, A_matrix)
+                is_terminal_scc_idx(scc, original_indices, A_matrix)
             end
-            @debug "    SCC $i (size $(length(scc))): $scc_symbols - Terminal: $is_term"
+            is_term && push!(terminal_sccs, scc)
         end
-    end
-
-    # Identify terminal/non-terminal SCCs WITHOUT modifying current_indices
-    # CRITICAL: Must check all SCCs against the SAME set of complexes
-    original_indices = copy(current_indices)
-    terminal_sccs = Set{Int}[]
-    non_terminal_sccs = Set{Int}[]
-
-    for scc in sccs
-        scc_symbols = [complex_ids[i] for i in scc]
-        is_term = if has_cached_adj
-            is_terminal_scc_cached(scc, original_indices, network.cached_adj)
-        else
-            is_terminal_scc_idx(scc, original_indices, A_matrix)
+        for scc in terminal_sccs
+            setdiff!(current_indices, scc)
         end
-        @debug "  SCC (size $(length(scc))): $scc_symbols - Terminal: $is_term"
-
-        if is_term
-            push!(terminal_sccs, scc)
-        else
-            push!(non_terminal_sccs, scc)
-        end
+        @debug "  Removed $(length(terminal_sccs)) terminal SCCs (subset fallback)"
     end
-
-    # Remove all terminal SCCs
-    for scc in terminal_sccs
-        setdiff!(current_indices, scc)
-    end
-
-    @debug "  Removed $(length(terminal_sccs)) terminal SCCs, kept $(length(non_terminal_sccs)) non-terminal SCCs"
 
     # Convert back to symbols using complex_ids vector
     upstream_set = Set(complex_ids[i] for i in current_indices if i <= length(complex_ids))
@@ -894,6 +885,28 @@ function is_terminal_scc_cached(scc::Set{Int}, all_complexes::Set{Int}, cached_a
         end
     end
     return true
+end
+
+"""
+    compute_global_terminal_complexes(cached_adj, n_complexes) -> Set{Int}
+
+Return the set of complexes that lie in a **terminal strong linkage class of the
+full complex graph**. Per the manuscript's Remark S2-1, the simplified 2-phase
+Upstream Algorithm (Phase I + IV) equals the full 4-phase algorithm only when
+terminal strong linkage classes are identified on the whole network. Computing
+the strongly connected components once, over all complexes, and flagging those
+with no outgoing edge as terminal, restores that premise (the previous
+implementation computed SCCs per-module subset, which diverged from the
+reference on genome-scale networks). O(V+E), done once per analysis.
+"""
+function compute_global_terminal_complexes(cached_adj::CachedAdjacency, n_complexes::Int)
+    all_nodes = Set(1:n_complexes)
+    sccs = tarjan_scc_cached(all_nodes, cached_adj)
+    terminal = Set{Int}()
+    for scc in sccs
+        is_terminal_scc_cached(scc, all_nodes, cached_adj) && union!(terminal, scc)
+    end
+    return terminal
 end
 
 """
