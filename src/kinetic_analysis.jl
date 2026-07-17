@@ -420,16 +420,15 @@ function kinetic_analysis(
     # Finalize with singletons and balanced modules
     kinetic_modules = add_singleton_balanced(kinetic_modules, current_concordance[1], current_concordance[2:end], network)
 
-    # Final ACR-based merging pass for singletons added by add_singleton_balanced
-    # This handles cases like {A+C} merging with {F, A, C+F, E, B+D}
-    if !isempty(current_known_acr)
-        @debug "Final ACR-based merging pass" n_modules_before = length(kinetic_modules)
-
-        # Try merging with known ACR (converting to vector form expected by merge_coupled_sets)
+    # Final shared-complex merge (Lemma S3-1): the balanced weak linkage classes just
+    # added may overlap existing modules; unify them (and any ACR-difference merges).
+    # The reference performs this merge unconditionally (its mdiff/clustmg step), so it
+    # runs here regardless of whether ACR metabolites were found.
+    begin
+        @debug "Final shared-complex merging pass" n_modules_before = length(kinetic_modules)
         final_merged = merge_coupled_sets(kinetic_modules, network)
-
         if length(final_merged) < length(kinetic_modules)
-            @debug "Final ACR merging reduced module count" before = length(kinetic_modules) after = length(final_merged)
+            @debug "Final merging reduced module count" before = length(kinetic_modules) after = length(final_merged)
             kinetic_modules = final_merged
         end
     end
@@ -1881,13 +1880,15 @@ function add_singleton_balanced(
 
     # Step 1: Add weak linkage classes composed entirely of balanced complexes
     # (R implementation lines 141-155)
+    # Add ALL pure-balanced weak linkage classes (reference R lines 141-155 add them
+    # unconditionally; overlapping ones are then unified by the shared-complex merge,
+    # Lemma S3-1). Skipping overlapping classes here would drop coupled balanced
+    # complexes that should merge into the module they overlap.
     weak_modules = find_balanced_weak_linkage_classes(balanced, all_complexes, network)
     for wm in weak_modules
-        if isdisjoint(wm, assigned)
-            push!(result, wm)
-            union!(assigned, wm)
-            @debug "Added weak linkage class as kinetic module" size = length(wm)
-        end
+        push!(result, wm)
+        union!(assigned, wm)
+        @debug "Added weak linkage class as kinetic module" size = length(wm)
     end
 
     # Step 2: Add all remaining unassigned complexes as singletons

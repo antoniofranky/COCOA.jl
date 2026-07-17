@@ -49,7 +49,6 @@ model_processed = model_canon |>
 results = activity_concordance_analysis(
     model_processed;
     optimizer=HiGHS.Optimizer,
-    objective_bound=COBREXA.relative_tolerance_bound(0.999),
     kinetic_analysis=true # false, if you only want concordance modules
 )
 ```
@@ -70,8 +69,11 @@ results = activity_concordance_analysis(
     model;
     optimizer=HiGHS.Optimizer,
 
-    # Objective constraint
-    objective_bound=COBREXA.relative_tolerance_bound(0.999),
+    # Objective constraint: `nothing` (the default) analyses the full steady-state
+    # cone. Restricting flux to a near-optimal face, e.g.
+    # `COBREXA.relative_tolerance_bound(0.999)`, yields a thin, ill-conditioned
+    # polytope on which the concordance partition becomes seed-dependent.
+    objective_bound=nothing,
 
     # Analysis parameters (values shown are the defaults)
     concordance_tolerance=0.01,      # Tolerance for concordance detection
@@ -339,7 +341,9 @@ print("ACR metabolites:", list(result.acr.metabolite_id))
 ```
 
 A complete, runnable script (with preprocessing) is in
-[`examples/python_quickstart.py`](examples/python_quickstart.py).
+[`examples/python/quickstart_simple.py`](examples/python/quickstart_simple.py).
+See [`examples/python/README.md`](examples/python/README.md) for both the simple
+and the HPC-robust offline setups.
 
 > **Clean shutdown.** Let the Python process return normally rather than calling `os._exit()` while
 > Julia objects are still alive — forcing an abrupt teardown can trigger a *bus error* as the Julia

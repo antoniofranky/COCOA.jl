@@ -14,7 +14,7 @@ Setup (one-time)
 
 Run
 ---
-    python examples/python_quickstart.py
+    python examples/python/quickstart_simple.py
 
 On HPC / locked-down systems
 ----------------------------

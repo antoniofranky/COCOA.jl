@@ -13,11 +13,11 @@ paths.
 ## Path A — simple (standard workstation)
 
 Use juliacall's auto-managed environment; it installs Julia and the required
-packages on first run. See [`../python_quickstart.py`](../python_quickstart.py).
+packages on first run. See [`quickstart_simple.py`](quickstart_simple.py).
 
 ```bash
 pip install juliacall
-python examples/python_quickstart.py
+python examples/python/quickstart_simple.py
 ```
 
 This does `Pkg.add(...)` from inside juliacall on first run. It is the easiest
