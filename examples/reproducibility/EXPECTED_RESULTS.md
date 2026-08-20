@@ -36,6 +36,19 @@ Full steady-state cone, concordance tolerance 10⁻².
 | 20000 | 0.01 | on | 3 | 3 | 682–683 | 106 | 0 | 1378 |
 | 1000 | 0.05 | on | 1 | 1 | 679 | 126 | 0 | 1896 |
 
+## iAF1260b (genome scale)
+
+Full steady-state cone, concordance tolerance 10⁻², seed × transitivity (one further run
+discarded because its preprocessed network differed).
+
+| Transitivity | Runs | Distinct concordance partitions | Concordance modules | Giant kinetic | ACR | ACRR |
+|---|---:|---:|---:|---:|---:|---:|
+| on | 10 | 10 | 1994–2002 | 40–78 | 0 | 770–1327 |
+| off | 8 | 8 | 1998–2001 | 40 | 0 | 770–846 |
+
+The giant kinetic module is 40 for every seed with transitivity off, and in all but one seed
+with transitivity on (where a borderline sampled pair merges transitively to give 78).
+
 ACR and ACRR denote the numbers of ACR metabolites and ACRR metabolite pairs; CV, coefficient
 of variation. Small run-to-run differences in the partition (not in the giant module or ACR)
 are expected at genome scale and reflect flux sampling, not a defect.
