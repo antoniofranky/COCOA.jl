@@ -18,7 +18,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=schaffran1@uni-potsdam.de
+#SBATCH --mail-user=YOUR_EMAIL@example.com   # set to your address, or remove these two mail lines
 
 set -euo pipefail
 

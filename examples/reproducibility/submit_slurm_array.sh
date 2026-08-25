@@ -5,7 +5,7 @@
 # per-task CSVs into <MODELTAG>_all_runs.csv.
 #
 # Run from the repo root (or set REPRO_DIR). Required: MODEL, OUTDIR.
-#   MODEL=/path/iJR904.xml OUTDIR=/work/schaffran1/COCOA_revision/results \
+#   MODEL=path/to/iJR904.xml OUTDIR=results \
 #     CPUS=16 MEM=64G TIME=02:00:00 bash examples/reproducibility/submit_slurm_array.sh
 # Optional: MODELTAG, SEEDS, EXPERIMENTS, LOGDIR.
 # =====================================================================================
@@ -26,7 +26,7 @@ QOS="${QOS:-}"            # optional SLURM QOS, e.g. "long" for walltime > 2 day
 PARTITION="${PARTITION:-}" # optional partition override
 LOGDIR="${LOGDIR:-$(dirname "$OUTDIR")/slurm_logs}"
 mkdir -p "$LOGDIR" "$OUTDIR"
-MAIL="schaffran1@uni-potsdam.de"
+MAIL="${MAIL:-your-email@example.com}"  # override via: MAIL=you@example.com
 
 echo "Instantiating environment ..."
 julia --project="$REPRO_DIR" -e 'import Pkg; Pkg.instantiate()'

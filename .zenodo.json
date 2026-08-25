@@ -1,0 +1,21 @@
+{
+  "upload_type": "software",
+  "title": "COCOA.jl: A Julia package for high-performance analysis of concordance and kinetic modules in biochemical networks",
+  "description": "COCOA.jl is a Julia package for concordance and kinetic-module analysis of genome-scale biochemical reaction networks. It reimplements and scales the Upstream Algorithm of Küken et al. (2022) and Langary et al. (2025), adding cached parallel LP solves, transitivity-based pruning, and streaming candidate filtering, and integrates with COBREXA.jl / AbstractFBCModels. This release (v1.1.0) accompanies the Bioinformatics application note (BIOINF-2026-1436).",
+  "creators": [
+    {"name": "Schaffranke, Anton", "affiliation": "Bioinformatics Department, Institute of Biochemistry and Biology, University of Potsdam, Potsdam, Germany"},
+    {"name": "Küken, Anika", "affiliation": "Bioinformatics Department, Institute of Biochemistry and Biology, University of Potsdam, Potsdam, Germany"},
+    {"name": "Nikoloski, Zoran", "affiliation": "Bioinformatics Department, Institute of Biochemistry and Biology, University of Potsdam, Potsdam, Germany"}
+  ],
+  "keywords": [
+    "metabolic networks",
+    "concordance analysis",
+    "kinetic modules",
+    "constraint-based modeling",
+    "absolute concentration robustness",
+    "Julia",
+    "systems biology"
+  ],
+  "license": "MIT",
+  "access_right": "open"
+}

@@ -4,7 +4,7 @@
 #
 # Usage:
 #   MODELS="/path/e_coli_core.xml,/path/iAB_RBC_283.xml,..." \
-#   OUTDIR=/work/schaffran1/COCOA_revision/results \
+#   OUTDIR=results \
 #   julia --project=examples/reproducibility examples/reproducibility/model_sizing.jl
 
 using Distributed
