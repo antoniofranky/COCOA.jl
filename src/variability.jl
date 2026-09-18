@@ -105,6 +105,113 @@ warmup_data = activity_variability_analysis(
 )
 ```
 """
+
+"""
+$(TYPEDSIGNATURES)
+
+Deterministic replacement for `COBREXA.constraints_variability` in the AVA stage.
+
+Why this exists. `COBREXA.constraints_variability` runs through
+`screen_optimization_model`, i.e. `D.pmap` over a `D.CachingPool` — tasks are handed
+out as workers fall idle — while each worker mutates ONE cached JuMP model, setting a
+new objective per target. On a degenerate flux polytope several optimal vertices share
+the same optimal value, and which one the solver returns depends on the warm-start
+basis, hence on which targets that worker happened to process before. The scalar
+min/max are rounded downstream and come out stable, but the full flux vectors do not —
+and those vectors are the ACHR sampler's start points. Everything downstream of the
+sample (candidate pairs, concordance, modules) then varies between identical runs.
+
+Measured on *Saccharomyces cerevisiae*: three identical runs produced three different
+partitions, with the candidate-pair count swinging by 20-63 %.
+
+The fix is the same one used in [`screen_directions_optimization_model`](@ref): the
+worker-local model is rebuilt on every call, so all workers start from an identical
+fresh model, and it is enough to fix the *partition* of targets into chunks. Chunk k is
+always the index set k, k+n_chunks, k+2*n_chunks, …, always processed in that order, so
+which physical worker executes it does not affect the result. Round-robin rather than
+contiguous blocks keeps the load balanced when LP cost varies between targets.
+
+Reproducibility holds at a fixed worker count; the count is recorded in the run stats.
+"""
+function constraints_variability_static(
+    constraints::C.ConstraintTree,
+    targets::Vector{<:C.Value};
+    output,
+    output_type::Type{T},
+    optimizer,
+    settings=[],
+    workers=D.workers(),
+) where {T}
+    target_array = [(dir, tgt) for tgt in targets, dir in (-1, 1)]
+    n = length(target_array)
+    results = Matrix{Union{Nothing,T}}(undef, size(target_array))
+    n == 0 && return results
+
+    worker_cache = COBREXA.worker_local_data(constraints) do c
+        om = COBREXA.optimization_model(c; optimizer=optimizer)
+        for s in [COBREXA.configuration.default_solver_settings; settings]
+            s(om)
+        end
+        return om
+    end
+
+    nw = max(1, length(workers))
+    n_chunks = min(nw, n)
+
+    chunk_results = D.pmap(
+        k -> begin
+            om = COBREXA.get_worker_local_data(worker_cache)
+            map(k:n_chunks:n) do i
+                dir, tgt = target_array[i]
+                J.@objective(om, COBREXA.Maximal, C.substitute(dir * tgt, om[:x]))
+                J.optimize!(om)
+                COBREXA.is_solved(om) ? output(dir, om) : nothing
+            end
+        end,
+        D.CachingPool(workers),
+        1:n_chunks,
+    )
+
+    for (k, res) in enumerate(chunk_results)
+        for (j, i) in enumerate(k:n_chunks:n)
+            results[i] = res[j]
+        end
+    end
+    return results
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+`ConstraintTree`-shaped wrapper around [`constraints_variability_static`](@ref), doing
+the same deflate/reinflate round trip as COBREXA's own overload so the result tree keeps
+the shape and order callers expect.
+
+Exists so that the AVA stage and blocked-reaction detection share ONE deterministic
+implementation rather than each growing their own copy.
+"""
+function constraints_variability_tree_static(
+    constraints::C.ConstraintTree,
+    targets::C.ConstraintTree;
+    output=nothing,
+    output_type=nothing,
+    kwargs...
+)
+    out_f = output === nothing ? ((dir, om) -> dir * J.objective_value(om)) : output
+    out_T = output_type === nothing ? Float64 : output_type
+    result_array = constraints_variability_static(
+        constraints,
+        COBREXA.tree_deflate(C.value, targets, C.Value);
+        output=out_f, output_type=out_T, kwargs...
+    )
+    return COBREXA.tree_reinflate(
+        targets,
+        Tuple{eltype(result_array),eltype(result_array)}[
+            tuple(a, b) for (a, b) in eachrow(result_array)
+        ],
+    )
+end
+
 function activity_variability_analysis(
     constraints::C.ConstraintTree,
     complex_ids::Vector{Symbol};
@@ -113,17 +220,29 @@ function activity_variability_analysis(
     workers=D.workers(),
     output=nothing,
     output_type=nothing,
-    return_warmup_points::Bool=false
+    return_warmup_points::Bool=false,
+    scheduling::Symbol=:static
 )
-    ava_results = COBREXA.constraints_variability(
-        constraints.balance,
-        constraints.activities;
-        optimizer,
-        settings,
-        workers,
-        (output === nothing ? () : (output=output,))...,
-        (output_type === nothing ? () : (output_type=output_type,))...,
-    )
+    ava_results = if scheduling === :static
+        constraints_variability_tree_static(
+            constraints.balance,
+            constraints.activities;
+            output=output, output_type=output_type,
+            optimizer=optimizer, settings=settings, workers=workers,
+        )
+    elseif scheduling === :dynamic
+        COBREXA.constraints_variability(
+            constraints.balance,
+            constraints.activities;
+            optimizer,
+            settings,
+            workers,
+            (output === nothing ? () : (output=output,))...,
+            (output_type === nothing ? () : (output_type=output_type,))...,
+        )
+    else
+        throw(ArgumentError("scheduling must be :static or :dynamic, got $(repr(scheduling))"))
+    end
 
     if return_warmup_points && output_type == Tuple{Float64,Vector{Float64}}
         return _extract_warmup_points(ava_results, complex_ids)
@@ -218,7 +337,19 @@ Returns `(activity, flux_vector)` if optimization succeeds, `(nothing, nothing)`
 Used to generate warmup points for concordance analysis.
 """
 function ava_output_with_warmup(dir, om; digits, collect_flux=true)
-    J.termination_status(om) != J.OPTIMAL && return (nothing, nothing)
+    # Accept ALMOST_OPTIMAL too. Requiring strict OPTIMAL discarded solves whose value
+    # is perfectly usable at the thresholds this feeds (balanced_threshold 1e-7 against
+    # relaxed solver tolerances ~1e-6..1e-8), and a discarded AVA result becomes a NaN
+    # activity range, which `activity_concordance_analysis` classifies as `unrestricted`
+    # — i.e. a failed solve turned into a statement about the complex.
+    # Return `nothing`, NOT `(nothing, nothing)`: the caller stores this in a
+    # `Union{Nothing,Tuple{Float64,Vector{Float64}}}` slot, which a tuple of Nothings
+    # cannot convert into. The old code returned the tuple too, but only when the
+    # termination status was not OPTIMAL — and in that case the caller never invoked
+    # this function at all, so the branch was dead. Accepting ALMOST_OPTIMAL made it
+    # live for OPTIMAL-but-primal-infeasible solves, and 40 of 343 models died on the
+    # resulting conversion error.
+    J.is_solved_and_feasible(om; allow_local=true, allow_almost=true) || return nothing
 
     objective_val = round(J.objective_value(om), digits=digits)
     activity = dir * objective_val

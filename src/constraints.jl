@@ -123,6 +123,7 @@ function concordance_constraints(
     return_complexes::Bool=false,
     interface=nothing,
     use_unidirectional_constraints::Bool=false,
+    cc_scale_bound::Float64=999.0,
 )
     # TODO: Apply modifications correctly COBREXA style (not implemented yet)
     if use_unidirectional_constraints
@@ -138,8 +139,8 @@ function concordance_constraints(
     activities, complexes_info = extract_activities_from_constraints(constraints)
 
     # Create Charnes-Cooper templates for both directions
-    pos_template = create_charnes_cooper_template(balance_constraints, :positive)
-    neg_template = create_charnes_cooper_template(balance_constraints, :negative)
+    pos_template = create_charnes_cooper_template(balance_constraints, :positive; scale_bound=cc_scale_bound)
+    neg_template = create_charnes_cooper_template(balance_constraints, :negative; scale_bound=cc_scale_bound)
 
     # Structure the final constraints tree by composing its parts
     final_constraints = C.ConstraintTree(
@@ -167,15 +168,27 @@ Create a Charnes-Cooper template for a specific direction with balance constrain
 function create_charnes_cooper_template(
     base_constraints::C.ConstraintTree,
     direction::Symbol;
+    scale_bound::Float64=999.0
 )
     # Start with a copy of base constraints (includes stoichiometry, etc.)
     template_constraints = deepcopy(base_constraints)
 
-    # Add t variable
+    # Add the Charnes-Cooper scaling variable t.
+    #
+    # Only the SIGN of t belongs to the transformation: v = w/t with t > 0 gives the cone
+    # of steady states, t < 0 the opposite one. The magnitude is fixed by the
+    # normalisation the caller adds (activity of the reference complex = 1), so t has to
+    # grow as that activity gets small: an unscaled activity of ε needs t = 1/ε.
+    #
+    # A hard cap therefore CUTS OFF steady states instead of regularising anything — with
+    # the historical cap of 999, any steady state whose reference activity is below about
+    # 1e-3 becomes unreachable and the LP reports infeasible although the state exists.
+    # `scale_bound` is exposed so the effect can be measured rather than assumed; the
+    # default reproduces the historical behaviour exactly.
     if direction == :positive
-        template_constraints += :t^C.variable(bound=C.Between(0, 999))
+        template_constraints += :t^C.variable(bound=C.Between(0, scale_bound))
     else # direction == :negative
-        template_constraints += :t^C.variable(bound=C.Between(-999, 0))
+        template_constraints += :t^C.variable(bound=C.Between(-scale_bound, 0))
     end
 
     # Replace flux bounds with scaled bounds

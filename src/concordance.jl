@@ -24,9 +24,11 @@ mutable struct MutableCounts
     transitive::Int
     skipped::Int
     total_optimizations::Int  # Total number of optimization attempts
+    unknown::Int             # Pairs whose LPs failed: NO verdict, neither concordant nor not
+    success_no_value::Int    # Status said success, yet no usable objective value came back
 end
 
-MutableCounts() = MutableCounts(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+MutableCounts() = MutableCounts(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 
 """
 Configuration for batch processing.
@@ -38,6 +40,7 @@ struct BatchProcessingConfig
     optimizer
     settings::Vector
     workers::Vector
+    scheduling::Symbol
 end
 
 struct BatchOptimizationResult
@@ -55,6 +58,8 @@ struct BatchOptimizationResult
     total_optimizations::Int
     optimization_results::Vector{Tuple{Int,Int,Symbol,Float64}}
     direct_concordant_pairs::Union{Nothing,Set{Tuple{Int,Int}}}
+    unknown::Int
+    success_no_value::Int
 end
 
 
@@ -102,6 +107,8 @@ function accumulate_results!(
     acc.counts.transitive += counts.transitive
     acc.counts.skipped += counts.skipped
     acc.counts.total_optimizations += counts.total_optimizations
+    acc.counts.unknown += counts.unknown
+    acc.counts.success_no_value += counts.success_no_value
 
     # Merge concordant pairs efficiently
     merge_pairs!(acc.concordant_pairs, concordant_pairs)
@@ -128,6 +135,8 @@ function reset!(acc::BatchResultAccumulator)::Nothing
     acc.counts.transitive = 0
     acc.counts.skipped = 0
     acc.counts.total_optimizations = 0
+    acc.counts.unknown = 0
+    acc.counts.success_no_value = 0
     empty!(acc.optimization_results)
     empty!(acc.temp_pairs)
     empty!(acc.temp_values)
@@ -299,7 +308,9 @@ function process_full_batch!(
         batch_result.other_error,
         batch_result.transitive,
         batch_result.skipped,
-        batch_result.total_optimizations
+        batch_result.total_optimizations,
+        batch_result.unknown,
+        batch_result.success_no_value
     )
 
     # Accumulate results
@@ -322,6 +333,14 @@ end
 function log_batch_collection!(state::BatchProcessingState, streaming_filter::StreamingCandidateFilter)::Nothing
     collection_time = time() - state.batch_collection_start_time
     collection_time_str = Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, collection_time * 1000)), "HH:MM:SS.s")
+    # Flushed progress line: the @info below goes to stderr, which is buffered when
+    # redirected to a file, so a long genome-scale run showed nothing at all until it
+    # ended. This is the only signal that distinguishes "collecting candidates" from
+    # "solving their LPs" — the two phases the marker above lumps together.
+    progress("batch ", state.batches_processed, ": collected ",
+            length(state.current_batch), " candidates in ", round(collection_time, digits=1),
+            " s (examined ", streaming_filter.pairs_tested, " pairs, cv_filtered=",
+            streaming_filter.pairs_cv_filtered, ")")
 
     # Calculate progress percentage based on pairs actually examined by filter
     pairs_examined = streaming_filter.pairs_tested
@@ -354,13 +373,17 @@ function execute_batch_optimization!(
         settings=config.settings,
         workers=config.workers,
         concordance_tolerance=config.concordance_tolerance,
+        scheduling=config.scheduling,
         track_direct_pairs=track_direct_pairs
     )
 
     # Log timing
     optimization_time = time() - optimization_start_time
     opt_time_str = Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, optimization_time * 1000)), "HH:MM:SS.s")
-    @info "Batch $(state.batches_processed): $(length(state.current_batch)) optimized → $(batch_counts.concordant_count) concordant, $(batch_counts.non_concordant_count) non-concordant [$opt_time_str]"
+    if batch_counts.unknown_count > 0
+        @warn "Batch $(state.batches_processed): $(batch_counts.unknown_count) pair(s) left UNDECIDED — every LP failed (time limit / solver error); they are neither concordant nor non-concordant" batch_size = length(state.current_batch)
+    end
+    @info "Batch $(state.batches_processed): $(length(state.current_batch)) optimized → $(batch_counts.concordant_count) concordant, $(batch_counts.non_concordant_count) non-concordant, $(batch_counts.unknown_count) undecided [$opt_time_str]"
 
     # Create concordant pairs structure with correct count for statistics
     n_complexes = length(concordance_tracker.idx_to_id)
@@ -381,7 +404,9 @@ function execute_batch_optimization!(
         0, 0,  # transitive counts handled elsewhere  
         batch_counts.total_optimizations,
         batch_counts.optimization_results,
-        batch_counts.direct_concordant_pairs
+        batch_counts.direct_concordant_pairs,
+        batch_counts.unknown_count,
+        batch_counts.success_no_value_count
     )
 end
 
@@ -425,9 +450,13 @@ mutable struct PairConcordanceState
     has_negative::Bool
     has_timeout::Bool
     is_concordant::Bool
+    # True only when a COMPLETE, NaN-free comparison actually refuted concordance.
+    # A pair whose LPs merely failed (time limit, solver error) must NOT set this —
+    # otherwise a solver failure is recorded as the scientific claim "not concordant".
+    decisive_non_concordant::Bool
     reference_lambda::Float64
 
-    PairConcordanceState() = new(NaN, NaN, NaN, NaN, false, false, false, false, NaN)
+    PairConcordanceState() = new(NaN, NaN, NaN, NaN, false, false, false, false, false, NaN)
 end
 
 
@@ -507,7 +536,13 @@ results = activity_concordance_analysis(
 ## Analysis Parameters
 - `concordance_tolerance::Float64=0.01`: Tolerance for concordance detection
 - `balanced_threshold::Float64=1e-7`: Threshold for balanced complex detection
-- `cv_threshold::Float64=0.01`: Coefficient of variation threshold for candidate filtering
+- `cv_threshold::Float64=0.01`: Coefficient of variation threshold for candidate pre-filtering.
+    !!! warning "This pre-filter is a heuristic with false negatives"
+        Pairs whose sampled activity ratio has a CV above this threshold are discarded
+        **without ever being tested by an LP**. A genuinely concordant pair whose ratio
+        is poorly resolved by the flux sample is therefore lost. Raising `sample_size`
+        or `cv_threshold` widens the candidate set at the cost of runtime; the reported
+        concordance is a subset of the true concordance, never a superset.
 - `cv_epsilon::Float64=1e-16`: Small value added to avoid division by zero in CV calculation
 - `sample_size::Int=1000`: Number of samples for coefficient of variation estimation
 - `min_valid_samples::Int=10`: Minimum valid samples required for CV calculation
@@ -570,17 +605,23 @@ function activity_concordance_analysis(
     use_unidirectional_constraints::Bool=false,
     use_transitivity::Bool=true,
     n_burnin::Int=50,
+    n_base_points::Int=4,
     n_chains::Int=1,
     kinetic_analysis::Bool=false,
     kinetic_efficient::Bool=true,
     detailed_results::Bool=false,
+    scheduling::Symbol=:static,
+    cc_scale_bound::Float64=999.0,
+    inherit_non_concordance::Bool=true,
+    count_candidates_only::Bool=false,
 )
     start_time = time()
 
     @info "Starting concordance analysis" n_workers = length(workers) concordance_tolerance balanced_threshold cv_threshold sample_size use_unidirectional_constraints batch_size
 
     constraints, complexes =
-        concordance_constraints(model; use_unidirectional_constraints, return_complexes=true)
+        concordance_constraints(model; use_unidirectional_constraints, return_complexes=true,
+                                cc_scale_bound=cc_scale_bound)
 
     # Add objective bound constraint if specified (COBREXA pattern)
     if !isnothing(objective_bound)
@@ -649,6 +690,7 @@ function activity_concordance_analysis(
     # This removes numerical noise while ensuring values don't round across the threshold
     ava_digits = max(1, -floor(Int, log10(balanced_threshold)) + 1)
     ava_output_func = (dir, om) -> ava_output_with_warmup(dir, om; digits=ava_digits)
+    progress("phase: AVA start")
     @info "Running Activity Variability Analysis (AVA)" ava_digits balanced_threshold
     ava_time = @elapsed ava_results = activity_variability_analysis(
         constraints,
@@ -658,7 +700,8 @@ function activity_concordance_analysis(
         workers=workers,
         output=ava_output_func,
         output_type=Tuple{Float64,Vector{Float64}},
-        return_warmup_points=true
+        return_warmup_points=true,
+        scheduling=scheduling
     )
 
     ava_time_str = Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, ava_time * 1000)), "HH:MM:SS.s")
@@ -861,15 +904,26 @@ function activity_concordance_analysis(
     # Optimized with pre-allocated buffers to minimize allocations
     if n_random_points > 0 && size(warmup, 1) >= 2
         # Pre-allocate reusable buffers
-        max_base_points = min(4, size(warmup, 1))
+        # How many warmup vertices each start point mixes.
+        #
+        # With the historical value of 4 (and 2-4 actually used), every start point lies
+        # in a simplex spanned by at most 4 of the ~45,000 vertices, i.e. in a subspace of
+        # dimension <= 3 inside a 32,475-dimensional polytope. Fifty ACHR steps cannot
+        # undo that, so the sample clusters on thin slivers and ratios that merely LOOK
+        # constant there pass the CV gate — they then cost an LP each to refute. Mixing
+        # more vertices makes each start point a genuinely interior, better-spread point.
+        max_base_points = min(n_base_points, size(warmup, 1))
         weights = Vector{Float64}(undef, max_base_points)
         base_indices = Vector{Int}(undef, max_base_points)
         random_flux = Vector{Float64}(undef, size(warmup, 2))
 
         @inbounds for i in 1:n_random_points
             # Use varying numbers of base points for different exploration depths
-            n_base_points = 2 + (i % 3)  # Alternate between 2, 3, 4 base points
-            n_base_points = min(n_base_points, size(warmup, 1))
+            # Vary the mixing depth so the points are not all alike, but keep the
+            # maximum at `max_base_points`.
+            n_mix = max_base_points <= 2 ? max_base_points :
+                    (max_base_points ÷ 2) + (i % (max_base_points - max_base_points ÷ 2 + 1))
+            n_mix = min(n_mix, size(warmup, 1))
 
             # Reuse pre-allocated arrays
             Random.rand!(rng, view(base_indices, 1:n_base_points), 1:size(warmup, 1))
@@ -911,6 +965,7 @@ function activity_concordance_analysis(
 
     @info "Starting point composition" center_points = n_center_points random_combinations = n_random_points total = size(start_variables, 1)    # 6. Run the sampler with deterministic seeding for reproducible results
 
+    progress("phase: sampling start, start_points=", size(start_variables, 1))
     @info "Sampling..."
     samples_tree = COBREXA.sample_constraints(
         COBREXA.sample_chain_achr,
@@ -931,6 +986,8 @@ function activity_concordance_analysis(
     @debug "Number of samples per activity variable" n_samples = length(first(samples_tree)[2])
 
     # @debug "type of samples_tree" typeof(samples_tree)
+    progress("phase: sampling done, collecting candidates over ",
+            n_complexes, " complexes (", n_complexes * (n_complexes - 1) ÷ 2, " pairs)")
     @info "Creating chunked streaming filter for memory-efficient processing..."
 
     @info "Using fixed batch size" batch_size = batch_size n_complexes = length(complexes_vector)
@@ -945,7 +1002,8 @@ function activity_concordance_analysis(
             cv_threshold=cv_threshold,
             cv_epsilon=cv_epsilon,
             min_valid_samples=min_valid_samples,
-            use_transitivity=use_transitivity
+            use_transitivity=use_transitivity,
+            inherit_non_concordance=inherit_non_concordance
         )
     catch e
         @error "Failed to create streaming filter." exception = e
@@ -963,9 +1021,36 @@ function activity_concordance_analysis(
         use_transitivity,
         optimizer,
         settings,
-        workers
+        workers,
+        scheduling
     )
 
+    # Diagnostic mode: walk the filter and count what it would pass to the LP stage, then
+    # stop. The candidate count is what drives the LP bill, so this makes the effect of
+    # `sample_size` / `cv_threshold` measurable in minutes instead of days.
+    if count_candidates_only
+        n_cand = 0
+        t_filter = time()
+        for _ in streaming_filter
+            n_cand += 1
+        end
+        progress("candidates-only: ", n_cand, " candidates in ",
+                round(time() - t_filter, digits=1), " s (examined ",
+                streaming_filter.pairs_tested, " pairs, cv_filtered=",
+                streaming_filter.pairs_cv_filtered, ")")
+        return (complexes=(complex_id=String[], classification=String[],
+                           concordance_module=Int[], kinetic_module=Int[]),
+                acr=(metabolite_id=String[],),
+                acrr=(metabolite_1=String[], metabolite_2=String[]),
+                stats=Dict{String,Any}("n_candidate_pairs" => n_cand,
+                    "n_cv_filtered" => streaming_filter.pairs_cv_filtered,
+                    "n_pairs_examined" => streaming_filter.pairs_tested,
+                    "n_balanced" => n_balanced_complexes,
+                    "sample_size" => sample_size,
+                    "cv_threshold" => cv_threshold))
+    end
+
+    progress("phase: candidate collection + pair LPs start")
     concordance_time = @elapsed batch_results = process_streaming_batches(
         constraints,
         streaming_filter,
@@ -975,7 +1060,25 @@ function activity_concordance_analysis(
     )
     #TODO: FIx the time here
     concordance_time_str = Dates.format(Dates.Time(0) + Dates.Millisecond(round(Int, concordance_time * 1000)), "HH:MM:SS.s")
+    progress("phase: pair LPs done, building modules")
     @info "Building concordance modules [$concordance_time_str]"
+
+    # Surface solver attrition. Failed LPs no longer masquerade as non-concordance
+    # (see `process_concordance_batch`), but a high failure rate still means the
+    # partition rests on fewer decided pairs than it appears to, so it must not stay
+    # buried in the stats dictionary.
+    n_failed_lp_pairs = batch_results.timeout_pairs + batch_results.other_error_pairs +
+                        batch_results.infeasible_pairs + batch_results.unbounded_pairs +
+                        batch_results.infeasible_or_unbounded_pairs +
+                        batch_results.resource_limit_pairs + batch_results.numerical_error_pairs +
+                        batch_results.success_no_value_pairs
+    if batch_results.pairs_processed > 0
+        failure_rate = n_failed_lp_pairs / batch_results.pairs_processed
+        if batch_results.unknown_pairs > 0 || failure_rate > 0.01
+            @warn "Solver attrition during concordance testing" undecided_pairs = batch_results.unknown_pairs pairs_with_failed_lp = n_failed_lp_pairs candidate_pairs = batch_results.pairs_processed failure_rate_pct = round(100 * failure_rate, digits = 2) timeouts = batch_results.timeout_pairs other_errors = batch_results.other_error_pairs success_but_no_value = batch_results.success_no_value_pairs
+        end
+    end
+
     modules = extract_modules(concordance_tracker)
 
     elapsed = time() - start_time
@@ -1002,6 +1105,12 @@ function activity_concordance_analysis(
         "n_resource_limit_pairs" => batch_results.resource_limit_pairs,
         "n_numerical_error_pairs" => batch_results.numerical_error_pairs,
         "n_other_error_pairs" => batch_results.other_error_pairs,
+        "n_unknown_pairs" => batch_results.unknown_pairs,
+        "n_success_no_value_pairs" => batch_results.success_no_value_pairs,
+        "scheduling" => String(scheduling),
+        "cc_scale_bound" => cc_scale_bound,
+        "n_base_points" => n_base_points,
+        "inherit_non_concordance" => inherit_non_concordance,
         "n_total_optimizations" => batch_results.total_optimizations,
         "batches_completed" => batch_results.batches_completed,
         "elapsed_time" => elapsed,
@@ -1187,6 +1296,7 @@ Returns true if pair is still potentially concordant, false if non-concordant.
         # Check if min/max are concordant within tolerance
         if abs(state.positive_min - state.positive_max) > concordance_tolerance
             state.is_concordant = false
+            state.decisive_non_concordant = true
             return false
         end
         # Check lambda consistency
@@ -1195,12 +1305,14 @@ Returns true if pair is still potentially concordant, false if non-concordant.
             state.reference_lambda = current_lambda
         elseif abs(current_lambda - state.reference_lambda) > concordance_tolerance
             state.is_concordant = false
+            state.decisive_non_concordant = true
             return false
         end
     elseif direction == :negative && !isnan(state.negative_min) && !isnan(state.negative_max)
         # Check if min/max are concordant within tolerance
         if abs(state.negative_min - state.negative_max) > concordance_tolerance
             state.is_concordant = false
+            state.decisive_non_concordant = true
             return false
         end
         # Check lambda consistency
@@ -1209,6 +1321,7 @@ Returns true if pair is still potentially concordant, false if non-concordant.
             state.reference_lambda = current_lambda
         elseif abs(current_lambda - state.reference_lambda) > concordance_tolerance
             state.is_concordant = false
+            state.decisive_non_concordant = true
             return false
         end
     end
@@ -1217,7 +1330,11 @@ Returns true if pair is still potentially concordant, false if non-concordant.
     has_complete_positive = state.has_positive && !isnan(state.positive_min) && !isnan(state.positive_max)
     has_complete_negative = state.has_negative && !isnan(state.negative_min) && !isnan(state.negative_max)
 
-    if (state.has_positive || state.has_negative) && (has_complete_positive || has_complete_negative)
+    # A direction that already refuted concordance can never be overruled by a later
+    # direction: if the activity ratio is not constant in one cone, the pair is not
+    # concordant, full stop.
+    if !state.decisive_non_concordant &&
+       (state.has_positive || state.has_negative) && (has_complete_positive || has_complete_negative)
         # Only mark concordant if all tested directions are complete
         if (!state.has_positive || has_complete_positive) && (!state.has_negative || has_complete_negative)
             state.is_concordant = true
@@ -1377,6 +1494,8 @@ function build_final_results(state::BatchProcessingState)
         resource_limit_pairs=state.accumulator.counts.resource_limit,
         numerical_error_pairs=state.accumulator.counts.numerical_error,
         other_error_pairs=state.accumulator.counts.other_error,
+        unknown_pairs=state.accumulator.counts.unknown,
+        success_no_value_pairs=state.accumulator.counts.success_no_value,
         optimization_results=opt_results_dict,
         total_optimizations=state.accumulator.counts.total_optimizations
     )
@@ -1501,6 +1620,7 @@ function process_concordance_batch(
     settings=[],
     workers=workers,
     concordance_tolerance::Float64,
+    scheduling::Symbol=:static,
     track_direct_pairs::Bool=false
 )
 
@@ -1566,7 +1686,33 @@ function process_concordance_batch(
                 @debug "About to use immediate_status" immediate_status
 
                 # Get result (use NaN for invalid/missing values)
-                raw_value = if J.termination_status(om) in (J.OPTIMAL, J.LOCALLY_SOLVED) && J.is_solved_and_feasible(om)
+                # Accept ALMOST_OPTIMAL as well, matching the success bucket of
+                # `categorize_termination_status`. The two predicates used to disagree:
+                # an ALMOST_OPTIMAL solve was booked as a success but yielded NaN, so it
+                # showed up in no failure counter and (before the three-way verdict) was
+                # silently recorded as "not concordant" — 927 pairs on one yeast model.
+                #
+                # Using the value is sound here: ALMOST_OPTIMAL means optimal up to
+                # relaxed tolerances (~1e-6 at worst), while the decision this value
+                # feeds is |min - max| > concordance_tolerance = 1e-2, four orders of
+                # magnitude coarser. Anything that still yields no value stays NaN and is
+                # counted as `:success_no_value`.
+                # Accept ALMOST_OPTIMAL as well, matching the success bucket of
+                # `categorize_termination_status`. The two predicates used to disagree:
+                # an ALMOST_OPTIMAL solve was booked as a success but yielded NaN, so it
+                # appeared in no failure counter and (before the three-way verdict) was
+                # silently recorded as "not concordant".
+                #
+                # Using the value is sound: ALMOST_OPTIMAL means optimal up to relaxed
+                # tolerances (~1e-6 at worst) while the decision it feeds is
+                # |min - max| > concordance_tolerance = 1e-2, four orders coarser.
+                #
+                # What remains NaN here is diagnosed and counted, not logged: HiGHS can
+                # return termination OPTIMAL together with primal_status
+                # INFEASIBLE_POINT, which is what `n_success_no_value_pairs` counts.
+                # A per-occurrence println from the workers wrote 87,799 lines and 10 MB
+                # into a single genome-scale run before it was removed.
+                raw_value = if J.is_solved_and_feasible(om; allow_local=true, allow_almost=true)
                     J.objective_value(om)
                 else
                     NaN
@@ -1590,7 +1736,8 @@ function process_concordance_batch(
         test_array;
         optimizer=optimizer,
         settings=settings,
-        workers=workers
+        workers=workers,
+        scheduling=scheduling
     )
 
     # OPTIMIZED: Process results directly using efficient streaming processor
@@ -1614,7 +1761,8 @@ function process_concordance_batch(
     for i in 1:length(batch_pairs)
         pair_failure_counts[i] = Dict(:timeout => 0, :infeasible => 0, :unbounded => 0,
             :infeasible_or_unbounded => 0, :resource_limit => 0,
-            :numerical_error => 0, :other_error => 0, :success => 0)
+            :numerical_error => 0, :other_error => 0, :success => 0,
+            :success_no_value => 0)
     end
 
     # Debug: Track actual termination status frequencies and total optimizations
@@ -1628,8 +1776,19 @@ function process_concordance_batch(
         pair_idx = get(pair_lookup, (c1_id, c2_id), 0)
         pair_idx == 0 && continue
 
-        # Categorize the termination status
+        # Categorize the termination status.
+        #
+        # `categorize_termination_status` counts ALMOST_OPTIMAL as success, but the
+        # worker only extracts an objective value for OPTIMAL / LOCALLY_SOLVED that is
+        # additionally `is_solved_and_feasible`. An ALMOST_OPTIMAL solve therefore used
+        # to return NaN while being booked as a success — invisible in every failure
+        # counter, and (before the three-way verdict) silently recorded as "not
+        # concordant". Any solve that produced no usable value is a failure, whatever
+        # the status string says, and is counted as one.
         status_category = categorize_termination_status(termination_status)
+        if status_category == :success && isnan(value)
+            status_category = :success_no_value
+        end
         timeout = (status_category == :timeout)
 
         # Debug: Track termination status frequency
@@ -1654,6 +1813,8 @@ function process_concordance_batch(
     resource_limit_count = 0
     numerical_error_count = 0
     other_error_count = 0
+    unknown_count = 0
+    success_no_value_count = 0
     optimization_results_vec = Vector{Tuple{Int,Int,Symbol,Float64}}()
     direct_concordant_pairs = track_direct_pairs ? Set{Tuple{Int,Int}}() : nothing
 
@@ -1670,6 +1831,7 @@ function process_concordance_batch(
         failure_stats[:resource_limit] > 0 && (resource_limit_count += 1)
         failure_stats[:numerical_error] > 0 && (numerical_error_count += 1)
         failure_stats[:other_error] > 0 && (other_error_count += 1)
+        failure_stats[:success_no_value] > 0 && (success_no_value_count += 1)
 
         # Update concordance tracker directly based on results
         if state.is_concordant
@@ -1693,14 +1855,26 @@ function process_concordance_batch(
                 end
                 push!(optimization_results_vec, (c1_idx, c2_idx, final_direction, state.reference_lambda))
             end
-        else
+        elseif state.decisive_non_concordant
             add_non_concordant!(concordance_tracker, c1_idx, c2_idx)
             non_concordant_count += 1
+        else
+            # Neither proven concordant nor refuted: every LP for this pair failed or
+            # returned NaN. Recording it as non-concordant would turn a solver failure
+            # into a scientific claim, and `add_non_concordant!` would additionally lift
+            # that claim to the whole module pair via `non_concordant_modules`, so that
+            # under `use_transitivity=true` no pair between those two modules would ever
+            # be tested again. The pair is therefore left undecided and only counted.
+            unknown_count += 1
         end
     end
 
-    # Debug: Log termination status frequency and total optimizations for troubleshooting
-    @debug "Optimization statistics" total_optimizations_attempted status_frequency
+    # Termination-status histogram at @info, not @debug: this is the number that tells
+    # you whether a run's verdicts rest on solved LPs, and it was invisible for the
+    # whole 2025 run. `:success_no_value` pairs (status says solved, no usable objective
+    # value came back) are counted separately but the raw statuses are what identify the
+    # cause.
+    @info "Optimization statistics" total_optimizations_attempted status_frequency
 
     # Return counts in same format as process_batch_results! expected
     return (
@@ -1713,6 +1887,8 @@ function process_concordance_batch(
         resource_limit_count=resource_limit_count,
         numerical_error_count=numerical_error_count,
         other_error_count=other_error_count,
+        unknown_count=unknown_count,
+        success_no_value_count=success_no_value_count,
         total_optimizations=total_optimizations_attempted,
         optimization_results=optimization_results_vec,
         direct_concordant_pairs=direct_concordant_pairs
@@ -1736,6 +1912,7 @@ function screen_directions_optimization_model(
     optimizer,
     settings=[],
     workers=D.workers(),
+    scheduling::Symbol=:static,
 )
     # We pass one model for positive and one for negative constraints
     # to avoid problems with constraint modification of cached models
@@ -1762,11 +1939,62 @@ function screen_directions_optimization_model(
         (pos_constraints, neg_constraints)
     )
 
-    D.pmap(
-        (as...) -> f(COBREXA.get_worker_local_data(worker_cache), as...),
+    n_tests = length(first(args))
+    n_tests == 0 && return []
+
+    if scheduling === :dynamic
+        # Historical behaviour: `pmap` hands out tests one at a time as workers fall
+        # idle, so which worker sees which test — and therefore the warm-start basis
+        # each LP starts from — depends on wall-clock timing. Nondeterministic.
+        return D.pmap(
+            (as...) -> f(COBREXA.get_worker_local_data(worker_cache), as...),
+            D.CachingPool(workers),
+            args...,
+        )
+    end
+
+    scheduling === :static ||
+        throw(ArgumentError("scheduling must be :static or :dynamic, got $(repr(scheduling))"))
+
+    # Deterministic static round-robin.
+    #
+    # `worker_local_data` above is constructed fresh on every call, so each worker
+    # builds its two JuMP models from scratch for every batch — no state survives
+    # from the previous batch. Within a batch we therefore only have to make the
+    # *partition* of the tests fixed: chunk k is always the index set k, k+nw, k+2nw,
+    # …, always processed in that order, and every worker starts from an identical
+    # fresh model. Which physical worker executes chunk k is then irrelevant to the
+    # result, so no pinning is needed.
+    #
+    # Round-robin rather than contiguous blocks because LP cost varies by orders of
+    # magnitude between pairs; interleaving spreads the expensive ones evenly and
+    # keeps the load imbalance — the only cost of this scheme — small.
+    #
+    # Caveat, and it is recorded in the run metadata: the partition depends on the
+    # number of workers, so a run is reproducible at the same worker count.
+    nw = max(1, length(workers))
+    n_chunks = min(nw, n_tests)
+
+    chunk_results = D.pmap(
+        k -> begin
+            cache = COBREXA.get_worker_local_data(worker_cache)
+            [f(cache, map(a -> a[i], args)...) for i in k:n_chunks:n_tests]
+        end,
         D.CachingPool(workers),
-        args...,
+        1:n_chunks,
     )
+
+    # Reassemble into the original test order, so everything downstream — and above
+    # all the order in which verdicts reach the union-find tracker — is unchanged.
+    first_nonempty = findfirst(!isempty, chunk_results)
+    T = first_nonempty === nothing ? Any : typeof(chunk_results[first_nonempty][1])
+    out = Vector{T}(undef, n_tests)
+    for (k, res) in enumerate(chunk_results)
+        for (j, i) in enumerate(k:n_chunks:n_tests)
+            out[i] = res[j]
+        end
+    end
+    return out
 end
 
 """

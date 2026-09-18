@@ -253,16 +253,41 @@ function find_blocked_reactions(
     optimizer,
     flux_tolerance::Float64=1e-9,
     settings=[],
-    workers=D.workers()
+    workers=D.workers(),
+    scheduling::Symbol=:static
 )
-    # Run variability analysis on all fluxes
-    variability = COBREXA.constraints_variability(
-        constraints,
-        constraints.fluxes;
-        optimizer,
-        settings,
-        workers
-    )
+    # Deterministic by default. `COBREXA.constraints_variability` distributes its LPs
+    # with `pmap` + `CachingPool` over a per-worker mutated model, so borderline results
+    # depend on scheduling — and this function then thresholds them, deciding WHICH
+    # REACTIONS EXIST in every downstream model. Measured: three identical preprocessing
+    # runs of S. cerevisiae produced networks differing by up to 35 reactions (no_split)
+    # and 850 (random_0).
+    variability = if scheduling === :static
+        constraints_variability_tree_static(
+            constraints,
+            constraints.fluxes;
+            optimizer=optimizer, settings=settings, workers=workers
+        )
+    elseif scheduling === :dynamic
+        COBREXA.constraints_variability(
+            constraints,
+            constraints.fluxes;
+            optimizer,
+            settings,
+            workers
+        )
+    else
+        throw(ArgumentError("scheduling must be :static or :dynamic, got $(repr(scheduling))"))
+    end
+
+    # A threshold below the solver's own accuracy is not a measurement: it asks the LP a
+    # finer question than double precision can answer at genome-scale conditioning, and
+    # the answer then depends on rounding. Measured on this cluster: HiGHS wobbles at
+    # ~1e-8, tightening to 1e-10 does not help, and 1e-12 is rejected outright.
+    if flux_tolerance < 1e-8
+        @warn "flux_tolerance is at or below the solver's achievable accuracy; " *
+              "blocked-reaction calls on borderline reactions will not be reproducible" flux_tolerance
+    end
 
     # Find reactions where both min and max are below tolerance
     blocked = String[]
@@ -322,7 +347,8 @@ function find_blocked_reactions(
     objective_bound=nothing,
     flux_tolerance::Float64=1e-9,
     settings=[],
-    workers=D.workers()
+    workers=D.workers(),
+    scheduling::Symbol=:static
 )
     constraints = COBREXA.flux_balance_constraints(model)
 
@@ -352,7 +378,8 @@ function find_blocked_reactions(
         optimizer,
         flux_tolerance,
         settings,
-        workers
+        workers,
+        scheduling
     )
 end
 
@@ -409,7 +436,8 @@ function remove_blocked_reactions(
     objective_bound=nothing,
     flux_tolerance::Float64=1e-9,
     settings=[],
-    workers=D.workers()
+    workers=D.workers(),
+    scheduling::Symbol=:static
 )
     # Deep copy to preserve original
     model_copy = deepcopy(model)
@@ -421,7 +449,8 @@ function remove_blocked_reactions(
         objective_bound,
         flux_tolerance,
         settings,
-        workers
+        workers,
+        scheduling
     )
 
     # Remove from the copy

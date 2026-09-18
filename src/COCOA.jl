@@ -103,6 +103,7 @@ export incidence, stoichiometry, complex_stoichiometry
 
 # Export kinetic analysis functions
 export kinetic_analysis, upstream_algorithm, identify_acr_acrr, identify_acr_acrr_dce, create_envz_ompr_model, create_deficiency_two_model
+export detect_robustness_via_span
 
 # Export deficiency calculation functions
 export structural_deficiency, mass_action_deficiency_bounds

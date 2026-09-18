@@ -469,3 +469,6 @@ include("test_dce_acr.jl")
 
 # Determinism / reproducibility guardrails.
 include("test_reproducibility.jl")
+
+# Three-way pair verdict: a failed LP must not be recorded as "not concordant".
+include("test_unknown_verdict.jl")

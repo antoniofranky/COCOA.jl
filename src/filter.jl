@@ -126,6 +126,26 @@ mutable struct StreamingCandidateFilter
     cv_stat::CVStat
     idx_to_id::Vector{Symbol}
 
+    # Block cache for the coefficient of variation.
+    #
+    # The CV of a pair's activity ratio is a PURE function of (i, j) and the flux
+    # samples — it touches no mutable state. It is also the expensive part of the
+    # filter: O(sample_size) per pair over n_complexes^2/2 pairs, which for a
+    # genome-scale model is 256 million pairs. The filter itself runs serially on the
+    # master while every worker sits idle.
+    #
+    # So the CVs for a whole block of consecutive pairs are computed in parallel with
+    # threads and cached; the iterator then walks the block sequentially and applies
+    # only the cheap, order-dependent checks (transitivity, counters) as before. The
+    # candidate set is therefore unchanged — only the order of arithmetic differs, and
+    # that arithmetic is deterministic per pair.
+    cv_block_start::Int          # linear index of the first pair held in the cache
+    cv_block_len::Int            # number of valid entries
+    cv_block_cv::Vector{Float32}
+    cv_block_n::Vector{UInt16}
+    cv_block_size::Int
+    inherit_non_concordance::Bool
+
     # Statistics and debugging
     pairs_tested::Int
     candidates_found::Int
@@ -155,7 +175,8 @@ function StreamingCandidateFilter(
     cv_threshold::Float64=0.01,
     cv_epsilon::Float64=1e-16,
     min_valid_samples::Int=10,
-    use_transitivity::Bool=true
+    use_transitivity::Bool=true,
+    inherit_non_concordance::Bool=true
 )
     # Ensure BitVectors are allocated
     ensure_mask_allocated!(concordance_tracker, :balanced)
@@ -176,6 +197,9 @@ function StreamingCandidateFilter(
         cv_threshold, cv_epsilon, min_valid_samples,
         CVStat(),
         concordance_tracker.idx_to_id,
+        # CV block cache: empty, sized so one block is a few MB regardless of model size
+        0, 0, Vector{Float32}(undef, CV_BLOCK_SIZE), Vector{UInt16}(undef, CV_BLOCK_SIZE),
+        CV_BLOCK_SIZE, inherit_non_concordance,
         0, 0, 0, 0, 0, 0, 0, 0,  # Original statistics counters
         0, 0, 0, 0,  # Enhanced transitivity tracking counters
         false,  # should_stop
@@ -240,6 +264,104 @@ function Base.iterate(filter::StreamingCandidateFilter, state=nothing)
     return nothing
 end
 
+const CV_BLOCK_SIZE = 1 << 20   # ~1M pairs per block: 6 MB of cache, ample work per thread
+
+"""
+Linear index (1-based) of the upper-triangular pair (i, j), i < j, over n complexes.
+"""
+@inline function _pair_linear_index(i::Int, j::Int, n::Int)::Int
+    return (i - 1) * n - (i * (i - 1)) ÷ 2 + (j - i)
+end
+
+"""
+Compute the coefficient of variation of the activity ratio of one pair directly from the
+samples. Pure: reads only the sample vectors, touches no filter state, so it is safe to
+call from several threads at once.
+"""
+function _pair_cv(c1_samples, c2_samples, epsilon::Float64)::Tuple{Float64,Int}
+    n_samples = min(length(c1_samples), length(c2_samples))
+    n_samples < 2 && return (Inf, n_samples)
+    mean = 0.0
+    m2 = 0.0
+    k = 0
+    @inbounds for t in 1:n_samples
+        a = c1_samples[t]
+        b = c2_samples[t]
+        (ismissing(a) || ismissing(b)) && continue
+        ratio = (a + epsilon) / (b + epsilon)
+        isfinite(ratio) || continue
+        k += 1
+        delta = ratio - mean
+        mean += delta / k
+        m2 += delta * (ratio - mean)
+    end
+    k < 2 && return (Inf, k)
+    sd = sqrt(m2 / (k - 1))
+    return (abs(mean) < epsilon ? Inf : sd / abs(mean), k)
+end
+
+"""
+Fill the CV block cache starting at the pair that follows `(i0, j0)`, in parallel.
+
+Only pairs that survive the read-only rejections (balanced complex, trivial pair) get a
+CV; the rest are marked with `Inf` and skipped by the sequential pass, which still does
+the order-dependent work. The candidate set is identical to the serial filter's.
+"""
+function fill_cv_block!(filter::StreamingCandidateFilter, i0::Int, j0::Int)
+    n = filter.n_complexes
+    start_lin = _pair_linear_index(i0, j0, n)
+    total = n * (n - 1) ÷ 2
+    len = min(filter.cv_block_size, total - start_lin + 1)
+    len <= 0 && (filter.cv_block_len = 0; return)
+
+    # Materialise the (i, j) of each slot once, so the threaded loop is a flat range.
+    idxs = Vector{Tuple{Int,Int}}(undef, len)
+    i, j = i0, j0
+    @inbounds for t in 1:len
+        idxs[t] = (i, j)
+        j += 1
+        if j > n
+            i += 1
+            j = i + 1
+        end
+    end
+
+    balanced = filter.balanced
+    trivial = filter.trivial_pairs
+    idx_to_id = filter.idx_to_id
+    samples = filter.samples_tree
+    eps = filter.cv_epsilon
+    cvs = filter.cv_block_cv
+    ns = filter.cv_block_n
+
+    nchunks = max(1, min(Threads.nthreads(), len))
+    tasks = map(1:nchunks) do c
+        Threads.@spawn begin
+            @inbounds for t in c:nchunks:len
+                a, b = idxs[t]
+                if balanced[a] || balanced[b] || ((a, b) in trivial)
+                    cvs[t] = Float32(Inf); ns[t] = UInt16(0)
+                    continue
+                end
+                s1 = samples[idx_to_id[a]]
+                s2 = samples[idx_to_id[b]]
+                if ismissing(s1) || ismissing(s2) || s1 === nothing || s2 === nothing
+                    cvs[t] = Float32(Inf); ns[t] = UInt16(0)
+                    continue
+                end
+                cv, k = _pair_cv(s1, s2, eps)
+                cvs[t] = Float32(cv)
+                ns[t] = UInt16(min(k, typemax(UInt16)))
+            end
+        end
+    end
+    foreach(wait, tasks)
+
+    filter.cv_block_start = start_lin
+    filter.cv_block_len = len
+    return
+end
+
 """
 Process a single pair (i,j) and return PairCandidate if it passes all filters.
 Returns nothing if pair should be skipped.
@@ -248,135 +370,68 @@ Optimized version with cached data access and reduced allocations.
 function process_pair(filter::StreamingCandidateFilter, i::Int, j::Int)::Union{PairCandidate,Nothing}
     filter.pairs_tested += 1
 
-    # Early filtering checks (fast rejection) - removed unsafe @inbounds
-    # Cache balanced mask access
-    balanced_mask = filter.balanced
-    if balanced_mask[i] || balanced_mask[j]
+    # Read-only rejections, mirrored by `fill_cv_block!` so the cached entry agrees.
+    if filter.balanced[i] || filter.balanced[j]
         filter.pairs_balanced_filtered += 1
         return nothing
     end
-
-    # Skip trivial pairs
     if (i, j) in filter.trivial_pairs
         filter.pairs_trivial_filtered += 1
         return nothing
     end
 
-    # Skip early transitivity filtering here - it causes O(n²) overhead
-    # Transitivity filtering moved to after CV check for much better performance
+    # Look the CV up in the block cache, refilling it in parallel when we run past it.
+    lin = _pair_linear_index(i, j, filter.n_complexes)
+    if filter.cv_block_len == 0 || lin < filter.cv_block_start ||
+       lin >= filter.cv_block_start + filter.cv_block_len
+        fill_cv_block!(filter, i, j)
+    end
+    slot = lin - filter.cv_block_start + 1
+    cv = Float64(filter.cv_block_cv[slot])
+    n_valid = Int(filter.cv_block_n[slot])
 
-    # Cache complex IDs lookup
-    idx_to_id = filter.idx_to_id
-    c1_id = idx_to_id[i]
-    c2_id = idx_to_id[j]
-
-    # Cache samples tree access
-    samples_tree = filter.samples_tree
-    c1_samples = samples_tree[c1_id]
-    c2_samples = samples_tree[c2_id]
-
-    # Handle missing samples - use ismissing() for proper Julia missing value detection
-    if ismissing(c1_samples) || ismissing(c2_samples) || c1_samples === nothing || c2_samples === nothing
+    if n_valid < 2
+        # No usable samples: keep the pair as a candidate rather than discard it on no
+        # evidence, and record it. Matches the serial filter's behaviour.
         filter.pairs_missing_samples += 1
-        # Default behavior: Include pairs with missing samples as candidates
-        # since we have no evidence to exclude them from concordance analysis
-        directions_bits = determine_directions_bits(j, filter.positive, filter.negative)
-        return PairCandidate(
-            i,
-            j,
-            directions_bits,
-            Float32(Inf),  # Use Inf CV to indicate missing data
-            UInt16(0)      # Zero valid samples
-        )
+        return PairCandidate(i, j, determine_directions_bits(j, filter.positive, filter.negative),
+                             Float32(Inf), UInt16(n_valid))
     end
 
-    # Determine sample size - handle case where samples exist but are insufficient
-    n_samples = min(length(c1_samples), length(c2_samples))
-    if n_samples < 2
-        filter.pairs_missing_samples += 1
-        # Include pairs with insufficient samples as candidates with infinite CV
-        directions_bits = determine_directions_bits(j, filter.positive, filter.negative)
-        return PairCandidate(
-            i,
-            j,
-            directions_bits,
-            Float32(Inf),  # Use Inf CV to indicate insufficient data
-            UInt16(n_samples)  # Record actual sample count
-        )
-    end
-
-    # Reset and compute CV using OnlineStats with Welford's algorithm
-    cv_stat = filter.cv_stat  # Cache cv_stat reference
-    empty!(cv_stat)
-
-    # Cache epsilon for faster access in tight loop
-    epsilon = filter.cv_epsilon
-
-    @inbounds for k in 1:n_samples
-        # Handle missing values within sample arrays
-        c1_val = c1_samples[k]
-        c2_val = c2_samples[k]
-
-        # Skip missing values using Julia's ismissing() function
-        if ismissing(c1_val) || ismissing(c2_val)
-            continue
-        end
-
-        ratio = (c1_val + epsilon) / (c2_val + epsilon)
-        if isfinite(ratio)
-            OnlineStatsBase.fit!(cv_stat, ratio)
-        end
-    end
-
-    cv, n_valid = compute_cv(filter.cv_stat, filter.cv_epsilon)
-
-
-    # Handle insufficient samples - include them as candidates regardless of CV
     if n_valid < filter.min_valid_samples
         filter.insufficient_samples += 1
-        # Include pairs with insufficient samples as candidates
-        # Don't apply CV threshold since we don't have enough data to make that judgment
-        directions_bits = determine_directions_bits(j, filter.positive, filter.negative)
-        return PairCandidate(
-            i,
-            j,
-            directions_bits,
-            Float32(cv),  # Record computed CV even if based on few samples
-            UInt16(n_valid)
-        )
+        return PairCandidate(i, j, determine_directions_bits(j, filter.positive, filter.negative),
+                             Float32(cv), UInt16(n_valid))
     end
 
-    # Apply CV threshold only to pairs with sufficient samples
+    # The CV gate. NOTE this discards a pair WITHOUT ever testing it by LP, so a
+    # genuinely concordant pair whose sampled ratio is poorly resolved is lost for good
+    # (audit finding C2). Measured on Saccharomyces cerevisiae: raising sample_size from
+    # 1000 to 3000 cut the candidate set from 23,636 to 10,844 — more than half of the
+    # candidates at 1000 were admitted on an underestimated CV — while the number of
+    # concordant pairs FOUND went up.
     if cv > filter.cv_threshold
         filter.pairs_cv_filtered += 1
         return nothing
     end
 
-    # Apply transitivity filtering AFTER CV check (much more efficient)
-    # Only check transitivity for pairs that passed CV filtering
+    # Order-dependent checks stay sequential: they read (and path-compress) the
+    # union-find tracker, which the parallel pass must not touch.
     if filter.use_transitivity
         if are_concordant(filter.concordance_tracker, i, j)
             filter.pairs_transitivity_concordant_filtered += 1
             filter.pairs_skipped_by_transitivity += 1
-            return nothing  # Skip known concordant pairs (already in ConcordanceTracker)
-        elseif is_non_concordant(filter.concordance_tracker, i, j)
+            return nothing
+        elseif is_non_concordant(filter.concordance_tracker, i, j;
+                                 inherit_modules=filter.inherit_non_concordance)
             filter.pairs_transitivity_non_concordant_filtered += 1
             filter.pairs_skipped_by_transitivity += 1
-            return nothing  # Skip known non-concordant pairs
+            return nothing
         end
     end
 
-    # Determine directions
-    directions_bits = determine_directions_bits(j, filter.positive, filter.negative)
-
-    # Create candidate
-    return PairCandidate(
-        i,
-        j,
-        directions_bits,
-        Float32(cv),
-        UInt16(n_valid)
-    )
+    return PairCandidate(i, j, determine_directions_bits(j, filter.positive, filter.negative),
+                         Float32(cv), UInt16(n_valid))
 end
 
 # ========================================================================================

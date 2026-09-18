@@ -262,6 +262,7 @@ function kinetic_analysis(
     # Compute initial structural deficiency only if doing full analysis
     initial_delta = -1
     if !efficient
+        progress("structural deficiency")
         initial_delta = compute_structural_deficiency(filtered_concordance, network)
     end
 
@@ -276,7 +277,8 @@ function kinetic_analysis(
 
             # Detect ACR/ACRR using already-available network data
             # Always use efficient=true for ACR detection (faster and more complete pairwise detection)
-            acr_results = _detect_acr_acrr(valid_modules, Y_matrix, metabolite_ids, complex_to_idx;
+            progress("ACR/ACRR detection", " n_modules=", length(valid_modules))
+    acr_results = _detect_acr_acrr(valid_modules, Y_matrix, metabolite_ids, complex_to_idx;
                 efficient=efficient, known_acr=known_acr)
             return (
                 kinetic_modules=valid_modules,
@@ -327,6 +329,7 @@ function kinetic_analysis(
         n_modules = length(current_concordance) - 1
         upstream_results = Vector{Union{Nothing,Set{Symbol}}}(undef, n_modules)
 
+        progress("upstream sets")
         Threads.@threads for idx in 1:n_modules
             conc_module = current_concordance[idx+1]
             extended_module = balanced ∪ conc_module
@@ -347,6 +350,7 @@ function kinetic_analysis(
 
         # Step 2: Merge coupled modules
         # Use simple merging if efficient=true (handled by enable_advanced_merging=false in network)
+        progress("merge_coupled_sets_tracked", " n_upstream=", length(upstream_sets))
         kinetic_modules, merge_map = merge_coupled_sets_tracked(upstream_sets, network)
 
         # Step 3: Check concordance merges
@@ -361,7 +365,15 @@ function kinetic_analysis(
         # Works in both efficient and full modes (just uses different detection methods)
 
         # Identify ACR from current kinetic modules
+        _sizes = sort(length.(kinetic_modules), rev=true)
+        progress("iter ", outer_iteration, ": identify_acr_acrr",
+                " n_modules=", length(kinetic_modules),
+                " largest=", isempty(_sizes) ? 0 : _sizes[1])
+        _t_acr = time()
         acr_results = identify_acr_acrr(kinetic_modules, model; efficient=efficient)
+        progress("iter ", outer_iteration, ": identify_acr_acrr done",
+                " seconds=", round(time() - _t_acr, digits=2),
+                " n_acr=", length(acr_results.acr_metabolites))
         newly_identified_acr = setdiff(Set(acr_results.acr_metabolites), current_known_acr)
 
         if !isempty(newly_identified_acr)
@@ -371,11 +383,14 @@ function kinetic_analysis(
 
         # Check convergence: Has the kinetic module partition changed?
         # Convert to canonical form for comparison (sorted sets of sorted symbols)
+        _t_conv = time()
         current_state = Set(Set(sort(collect(km), by=string)) for km in kinetic_modules)
         concordance_state = Set(Set(sort(collect(cm), by=string)) for cm in current_concordance)
 
         converged = (current_state == previous_kinetic_modules &&
                      concordance_state == previous_concordance_state)
+        progress("iter ", outer_iteration, ": convergence check",
+                " seconds=", round(time() - _t_conv, digits=2), " converged=", converged)
 
         if converged
             @debug "Convergence detected - no changes in modules" iteration = outer_iteration
@@ -396,6 +411,7 @@ function kinetic_analysis(
 
     # Final deficiency check for full mode
     if !efficient && initial_delta >= 0
+        progress("mass action deficiency")
         (is_delta_k_one, should_merge) = check_mass_action_deficiency(
             current_concordance, n_concordance_merges, initial_delta, network
         )
@@ -418,6 +434,7 @@ function kinetic_analysis(
     end
 
     # Finalize with singletons and balanced modules
+    progress("add_singleton_balanced")
     kinetic_modules = add_singleton_balanced(kinetic_modules, current_concordance[1], current_concordance[2:end], network)
 
     # Final shared-complex merge (Lemma S3-1): the balanced weak linkage classes just
@@ -426,6 +443,7 @@ function kinetic_analysis(
     # runs here regardless of whether ACR metabolites were found.
     begin
         @debug "Final shared-complex merging pass" n_modules_before = length(kinetic_modules)
+        progress("final merge_coupled_sets", " n_modules=", length(kinetic_modules))
         final_merged = merge_coupled_sets(kinetic_modules, network)
         if length(final_merged) < length(kinetic_modules)
             @debug "Final merging reduced module count" before = length(kinetic_modules) after = length(final_merged)
@@ -434,6 +452,7 @@ function kinetic_analysis(
     end
 
     if !efficient
+        progress("theorem S4-6")
         kinetic_modules = apply_theorem_s4_6(kinetic_modules, current_concordance, network)
     end
 
@@ -915,20 +934,43 @@ Merge coupled upstream sets and track which modules merged together.
 Returns (merged_modules, merge_map) where merge_map[i] gives the final group ID for module i.
 """
 function merge_coupled_sets_tracked(upstream_sets::Vector{Set{Symbol}}, network::NamedTuple)
+    _t = time()
     kinetic_modules = merge_coupled_sets(upstream_sets, network)
+    progress("merge_coupled_sets done seconds=", round(time() - _t, digits=2),
+            " n_modules=", length(kinetic_modules))
 
-    # Build merge map by checking which original modules ended up in which final groups
+    # Build merge map: which original upstream set ended up in which final group.
+    #
+    # This used to scan every final module for every upstream set with `isdisjoint`,
+    # i.e. O(n_upstream * n_modules) set comparisons — 5385 x ~5000 on a genome-scale
+    # yeast model, each one walking a set. Measured: it sat here for hours while the
+    # phase markers showed the rest of the function finishing in seconds.
+    #
+    # A final module is a union of upstream sets, so membership of ANY member decides
+    # the group. One reverse index over all complexes replaces the quadratic scan. The
+    # lowest group id is kept, which reproduces the original's "first match in
+    # enumeration order" exactly, even if a set were to touch several groups.
+    _t = time()
     n = length(upstream_sets)
     merge_map = zeros(Int, n)
 
-    for i in 1:n
-        for (group_id, final_module) in enumerate(kinetic_modules)
-            if !isdisjoint(upstream_sets[i], final_module)
-                merge_map[i] = group_id
-                break
-            end
+    complex_to_group = Dict{Symbol,Int}()
+    for (group_id, final_module) in enumerate(kinetic_modules)
+        for c in final_module
+            g = get(complex_to_group, c, typemax(Int))
+            g > group_id && (complex_to_group[c] = group_id)
         end
     end
+
+    @inbounds for i in 1:n
+        best = typemax(Int)
+        for c in upstream_sets[i]
+            g = get(complex_to_group, c, typemax(Int))
+            g < best && (best = g)
+        end
+        merge_map[i] = best == typemax(Int) ? 0 : best
+    end
+    progress("merge_map built seconds=", round(time() - _t, digits=2))
 
     return kinetic_modules, merge_map
 end
@@ -1107,7 +1149,9 @@ function merge_coupled_sets(upstream_sets::Vector{Set{Symbol}}, network::NamedTu
 
     # Build coupling companion map 𝚫 from current upstream sets
     # 𝚫 = [𝚫1 ... 𝚫q] where each 𝚫i encodes coupling relations in upstream_sets[i]
+    _t_delta = time()
     Y_Delta = build_coupling_companion_matrix(upstream_sets, Y_matrix, complex_to_idx)
+    _t_delta = time() - _t_delta
 
     # Augment with known ACR columns (Remark S3-6)
     if haskey(network, :acr_augmentation) && size(network.acr_augmentation, 2) > 0
@@ -1120,22 +1164,39 @@ function merge_coupled_sets(upstream_sets::Vector{Set{Symbol}}, network::NamedTu
     # Therefore, we do not need to rebuild or update Y𝚫 after merges.
     # A single pass over all pairs is sufficient to find all merging opportunities.
     # The Union-Find structure handles the transitive closure of merges.
+    _t_qr = time()
     cache = build_cached_column_span(Y_Delta)
-    @debug "  Built cached column span" rank = cache.rank n_cols = size(Y_Delta, 2)
+    _t_qr = time() - _t_qr
+    # Phase timings at @info: the profile of this path was never measured, and the
+    # sparse span test only addresses ONE of these phases. Optimising without knowing
+    # which phase dominates is guessing.
+    progress("Y_Delta and QR n_upstream_sets=", length(upstream_sets),
+            " size_Y_Delta=", size(Y_Delta), " rank=", cache.rank,
+            " seconds_build_Y_Delta=", round(_t_delta, digits=2),
+            " seconds_qr=", round(_t_qr, digits=2))
 
     # OPTIMIZATION: Precompute stoichiometric vectors for all relevant complexes
     # Avoids repeated sparse-to-dense conversions in the loop
     n_metabolites = size(Y_matrix, 1)
     complex_vectors = Dict{Symbol,Vector{Float64}}()
+    # Sparse form as well: a complex is a small sum of species, so its Y column has a
+    # handful of nonzeros out of n_metabolites. Densifying it (as the line below still
+    # does, for the exact fallback) is what made the pair loop stream the whole basis
+    # through memory. See `is_in_span_sparse`.
+    complex_sparse = Dict{Symbol,Tuple{Vector{Int},Vector{Float64}}}()
     for upstream_set in upstream_sets
         c = first(upstream_set)  # We only need one complex per set (Lemma S3-3)
         if haskey(complex_to_idx, c) && !haskey(complex_vectors, c)
-            complex_vectors[c] = Vector(Y_matrix[:, complex_to_idx[c]])
+            col = Y_matrix[:, complex_to_idx[c]]
+            complex_vectors[c] = Vector(col)
+            idxs = SparseArrays.findnz(SparseArrays.sparse(col))
+            complex_sparse[c] = (collect(idxs[1]), collect(idxs[2]))
         end
     end
 
     # OPTIMIZATION: Collect pairs to check, then parallelize
     # Build list of (i, j, c_alpha, c_beta) tuples for pairs that need checking
+    _t_pairs = time()
     pairs_to_check = Tuple{Int,Int,Symbol,Symbol}[]
     for i in 1:n
         c_alpha = first(upstream_sets[i])
@@ -1152,51 +1213,82 @@ function merge_coupled_sets(upstream_sets::Vector{Set{Symbol}}, network::NamedTu
         end
     end
 
-    @debug "  Checking $(length(pairs_to_check)) pairs for Proposition S3-4 merging"
+    # n_pairs = 0 would mean the Proposition S3-4 check never runs at all. That has two
+    # very different causes and they must not be confused: either everything is already
+    # in one union-find root (the "all glued into one giant module" pathology), or
+    # `complex_vectors` is missing its keys and every pair is skipped by the `haskey`
+    # guard — a silent no-op of the most expensive check in the whole path. Report both.
+    _n_roots = length(unique(find_root(i) for i in 1:n))
+    progress("pairs to check n_pairs=", length(pairs_to_check),
+            " seconds_collect=", round(time() - _t_pairs, digits=2),
+            " n_upstream=", n,
+            " n_complex_vectors=", length(complex_vectors),
+            " n_distinct_roots=", _n_roots)
 
     # OPTIMIZATION: Parallel merge check using thread-local result arrays
     # Avoids Channel synchronization overhead by accumulating results per-thread
     merge_count = 0
 
     if length(pairs_to_check) > 0
-        # Preallocate workspace per thread for y_diff computation
-        # Use maxthreadid() instead of nthreads() to handle interactive threads in Julia 1.9+
-        max_tid = Threads.maxthreadid()
-        workspaces = [Vector{Float64}(undef, n_metabolites) for _ in 1:max_tid]
+        # Per-task workspaces via explicit chunking, NOT `threadid()`-indexed buffers:
+        # `Threads.@threads` schedules dynamically, so a task may resume on a different
+        # thread than it started on and two tasks could then share `y_diff`. See the
+        # matching comment in `_detect_acr_acrr`.
+        #
+        # Round-robin chunking keeps the load even; every pair costs the same two BLAS
+        # gemv calls, so there is nothing to balance dynamically anyway.
+        n_pairs = length(pairs_to_check)
+        nchunks = max(1, min(Threads.nthreads(), n_pairs))
+        _t_loop_start = time()
 
-        # OPTIMIZATION: Additional workspaces for in-place BLAS operations in is_in_span!
-        # coeffs_workspace: size = cache.rank (for Q' * v result)
-        # proj_workspace: size = n_metabolites (for Q * coeffs and residual)
-        coeffs_workspaces = [Vector{Float64}(undef, max(1, cache.rank)) for _ in 1:max_tid]
-        proj_workspaces = [Vector{Float64}(undef, n_metabolites) for _ in 1:max_tid]
+        chunk_tasks = map(1:nchunks) do c
+            Threads.@spawn begin
+                y_diff = Vector{Float64}(undef, n_metabolites)
+                coeffs_ws = Vector{Float64}(undef, max(1, cache.rank))
+                proj_ws = Vector{Float64}(undef, n_metabolites)
+                local_result = Vector{Tuple{Int,Int}}()
+                n_fallback = 0
+                sizehint!(local_result, max(1, n_pairs ÷ nchunks + 10))
 
-        # Thread-local result buffers (no synchronization during parallel section)
-        thread_results = [Vector{Tuple{Int,Int}}() for _ in 1:max_tid]
-        for buf in thread_results
-            sizehint!(buf, max(1, length(pairs_to_check) ÷ max_tid + 10))
-        end
+                nz_idx = Vector{Int}(undef, 64)
+                nz_val = Vector{Float64}(undef, 64)
 
-        Threads.@threads for pair_idx in 1:length(pairs_to_check)
-            i, j, c_alpha, c_beta = pairs_to_check[pair_idx]
+                for pair_idx in c:nchunks:n_pairs
+                    i, j, c_alpha, c_beta = pairs_to_check[pair_idx]
 
-            # Use thread-local workspaces
-            tid = Threads.threadid()
-            y_diff = workspaces[tid]
-            coeffs_ws = coeffs_workspaces[tid]
-            proj_ws = proj_workspaces[tid]
+                    # Sparse difference: merge the two complexes' nonzero patterns.
+                    ia, va = complex_sparse[c_alpha]
+                    ib, vb = complex_sparse[c_beta]
+                    need = length(ia) + length(ib)
+                    if need > length(nz_idx)
+                        resize!(nz_idx, need)
+                        resize!(nz_val, need)
+                    end
+                    n_nz = _sparse_difference!(nz_idx, nz_val, ia, va, ib, vb)
 
-            # Compute difference in-place: y_alpha - y_beta
-            y_alpha = complex_vectors[c_alpha]
-            y_beta = complex_vectors[c_beta]
-            @inbounds for k in 1:n_metabolites
-                y_diff[k] = y_alpha[k] - y_beta[k]
+                    in_span, decided = is_in_span_sparse(nz_idx, nz_val, n_nz, cache, coeffs_ws)
+                    if !decided
+                        # Borderline for the cancellation-prone identity: settle it on
+                        # the exact dense path.
+                        y_alpha = complex_vectors[c_alpha]
+                        y_beta = complex_vectors[c_beta]
+                        @inbounds for k in 1:n_metabolites
+                            y_diff[k] = y_alpha[k] - y_beta[k]
+                        end
+                        in_span = is_in_span!(y_diff, cache, coeffs_ws, proj_ws)
+                        n_fallback += 1
+                    end
+                    if in_span
+                        push!(local_result, (i, j))
+                    end
+                end
+                (local_result, n_fallback)
             end
-
-            # Check if y_diff ∈ im(Y𝚫) using in-place BLAS operations
-            if is_in_span!(y_diff, cache, coeffs_ws, proj_ws)
-                push!(thread_results[tid], (i, j))
-            end
         end
+        fetched = [fetch(t) for t in chunk_tasks]
+        thread_results = [f[1] for f in fetched]
+        # Timed from before the spawn, so this covers the whole parallel section.
+        progress("pair loop done", " seconds_loop=", round(time() - _t_loop_start, digits=2), " dense_fallbacks=", sum(f[2] for f in fetched), " of_pairs=", n_pairs)
 
         # Sequential merge of thread-local results (union-find not thread-safe)
         for thread_result in thread_results
@@ -1363,7 +1455,8 @@ Stores the orthonormal basis Q_reduced for the column span of Y𝚫,
 enabling O(m·k) projection checks instead of O(m³) QR per check.
 """
 struct CachedColumnSpan
-    Q_reduced::Matrix{Float64}  # Orthonormal basis for im(Y𝚫)
+    Q_reduced::Matrix{Float64}  # Orthonormal basis for im(Y𝚫)   (n_metabolites x rank)
+    Qt::Matrix{Float64}         # Q_reduced' stored explicitly    (rank x n_metabolites)
     rank::Int                   # Effective rank of Y𝚫
     tolerance::Float64          # Numerical tolerance
 end
@@ -1377,7 +1470,7 @@ function build_cached_column_span(Y_Delta::Matrix{Float64}; tolerance::Float64=1
     n_rows = size(Y_Delta, 1)
 
     if size(Y_Delta, 2) == 0
-        return CachedColumnSpan(zeros(Float64, n_rows, 0), 0, tolerance)
+        return CachedColumnSpan(zeros(Float64, n_rows, 0), zeros(Float64, 0, n_rows), 0, tolerance)
     end
 
     try
@@ -1386,14 +1479,17 @@ function build_cached_column_span(Y_Delta::Matrix{Float64}; tolerance::Float64=1
         rank_ydelta = sum(r_diag .> tolerance)
 
         if rank_ydelta == 0
-            return CachedColumnSpan(zeros(Float64, n_rows, 0), 0, tolerance)
+            return CachedColumnSpan(zeros(Float64, n_rows, 0), zeros(Float64, 0, n_rows), 0, tolerance)
         end
 
         Q_reduced = Matrix(Q[:, 1:rank_ydelta])
-        return CachedColumnSpan(Q_reduced, rank_ydelta, tolerance)
+        # Qt is kept explicitly so that the sparse span test can read all `rank`
+        # entries belonging to ONE metabolite row contiguously. Reading them out of
+        # the column-major Q_reduced would stride by n_metabolites per element.
+        return CachedColumnSpan(Q_reduced, Matrix(Q_reduced'), rank_ydelta, tolerance)
     catch e
         @debug "Error building cached column span" exception = e
-        return CachedColumnSpan(zeros(Float64, n_rows, 0), 0, tolerance)
+        return CachedColumnSpan(zeros(Float64, n_rows, 0), zeros(Float64, 0, n_rows), 0, tolerance)
     end
 end
 
@@ -1448,6 +1544,272 @@ function is_in_span!(
     LinearAlgebra.BLAS.axpy!(-1.0, v, proj_workspace)
 
     return norm(proj_workspace) < cache.tolerance
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Count the nonzeros of the sparse difference `a - b` above `tolerance`, recording the
+first two in `(out_idx, out_val)`, and stop as soon as a third appears — the ACR/ACRR
+criteria only distinguish "exactly one", "exactly two" and "more than two".
+
+Replaces a scan over every metabolite with `Y_matrix[met_idx, idx]` lookups, which on a
+sparse matrix costs a search per access. A complex column holds a handful of nonzeros
+out of ~10^4 metabolites, so the merge is the same answer for a fraction of the work.
+Returns 3 to mean "three or more".
+"""
+@inline function _sparse_diff_upto2!(
+    out_idx::Vector{Int}, out_val::Vector{Float64},
+    ia::Vector{Int}, va::Vector{Float64},
+    ib::Vector{Int}, vb::Vector{Float64},
+    tolerance::Float64
+)::Int
+    p = 1; q = 1; n = 0
+    na = length(ia); nb = length(ib)
+    @inbounds while p <= na || q <= nb
+        local idx::Int, d::Float64
+        if q > nb || (p <= na && ia[p] < ib[q])
+            idx = ia[p]; d = va[p]; p += 1
+        elseif p > na || ib[q] < ia[p]
+            idx = ib[q]; d = -vb[q]; q += 1
+        else
+            idx = ia[p]; d = va[p] - vb[q]; p += 1; q += 1
+        end
+        if abs(d) > tolerance
+            n += 1
+            n > 2 && return 3
+            out_idx[n] = idx; out_val[n] = d
+        end
+    end
+    return n
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Write the sparse difference `a - b` of two sorted sparse vectors into
+`(out_idx, out_val)` and return how many entries were written. Exact zeros produced by
+cancellation are dropped, so the result carries only genuine nonzeros.
+
+Both inputs come from `SparseArrays.findnz`, whose indices are ascending, so this is a
+single merge pass.
+"""
+@inline function _sparse_difference!(
+    out_idx::Vector{Int}, out_val::Vector{Float64},
+    ia::Vector{Int}, va::Vector{Float64},
+    ib::Vector{Int}, vb::Vector{Float64}
+)::Int
+    p = 1
+    q = 1
+    n = 0
+    na = length(ia)
+    nb = length(ib)
+    @inbounds while p <= na || q <= nb
+        if q > nb || (p <= na && ia[p] < ib[q])
+            n += 1; out_idx[n] = ia[p]; out_val[n] = va[p]; p += 1
+        elseif p > na || ib[q] < ia[p]
+            n += 1; out_idx[n] = ib[q]; out_val[n] = -vb[q]; q += 1
+        else
+            d = va[p] - vb[q]
+            if d != 0.0
+                n += 1; out_idx[n] = ia[p]; out_val[n] = d
+            end
+            p += 1; q += 1
+        end
+    end
+    return n
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Detect ACR, ACRR and gACRR directly from the column span of Y𝚫, as the theory defines
+them, rather than from differences between complexes.
+
+The Supplementary Materials state the three properties as span memberships:
+
+    ACR   (S)       e_S                ∈ im(Y𝚫)
+    ACRR  (S1,S2)   e_S1 -   e_S2      ∈ im(Y𝚫)
+    gACRR (S1,S2)   e_S1 - γ e_S2      ∈ im(Y𝚫)   for some γ > 0      (SM S3-13)
+
+and note that gACRR is an LP feasibility problem in (γ, ξ) (SM S3-14). Comparing pairs
+of complexes, as `_detect_acr_acrr` does, is only a SUFFICIENT shortcut: if two coupled
+complexes differ by exactly `e_S` then `e_S ∈ im(Y𝚫)` follows, but not conversely. That
+is why the pairwise path misses the published ACR of the EnvZ-OmpR example.
+
+The span formulation needs no LP. Writing `r_S = e_S - Q Qᵀ e_S` for the part of `e_S`
+orthogonal to the span, with `Q` the orthonormal basis in `cache`:
+
+    e_S ∈ im(Y𝚫)              ⟺  r_S = 0
+    e_S1 - γ e_S2 ∈ im(Y𝚫)    ⟺  r_S1 = γ r_S2
+
+so ACR is a norm test and gACRR is a test for parallel residuals, with γ the ratio of
+their lengths and ACRR the case γ = 1. Everything follows from inner products of rows
+of `Q`, because `QᵀQ = I` gives
+
+    ‖r_i‖² = 1 - ‖Q[i,:]‖²        and      ⟨r_i, r_j⟩ = -Q[i,:]·Q[j,:]   (i ≠ j)
+
+Cost is O(n_species²·rank) in the worst case but only over species that are not already
+ACR, versus O(k²·n_metabolites) complex pairs for the pairwise path — on a genome-scale
+yeast model that is the difference between thousands and hundreds of millions of tests.
+
+Returns `(acr_metabolites, acrr_pairs, gacrr_triples)` where each gACRR entry is
+`(S1, S2, γ)`. ACRR pairs are reported separately AND remain in the gACRR list, so the
+two quantities stay comparable with what earlier runs reported.
+"""
+function detect_robustness_via_span(
+    cache::CachedColumnSpan,
+    metabolite_ids::Vector{Symbol};
+    tolerance::Float64=1e-8,
+    include_gacrr::Bool=true
+)
+    Q = cache.Q_reduced
+    n = length(metabolite_ids)
+    acr = Symbol[]
+    acrr = Tuple{Symbol,Symbol}[]
+    gacrr = Tuple{Symbol,Symbol,Float64}[]
+
+    if cache.rank == 0 || size(Q, 1) != n
+        # No span information: e_S is never in im(Y𝚫), so nothing is robust.
+        return (acr_metabolites=acr, acrr_pairs=acrr, gacrr_triples=gacrr)
+    end
+
+    tol2 = tolerance * tolerance
+    nrm2 = Vector{Float64}(undef, n)
+    @inbounds for s in 1:n
+        acc = 0.0
+        @simd for q in 1:cache.rank
+            acc += Q[s, q] * Q[s, q]
+        end
+        # ‖r_s‖² = 1 - ‖Qᵀe_s‖²; clamp away negative round-off
+        nrm2[s] = max(0.0, 1.0 - acc)
+    end
+
+    @inbounds for s in 1:n
+        nrm2[s] < tol2 && push!(acr, metabolite_ids[s])
+    end
+
+    include_gacrr || return (acr_metabolites=acr, acrr_pairs=acrr, gacrr_triples=gacrr)
+
+    # The Gram identities give ‖r_i - γ r_j‖² as a difference of O(1) quantities, which
+    # cannot resolve a residual of 1e-16 in double precision — measured: using it as an
+    # exact criterion found 1 of 15 ACRR pairs on the EnvZ-OmpR reference case, and a
+    # relative variant found 10. It is therefore used ONLY as a conservative filter:
+    # a comfortably large residual is a reliable "not in the span", and everything else
+    # is settled by the same exact `is_in_span` the reference loop uses.
+    #
+    # Most metabolite pairs are decisively outside the span, so the filter still removes
+    # the bulk of the O(n_met² · n_met · rank) work while changing no answer.
+    gate2 = (1e3 * tolerance) * (1e3 * tolerance)
+    coeffs_ws = Vector{Float64}(undef, max(1, cache.rank))
+    proj_ws = Vector{Float64}(undef, n)
+    vbuf = Vector{Float64}(undef, n)
+
+    @inbounds for i in 1:n
+        for j in (i+1):n
+            dot_ij = 0.0
+            @simd for q in 1:cache.rank
+                dot_ij -= Q[i, q] * Q[j, q]      # ⟨r_i, r_j⟩ = -Q[i,:]·Q[j,:]
+            end
+
+            # --- ACRR (γ = 1): filter on ‖r_i - r_j‖², then verify exactly ----------
+            d2 = nrm2[i] + nrm2[j] - 2 * dot_ij
+            if d2 <= gate2
+                fill!(vbuf, 0.0); vbuf[i] = 1.0; vbuf[j] = -1.0
+                if is_in_span!(vbuf, cache, coeffs_ws, proj_ws)
+                    m1, m2 = metabolite_ids[i], metabolite_ids[j]
+                    push!(acrr, m1 < m2 ? (m1, m2) : (m2, m1))
+                    push!(gacrr, (m1, m2, 1.0))
+                    continue
+                end
+            end
+
+            # --- gACRR (γ ≠ 1): only meaningful when r_j does not vanish ------------
+            nrm2[j] < tol2 && continue
+            gamma = dot_ij / nrm2[j]
+            gamma > 0 || continue                 # SM restricts gACRR to γ > 0
+            abs(gamma - 1.0) <= 1e-12 && continue # already handled as ACRR above
+            resid2 = nrm2[i] - dot_ij * dot_ij / nrm2[j]
+            resid2 > gate2 && continue
+            fill!(vbuf, 0.0); vbuf[i] = 1.0; vbuf[j] = -gamma
+            if is_in_span!(vbuf, cache, coeffs_ws, proj_ws)
+                push!(gacrr, (metabolite_ids[i], metabolite_ids[j], gamma))
+            end
+        end
+    end
+
+    return (acr_metabolites=acr, acrr_pairs=acrr, gacrr_triples=gacrr)
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Sparse span-membership test: is the vector with nonzeros `(nz_idx, nz_val)` in im(Y𝚫)?
+
+Why this exists. The dense path (`is_in_span!`) runs two `gemv` against
+`Q` of size `n_metabolites x rank` for every complex PAIR, so it streams the whole basis
+— on genome-scale yeast models roughly 100 MB — through memory once per pair. With
+~10^7 pairs in a giant module that is pure memory bandwidth, which is why the
+`efficient=false` path showed identical runtimes at 16, 64 and 128 threads: more cores
+share the same bus.
+
+Two observations remove almost all of that work:
+
+  1. `y_diff = y_alpha - y_beta` is SPARSE. A complex is a small sum of species, so the
+     difference has a handful of nonzeros out of `n_metabolites`. `c = Q' * v` then only
+     touches those few rows of `Q` instead of all of them.
+  2. `Q` has orthonormal columns, so ||Q Q' v - v||^2 = ||v||^2 - ||c||^2. The projection
+     never has to be formed — the second `gemv`, the `axpy` and the dense norm all go.
+
+That identity loses precision by cancellation exactly when the residual is small, i.e.
+in the regime being tested. It is therefore used only as a CONSERVATIVE FILTER: a
+comfortably large residual is a reliable "not in span"; anything near the tolerance is
+reported as undecided and must be re-checked on the dense path.
+
+Returns `(in_span, decided)`. When `decided` is false the caller must fall back.
+"""
+function is_in_span_sparse(
+    nz_idx::Vector{Int},
+    nz_val::Vector{Float64},
+    n_nz::Int,
+    cache::CachedColumnSpan,
+    coeffs_workspace::Vector{Float64}
+)::Tuple{Bool,Bool}
+    nrm2_v = 0.0
+    @inbounds for k in 1:n_nz
+        nrm2_v += nz_val[k] * nz_val[k]
+    end
+
+    if cache.rank == 0
+        return (sqrt(nrm2_v) < cache.tolerance, true)
+    end
+    n_nz == 0 && return (true, true)
+
+    Qt = cache.Qt
+    r = cache.rank
+    @inbounds fill!(view(coeffs_workspace, 1:r), 0.0)
+    @inbounds for t in 1:n_nz
+        row = nz_idx[t]
+        val = nz_val[t]
+        @simd for q in 1:r
+            coeffs_workspace[q] += val * Qt[q, row]
+        end
+    end
+
+    nrm2_c = 0.0
+    @inbounds @simd for q in 1:r
+        nrm2_c += coeffs_workspace[q] * coeffs_workspace[q]
+    end
+
+    resid2 = nrm2_v - nrm2_c
+    tol2 = cache.tolerance * cache.tolerance
+
+    # Trust the subtraction only when the residual is far above both the tolerance and
+    # the cancellation noise floor (~eps * ||v||^2, with a wide safety margin).
+    if resid2 > max(4 * tol2, 1e-8 * nrm2_v)
+        return (false, true)          # decisively outside the span
+    end
+    return (false, false)             # borderline -> caller re-checks densely
 end
 
 """
@@ -1978,62 +2340,81 @@ function _detect_acr_acrr(
 
     if efficient
         # Fast efficient path: Direct pairwise comparison
-        max_tid = Threads.maxthreadid()
-        thread_acr = [Set{Symbol}() for _ in 1:max_tid]
-        thread_acrr = [Set{Tuple{Symbol,Symbol}}() for _ in 1:max_tid]
-        thread_nz_indices = [Vector{Int}(undef, 2) for _ in 1:max_tid]
-        thread_nz_vals = [Vector{Float64}(undef, 2) for _ in 1:max_tid]
+        # Per-task buffers via explicit chunking, NOT `threadid()`-indexed buffers.
+        #
+        # `Threads.@threads` schedules dynamically since Julia 1.8, so a task may resume
+        # on a different thread than it started on; indexing shared buffers by
+        # `Threads.threadid()` is therefore unsound by contract, and the Julia manual
+        # warns against it. Two tasks sharing `nz_indices_buf` would silently corrupt
+        # ACR/ACRR results — and this loop runs in BOTH kinetic modes, i.e. on the
+        # production path.
+        #
+        # Each spawned task owns its buffers, so the hazard cannot arise. Round-robin
+        # chunking (c:nchunks:n) rather than contiguous blocks, because module sizes
+        # differ by orders of magnitude and contiguous blocks would load-imbalance.
+        # Sparse column per complex, built once for the whole call. The pair loop below
+        # used to read `Y_matrix[met_idx, idx]` for EVERY metabolite of every pair —
+        # O(n_metabolites) random accesses into a sparse matrix, each a search within a
+        # column — to recover a difference that carries two to four nonzeros. Merging the
+        # two sparse columns gives the same answer in O(nnz_a + nnz_b).
+        sparse_cols = Dict{Int,Tuple{Vector{Int},Vector{Float64}}}()
+        for module_set in kinetic_modules, c in module_set
+            idx = get(complex_to_idx, c, 0)
+            (idx == 0 || haskey(sparse_cols, idx)) && continue
+            ii, vv = SparseArrays.findnz(SparseArrays.sparse(Y_matrix[:, idx]))
+            sparse_cols[idx] = (collect(ii), collect(vv))
+        end
 
-        Threads.@threads for module_set in kinetic_modules
-            tid = Threads.threadid()
-            local_acr = thread_acr[tid]
-            local_acrr = thread_acrr[tid]
-            nz_indices_buf = thread_nz_indices[tid]
-            nz_vals_buf = thread_nz_vals[tid]
+        n_mods = length(kinetic_modules)
+        nchunks = max(1, min(Threads.nthreads(), n_mods))
 
-            complexes = collect(module_set)
-            k = length(complexes)
-            k < 2 && continue
+        chunk_tasks = map(1:nchunks) do c
+            Threads.@spawn begin
+                local_acr = Set{Symbol}()
+                local_acrr = Set{Tuple{Symbol,Symbol}}()
+                nz_indices_buf = Vector{Int}(undef, 2)
+                nz_vals_buf = Vector{Float64}(undef, 2)
 
-            @inbounds for i in 1:k
-                idx_a = get(complex_to_idx, complexes[i], 0)
-                idx_a == 0 && continue
+                for mi in c:nchunks:n_mods
+                    module_set = kinetic_modules[mi]
+                complexes = collect(module_set)
+                k = length(complexes)
+                k < 2 && continue
 
-                for j in (i+1):k
-                    idx_b = get(complex_to_idx, complexes[j], 0)
-                    idx_b == 0 && continue
+                @inbounds for i in 1:k
+                    idx_a = get(complex_to_idx, complexes[i], 0)
+                    idx_a == 0 && continue
 
-                    nnz_count = 0
-                    for met_idx in 1:n_metabolites
-                        val_diff = Y_matrix[met_idx, idx_a] - Y_matrix[met_idx, idx_b]
-                        if abs(val_diff) > tolerance
-                            nnz_count += 1
-                            if nnz_count <= 2
-                                nz_indices_buf[nnz_count] = met_idx
-                                nz_vals_buf[nnz_count] = val_diff
-                            else
-                                break
+                    for j in (i+1):k
+                        idx_b = get(complex_to_idx, complexes[j], 0)
+                        idx_b == 0 && continue
+
+                        (ia, va) = sparse_cols[idx_a]
+                        (ib, vb) = sparse_cols[idx_b]
+                        nnz_count = _sparse_diff_upto2!(nz_indices_buf, nz_vals_buf,
+                                                        ia, va, ib, vb, tolerance)
+
+                        if nnz_count == 1
+                            push!(local_acr, metabolite_ids[nz_indices_buf[1]])
+                        elseif nnz_count == 2
+                            if abs(nz_vals_buf[1] + nz_vals_buf[2]) < tolerance
+                                m1, m2 = metabolite_ids[nz_indices_buf[1]], metabolite_ids[nz_indices_buf[2]]
+                                push!(local_acrr, m1 < m2 ? (m1, m2) : (m2, m1))
                             end
                         end
                     end
-
-                    if nnz_count == 1
-                        push!(local_acr, metabolite_ids[nz_indices_buf[1]])
-                    elseif nnz_count == 2
-                        if abs(nz_vals_buf[1] + nz_vals_buf[2]) < tolerance
-                            m1, m2 = metabolite_ids[nz_indices_buf[1]], metabolite_ids[nz_indices_buf[2]]
-                            push!(local_acrr, m1 < m2 ? (m1, m2) : (m2, m1))
-                        end
-                    end
                 end
+                end
+                (local_acr, local_acrr)
             end
         end
 
         acr_set = Set{Symbol}()
         acrr_set = Set{Tuple{Symbol,Symbol}}()
-        for tid in 1:max_tid
-            union!(acr_set, thread_acr[tid])
-            union!(acrr_set, thread_acrr[tid])
+        for t in chunk_tasks
+            a, b = fetch(t)
+            union!(acr_set, a)
+            union!(acrr_set, b)
         end
 
         return (acr_metabolites=collect(acr_set), acrr_pairs=collect(acrr_set))
@@ -2090,6 +2471,7 @@ function _detect_acr_acrr(
         # ACRR: e_i - e_j ∈ im(Y∆), from the (un-augmented) coupling span.
         if size(Y_Delta, 2) > 0
             base_cache = build_cached_column_span(Y_Delta; tolerance=tolerance)
+
             if base_cache.rank > 0
                 diff_vec = zeros(Float64, n_metabolites)
                 for i in 1:n_metabolites
@@ -2106,6 +2488,7 @@ function _detect_acr_acrr(
                 end
             end
         end
+
 
         # ACR with iterative known-ACR augmentation (Remark S3-6 propagation):
         # metabolite S is ACR if e_S ∈ im([Y∆ | e_{known ACR}]). Each newly

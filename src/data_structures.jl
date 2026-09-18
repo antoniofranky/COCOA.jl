@@ -1,4 +1,24 @@
 """
+$(TYPEDSIGNATURES)
+
+Emit a progress line through the logging system, then flush.
+
+Goes through `@info` so callers keep the usual control — log level, custom logger,
+redirection — rather than having a library write to stdout behind their back. The
+explicit `flush(stderr)` is the part that matters on a cluster: stderr redirected to a
+file is block-buffered, so a long run showed NOTHING until it exited, and a job killed at
+its wall clock left no trace at all. That is how a 48-hour genome-scale run was lost.
+
+Set `COCOA_PROGRESS=0` to silence these entirely; `@debug`-level detail stays separate.
+"""
+function progress(args...)
+    get(ENV, "COCOA_PROGRESS", "1") == "0" && return nothing
+    @info string(args...)
+    flush(stderr)
+    return nothing
+end
+
+"""
 Data structures for COCOA - Core types, buffers, storage, and tracking functionality.
 
 This module contains:
@@ -148,7 +168,7 @@ function add_non_concordant!(tracker::ConcordanceTracker, x::Int, y::Int)
     end
 end
 
-function is_non_concordant(tracker::ConcordanceTracker, x::Int, y::Int)
+function is_non_concordant(tracker::ConcordanceTracker, x::Int, y::Int; inherit_modules::Bool=true)
     # Direct check with canonical ordering
     pair = x < y ? (x, y) : (y, x)
     if pair in tracker.non_concordant_pairs
@@ -164,10 +184,20 @@ function is_non_concordant(tracker::ConcordanceTracker, x::Int, y::Int)
         return false
     end
 
-    # Cached module relationship - check both orderings
-    if (rep_x, rep_y) in tracker.non_concordant_modules || (rep_y, rep_x) in tracker.non_concordant_modules
+    # Module-level inheritance: treat the pair as non-concordant because SOME pair
+    # between these two components tested non-concordant.
+    #
+    # Sound in exact arithmetic — concordance is an equivalence relation, so one
+    # non-concordant cross pair rules out all of them. Under `concordance_tolerance` it
+    # is not: the claim is recorded for the components as they were AT THAT MOMENT and
+    # then inherited by components that grew afterwards, so pairs are skipped that would
+    # have produced a merging edge. Switchable so the effect can be measured.
+    if inherit_modules &&
+       ((rep_x, rep_y) in tracker.non_concordant_modules ||
+        (rep_y, rep_x) in tracker.non_concordant_modules)
         return true
     end
+    inherit_modules || return false
 
     # Transitivity check - ensure both modules are cached
     ensure_module_cached!(tracker, rep_x)
