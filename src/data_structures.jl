@@ -19,6 +19,81 @@ function progress(args...)
 end
 
 """
+True if the last solve reported success but came back without a feasible primal point.
+"""
+function reported_success_without_point(om)
+    J.termination_status(om) in (J.OPTIMAL, J.ALMOST_OPTIMAL, J.LOCALLY_SOLVED) || return false
+    return !J.is_solved_and_feasible(om; allow_local=true, allow_almost=true)
+end
+
+"""
+Set a HiGHS string option directly on the backend.
+
+Deliberately NOT `J.set_attribute`: JuMP marks the model dirty on any attribute change,
+after which `termination_status` reads OPTIMIZE_NOT_CALLED and the solution is gone.
+Restoring the options after a recovery solve that way discarded every recovered value
+(audit A42, first replay: 934 of 934).
+"""
+function _set_highs_option!(om, name::String, value::String)
+    rc = HiGHS.Highs_setStringOptionValue(J.unsafe_backend(om), name, value)
+    rc == HiGHS.kHighsStatusError && error("HiGHS rejected option $name=$value")
+    return nothing
+end
+
+"""
+    optimize_verified!(om) -> Int
+
+`J.optimize!(om)`, plus recovery when HiGHS reports OPTIMAL without a feasible point.
+
+HiGHS solves the scaled LP; if the unscaled solution then violates
+`primal_feasibility_tolerance`, it still reports termination OPTIMAL but primal status
+INFEASIBLE_POINT. On the split (random_0) yeast models this hit ~5 % of the pair LPs
+(audit A41: violations 1e-8 … 6e-7, i.e. just above the 1e-8 tolerance), and such a solve
+yields no usable value, so the pair ended undecided.
+
+Recovery re-solves from a cleared solver state, i.e. without the warm basis that produced
+the bad point (re-optimising warm recovered only 6 % in A41):
+  1. presolve on — recovered 99.7 % in A41, median 0.27 s
+  2. plain simplex, no warm basis, options as configured — recovered 95 % of what was
+     left, at ~51 s a solve, which is affordable at this rate (0.3 % of 5 %)
+NOT the interior point method, although it too recovered ~95 % in A41: in the A42
+end-to-end run HiGHS' IPM factorisation aborted with "double free or corruption" inside
+`hipo::denseFactF`. The worker then hung in its own crash handler, the master waited on
+it forever, and a 16 h genome-scale run had to be killed. A recovery path must not be
+able to take the whole run down.
+
+Every recovered objective agreed with an independent cold primal-simplex re-solve to
+≤ 5e-9. Options are restored afterwards, at the HiGHS level (see `_set_highs_option!`).
+The recovered basis stays as the warm start of the next LP; under static scheduling that
+is as deterministic as any other basis.
+
+Only acts on HiGHS; any other backend gets a plain `optimize!`. Returns the number of
+re-solves made (0 when the first solve was fine or genuinely failed).
+"""
+function optimize_verified!(om)
+    J.optimize!(om)
+    reported_success_without_point(om) || return 0
+    J.unsafe_backend(om) isa HiGHS.Optimizer || return 0
+
+    presolve0 = J.get_attribute(om, "presolve")
+    attempts = 0
+    try
+        for presolve in ("on", presolve0)
+            attempts += 1
+            HiGHS.Highs_clearSolver(J.unsafe_backend(om))
+            _set_highs_option!(om, "presolve", presolve)
+            J.optimize!(om)
+            reported_success_without_point(om) || break
+        end
+    finally
+        # At the HiGHS level this does not touch the solution, so the recovered value
+        # stays readable by the caller.
+        _set_highs_option!(om, "presolve", presolve0)
+    end
+    return attempts
+end
+
+"""
 Data structures for COCOA - Core types, buffers, storage, and tracking functionality.
 
 This module contains:

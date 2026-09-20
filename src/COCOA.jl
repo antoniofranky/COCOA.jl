@@ -57,6 +57,7 @@ import Statistics
 import Random
 import StableRNGs
 import JuMP as J
+import HiGHS
 import Dates
 import ConstraintTrees as C
 import Distributed as D

@@ -164,7 +164,7 @@ function constraints_variability_static(
             map(k:n_chunks:n) do i
                 dir, tgt = target_array[i]
                 J.@objective(om, COBREXA.Maximal, C.substitute(dir * tgt, om[:x]))
-                J.optimize!(om)
+                optimize_verified!(om)
                 COBREXA.is_solved(om) ? output(dir, om) : nothing
             end
         end,

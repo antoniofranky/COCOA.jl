@@ -496,3 +496,48 @@ end
         end
     end
 end
+
+# `optimize_verified!` (audit A41). The failure it repairs — HiGHS OPTIMAL with an
+# INFEASIBLE_POINT after unscaling — only shows up on genome-scale LPs after a sequence
+# of warm starts and could not be provoked on small instances, so its effect is verified
+# end to end on a real model (audit A42). What is pinned here is that it is inert
+# whenever nothing needs repairing: same value, same status, options untouched.
+const JM = COCOA.J   # macros need a global binding
+@testset "optimize_verified! is inert on well-posed and on infeasible LPs" begin
+    om = JM.Model(HiGHS.Optimizer); JM.set_silent(om)
+    JM.set_attribute(om, "presolve", "off")
+    JM.@variable(om, 0 <= x[1:3] <= 4)
+    JM.@constraint(om, x[1] + x[2] + x[3] == 5)
+    JM.@objective(om, Max, 2x[1] + x[2])
+    @test COCOA.optimize_verified!(om) == 0
+    @test JM.termination_status(om) == JM.OPTIMAL
+    @test JM.objective_value(om) ≈ 9.0
+    @test !COCOA.reported_success_without_point(om)
+    @test JM.get_attribute(om, "presolve") == "off"
+    @test JM.get_attribute(om, "solver") == "choose"
+
+    # Restoring options after a recovery must not discard the solution it produced.
+    # (JuMP's set_attribute does exactly that — A42's first replay lost every value.)
+    COCOA._set_highs_option!(om, "presolve", "on")
+    COCOA._set_highs_option!(om, "presolve", "off")
+    @test JM.termination_status(om) == JM.OPTIMAL
+    @test JM.objective_value(om) ≈ 9.0
+    @test JM.get_attribute(om, "presolve") == "off"
+
+    JM.@constraint(om, x[1] >= 6)            # now infeasible: a genuine failure
+    @test COCOA.optimize_verified!(om) == 0
+    @test JM.termination_status(om) == JM.INFEASIBLE
+    @test !COCOA.reported_success_without_point(om)
+end
+
+@testset "recovered-LP counter is carried through the accumulator" begin
+    c = COCOA.MutableCounts()
+    @test c.recovered_lps == 0
+    c.recovered_lps = 3
+    acc = COCOA.BatchResultAccumulator(10)
+    COCOA.accumulate_results!(acc, COCOA.SparseConcordantPairs(10), c,
+                              Tuple{Int,Int,Symbol,Float64}[])
+    COCOA.accumulate_results!(acc, COCOA.SparseConcordantPairs(10), c,
+                              Tuple{Int,Int,Symbol,Float64}[])
+    @test acc.counts.recovered_lps == 6
+end

@@ -26,9 +26,10 @@ mutable struct MutableCounts
     total_optimizations::Int  # Total number of optimization attempts
     unknown::Int             # Pairs whose LPs failed: NO verdict, neither concordant nor not
     success_no_value::Int    # Status said success, yet no usable objective value came back
+    recovered_lps::Int       # LPs whose first solve had no feasible point but a re-solve did
 end
 
-MutableCounts() = MutableCounts(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+MutableCounts() = MutableCounts(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 
 """
 Configuration for batch processing.
@@ -60,6 +61,7 @@ struct BatchOptimizationResult
     direct_concordant_pairs::Union{Nothing,Set{Tuple{Int,Int}}}
     unknown::Int
     success_no_value::Int
+    recovered_lps::Int
 end
 
 
@@ -109,6 +111,7 @@ function accumulate_results!(
     acc.counts.total_optimizations += counts.total_optimizations
     acc.counts.unknown += counts.unknown
     acc.counts.success_no_value += counts.success_no_value
+    acc.counts.recovered_lps += counts.recovered_lps
 
     # Merge concordant pairs efficiently
     merge_pairs!(acc.concordant_pairs, concordant_pairs)
@@ -137,6 +140,7 @@ function reset!(acc::BatchResultAccumulator)::Nothing
     acc.counts.total_optimizations = 0
     acc.counts.unknown = 0
     acc.counts.success_no_value = 0
+    acc.counts.recovered_lps = 0
     empty!(acc.optimization_results)
     empty!(acc.temp_pairs)
     empty!(acc.temp_values)
@@ -310,7 +314,8 @@ function process_full_batch!(
         batch_result.skipped,
         batch_result.total_optimizations,
         batch_result.unknown,
-        batch_result.success_no_value
+        batch_result.success_no_value,
+        batch_result.recovered_lps
     )
 
     # Accumulate results
@@ -406,7 +411,8 @@ function execute_batch_optimization!(
         batch_counts.optimization_results,
         batch_counts.direct_concordant_pairs,
         batch_counts.unknown_count,
-        batch_counts.success_no_value_count
+        batch_counts.success_no_value_count,
+        batch_counts.recovered_lps
     )
 end
 
@@ -1107,6 +1113,7 @@ function activity_concordance_analysis(
         "n_other_error_pairs" => batch_results.other_error_pairs,
         "n_unknown_pairs" => batch_results.unknown_pairs,
         "n_success_no_value_pairs" => batch_results.success_no_value_pairs,
+        "n_recovered_lps" => batch_results.recovered_lps,
         "scheduling" => String(scheduling),
         "cc_scale_bound" => cc_scale_bound,
         "n_base_points" => n_base_points,
@@ -1496,6 +1503,7 @@ function build_final_results(state::BatchProcessingState)
         other_error_pairs=state.accumulator.counts.other_error,
         unknown_pairs=state.accumulator.counts.unknown,
         success_no_value_pairs=state.accumulator.counts.success_no_value,
+        recovered_lps=state.accumulator.counts.recovered_lps,
         optimization_results=opt_results_dict,
         total_optimizations=state.accumulator.counts.total_optimizations
     )
@@ -1652,17 +1660,17 @@ function process_concordance_batch(
             # Check if model creation failed
             if om === nothing
                 println("NULL MODEL: Worker failed to create optimization model for $(c1_id), $(c2_id)")
-                return (c1_id, c2_id, direction, dir_multiplier, NaN, J.OPTIMIZE_NOT_CALLED)
+                return (c1_id, c2_id, direction, dir_multiplier, NaN, J.OPTIMIZE_NOT_CALLED, false)
             end
             try
                 # Check if activities exist for both complexes
                 if !haskey(constraints.activities, c1_id)
                     @warn("MISSING ACTIVITY: c1_id=$(c1_id)")
-                    return (c1_id, c2_id, direction, dir_multiplier, NaN, J.OPTIMIZE_NOT_CALLED)
+                    return (c1_id, c2_id, direction, dir_multiplier, NaN, J.OPTIMIZE_NOT_CALLED, false)
                 end
                 if !haskey(constraints.activities, c2_id)
                     @warn("MISSING ACTIVITY: c2_id=$(c2_id)")
-                    return (c1_id, c2_id, direction, dir_multiplier, NaN, J.OPTIMIZE_NOT_CALLED)
+                    return (c1_id, c2_id, direction, dir_multiplier, NaN, J.OPTIMIZE_NOT_CALLED, false)
                 end
 
                 # Set c2 constraint to 1.0 and optimize c1
@@ -1677,41 +1685,29 @@ function process_concordance_batch(
                 @debug "Objective set successfully"
 
                 @debug "About to optimize"
-                J.optimize!(om)
+                # `optimize_verified!` re-solves an OPTIMAL-without-feasible-point LP
+                # instead of handing back NaN; see its docstring (audit A41).
+                n_recovery = optimize_verified!(om)
                 @debug "Optimization completed"
 
                 # Check termination status immediately after optimization
                 immediate_status = J.termination_status(om)
-                @debug "Termination status after optimize!" status = immediate_status
-                @debug "About to use immediate_status" immediate_status
 
-                # Get result (use NaN for invalid/missing values)
-                # Accept ALMOST_OPTIMAL as well, matching the success bucket of
-                # `categorize_termination_status`. The two predicates used to disagree:
-                # an ALMOST_OPTIMAL solve was booked as a success but yielded NaN, so it
-                # showed up in no failure counter and (before the three-way verdict) was
-                # silently recorded as "not concordant" — 927 pairs on one yeast model.
-                #
-                # Using the value is sound here: ALMOST_OPTIMAL means optimal up to
-                # relaxed tolerances (~1e-6 at worst), while the decision this value
-                # feeds is |min - max| > concordance_tolerance = 1e-2, four orders of
-                # magnitude coarser. Anything that still yields no value stays NaN and is
-                # counted as `:success_no_value`.
                 # Accept ALMOST_OPTIMAL as well, matching the success bucket of
                 # `categorize_termination_status`. The two predicates used to disagree:
                 # an ALMOST_OPTIMAL solve was booked as a success but yielded NaN, so it
                 # appeared in no failure counter and (before the three-way verdict) was
-                # silently recorded as "not concordant".
+                # silently recorded as "not concordant" — 927 pairs on one yeast model.
                 #
                 # Using the value is sound: ALMOST_OPTIMAL means optimal up to relaxed
                 # tolerances (~1e-6 at worst) while the decision it feeds is
                 # |min - max| > concordance_tolerance = 1e-2, four orders coarser.
                 #
-                # What remains NaN here is diagnosed and counted, not logged: HiGHS can
-                # return termination OPTIMAL together with primal_status
-                # INFEASIBLE_POINT, which is what `n_success_no_value_pairs` counts.
-                # A per-occurrence println from the workers wrote 87,799 lines and 10 MB
-                # into a single genome-scale run before it was removed.
+                # What remains NaN here is diagnosed and counted, not logged: a solve
+                # that still reports success without a feasible point after recovery is
+                # what `n_success_no_value_pairs` counts. A per-occurrence println from
+                # the workers wrote 87,799 lines and 10 MB into a single genome-scale run
+                # before it was removed.
                 raw_value = if J.is_solved_and_feasible(om; allow_local=true, allow_almost=true)
                     J.objective_value(om)
                 else
@@ -1724,12 +1720,13 @@ function process_concordance_batch(
                 # Cleanup
                 J.delete(om, c2_constraint)
                 J.unregister(om, :c2_constraint)
-                result = (c1_id, c2_id, direction, dir_multiplier, actual_value, immediate_status)
+                recovered = n_recovery > 0 && !isnan(actual_value)
+                result = (c1_id, c2_id, direction, dir_multiplier, actual_value, immediate_status, recovered)
                 @debug "Returning result" result
                 return result
             catch e
                 @warn "Optimization error" c1_id c2_id direction error = string(e)
-                return (c1_id, c2_id, direction, dir_multiplier, NaN, J.OTHER_ERROR)
+                return (c1_id, c2_id, direction, dir_multiplier, NaN, J.OTHER_ERROR, false)
             end
         end,
         constraints,
@@ -1768,11 +1765,13 @@ function process_concordance_batch(
     # Debug: Track actual termination status frequencies and total optimizations
     status_frequency = Dict{Any,Int}()
     total_optimizations_attempted = 0
+    recovered_lps = 0
 
     # Process each solver result
     for result in optimization_results
         total_optimizations_attempted += 1
-        c1_id, c2_id, direction, dir_multiplier, value, termination_status = result
+        c1_id, c2_id, direction, dir_multiplier, value, termination_status, recovered = result
+        recovered && (recovered_lps += 1)
         pair_idx = get(pair_lookup, (c1_id, c2_id), 0)
         pair_idx == 0 && continue
 
@@ -1874,7 +1873,7 @@ function process_concordance_batch(
     # whole 2025 run. `:success_no_value` pairs (status says solved, no usable objective
     # value came back) are counted separately but the raw statuses are what identify the
     # cause.
-    @info "Optimization statistics" total_optimizations_attempted status_frequency
+    @info "Optimization statistics" total_optimizations_attempted status_frequency recovered_lps
 
     # Return counts in same format as process_batch_results! expected
     return (
@@ -1889,6 +1888,7 @@ function process_concordance_batch(
         other_error_count=other_error_count,
         unknown_count=unknown_count,
         success_no_value_count=success_no_value_count,
+        recovered_lps=recovered_lps,
         total_optimizations=total_optimizations_attempted,
         optimization_results=optimization_results_vec,
         direct_concordant_pairs=direct_concordant_pairs
