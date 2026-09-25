@@ -339,6 +339,7 @@ function kinetic_analysis(
 
         # Collect non-empty results into properly typed vector
         upstream_sets = Set{Symbol}[r for r in upstream_results if !isnothing(r)]
+        outer_iteration == 1 && complexes_in_every_coupling_set(upstream_sets)
 
         if isempty(upstream_sets)
             return (
@@ -2881,4 +2882,34 @@ function mass_action_deficiency_bounds(
         is_exact=(lower_bound == upper_bound),
         weakly_reversible=weakly_rev
     )
+end
+
+"""
+    complexes_in_every_coupling_set(upstream_sets; min_sets=10) -> Vector{Symbol}
+
+Return — and warn about — complexes that belong to EVERY coupling set.
+
+One such complex merges all coupling sets into a single kinetic module (Lemma S3-1). That is
+consistent with the theory, but on the yeast panel it happened only through a preprocessing
+artifact: a blocked reaction left in the network, whose metabolite is consumed but never
+produced, so Phase I of the upstream algorithm cannot remove its complex; as every set is
+seeded with 𝒞b ∪ 𝒞m it then turns up in all of them (audit C11). Removing 1–3 such complexes
+broke a "giant" module of 12,071 complexes into modules of ~50, the size seen everywhere else.
+Worth a look before interpreting a giant module. Below `min_sets` sets the pattern is too
+common to mean anything (the EnvZ-OmpR network has four).
+"""
+function complexes_in_every_coupling_set(upstream_sets; min_sets::Int=10)
+    n = length(upstream_sets)
+    n < min_sets && return Symbol[]
+    counts = Dict{Symbol,Int}()
+    for set in upstream_sets, c in set
+        counts[c] = get(counts, c, 0) + 1
+    end
+    shared = sort!([c for (c, k) in counts if k == n])
+    isempty(shared) ||
+        @warn "$(length(shared)) complex(es) belong to every one of the $n coupling sets and " *
+              "will merge them into ONE kinetic module. On the yeast panel this signalled a " *
+              "blocked reaction left in the network (audit C11): check whether these complexes " *
+              "have any producing reaction." complexes = shared
+    return shared
 end

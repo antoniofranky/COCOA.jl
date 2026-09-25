@@ -254,7 +254,8 @@ function find_blocked_reactions(
     flux_tolerance::Float64=1e-9,
     settings=[],
     workers=D.workers(),
-    scheduling::Symbol=:static
+    scheduling::Symbol=:static,
+    on_undecided::Symbol=:warn
 )
     # Deterministic by default. `COBREXA.constraints_variability` distributes its LPs
     # with `pmap` + `CachingPool` over a per-worker mutated model, so borderline results
@@ -291,30 +292,53 @@ function find_blocked_reactions(
               "blocked-reaction calls on borderline reactions will not be reproducible" flux_tolerance
     end
 
-    # Find reactions where both min and max are below tolerance
-    blocked = String[]
-    undecided = String[]
+    blocked, undecided = classify_blocked(variability, flux_tolerance)
+    report_undecided(undecided, on_undecided)
+    return blocked
+end
+
+"""
+    classify_blocked(variability, flux_tolerance) -> (blocked, undecided)
+
+Split an FVA result `reaction => (min, max)` into reactions that are blocked — both bounds
+below `flux_tolerance` in magnitude — and reactions whose blockedness is UNDECIDED because
+an LP gave no value (`nothing`). Undecided reactions are never counted as blocked: deleting
+a reaction on the strength of a failed LP would remove a possibly active one, which is the
+error the reference implementation makes (`Sol.stat~=1 -> maxi=0`). Nor are they silently
+counted as unblocked any more — see [`report_undecided`](@ref).
+"""
+function classify_blocked(variability, flux_tolerance::Float64)
+    blocked, undecided = String[], String[]
     for (rid, (min_flux, max_flux)) in variability
-        # A reaction whose FVA LP could not be solved even cold is KEPT: removing it on the
-        # strength of a failed LP would delete a possibly active reaction, which is the
-        # error the reference implementation makes (`Sol.stat~=1 -> maxi=0`). But keeping it
-        # is not neutral either — a blocked reaction left in the network is exactly what
-        # produced the giant kinetic module (audit C11) — so the set is reported, not
-        # merely skipped with one warning per reaction as before.
         if isnothing(min_flux) || isnothing(max_flux)
             push!(undecided, String(rid))
-            continue
-        end
-        if abs(min_flux) < flux_tolerance && abs(max_flux) < flux_tolerance
+        elseif abs(min_flux) < flux_tolerance && abs(max_flux) < flux_tolerance
             push!(blocked, String(rid))
         end
     end
+    # `blocked` keeps the FVA order: it is also the deletion order, and a different
+    # deletion history can change how the model is written out, byte for byte.
+    return blocked, sort!(undecided)
+end
 
-    isempty(undecided) ||
-        @warn "Blockedness undecided for $(length(undecided)) reaction(s): their FVA LP failed " *
-              "even when re-solved cold. They are KEPT in the network." reactions = sort(undecided)
+"""
+    report_undecided(undecided, on_undecided)
 
-    return blocked
+`on_undecided = :warn` (default) keeps the reactions and logs ONE warning that lists them;
+`:error` throws. Pipelines should use `:error`. Keeping an undecided reaction is not
+neutral: a blocked reaction left in the network is exactly what glued the whole network into
+one "giant" kinetic module on the yeast panel (audit C11), and a per-reaction warning in a
+log is how that went unnoticed.
+"""
+function report_undecided(undecided::Vector{String}, on_undecided::Symbol)
+    on_undecided in (:warn, :error) ||
+        throw(ArgumentError("on_undecided must be :warn or :error, got $(repr(on_undecided))"))
+    isempty(undecided) && return nothing
+    msg = "Blockedness undecided for $(length(undecided)) reaction(s): their FVA LP failed " *
+          "even when re-solved cold."
+    on_undecided === :error && error(msg * " Reactions: " * join(undecided, ", "))
+    @warn msg * " They are KEPT in the network." reactions = undecided
+    return nothing
 end
 
 """
@@ -360,7 +384,8 @@ function find_blocked_reactions(
     flux_tolerance::Float64=1e-9,
     settings=[],
     workers=D.workers(),
-    scheduling::Symbol=:static
+    scheduling::Symbol=:static,
+    on_undecided::Symbol=:warn
 )
     constraints = COBREXA.flux_balance_constraints(model)
 
@@ -391,7 +416,8 @@ function find_blocked_reactions(
         flux_tolerance,
         settings,
         workers,
-        scheduling
+        scheduling,
+        on_undecided
     )
 end
 
@@ -450,49 +476,36 @@ function remove_blocked_reactions(
     settings=[],
     workers=D.workers(),
     scheduling::Symbol=:static,
-    max_rounds::Int=10
+    on_undecided::Symbol=:warn
 )
     # Deep copy to preserve original
     model_copy = deepcopy(model)
 
-    # Repeat until a pass finds nothing — as a CHECK, not because a cascade is expected.
+    # ONE pass. A blocked reaction carries zero flux in every steady state, so deleting it
+    # leaves the flux ranges of all other reactions unchanged: there is nothing a second
+    # pass could find. (Strictly "blocked" means below `flux_tolerance`, not exactly zero,
+    # but the band between noise and genuine flux is empty on the yeast panel — audit A19.)
     #
-    # In exact arithmetic one pass is final: a blocked reaction carries zero flux in every
-    # steady state, so deleting it leaves the flux cone of the others unchanged. A later
-    # pass that still finds something therefore means an earlier LP result was wrong. That
-    # is what happened on the yeast panel before `retry_unsolved` existed: FVA LPs left
-    # unsolved by the warm-started sweep made their reactions count as "not blocked", and a
-    # second pass on the smaller network happened to solve them (audit A49, A55). In
-    # C. albicans three of those were the SLIME backbones of ceramide, cardiolipin and
-    # phosphatidylglycerol. Their complexes are consumed but never produced, so Phase I of
-    # the upstream algorithm cannot remove them; since every coupling set is seeded with
-    # 𝒞b ∪ 𝒞m, they land in EVERY coupling set and Lemma S3-1 merges the network into one
-    # "giant" kinetic module of ~20 % of all complexes (audit C11). The reference
-    # implementation (Upstream_Algorithm, `run_preprocessing.m`) also runs one pass only.
-    #
-    # With the cold retry a second pass should come back empty; a nonempty one is logged.
-    total_blocked = String[]
-    rounds = 0
-    for round in 1:max_rounds
-        rounds = round
-        blocked = find_blocked_reactions(
-            model_copy;
-            optimizer,
-            objective_bound,
-            flux_tolerance,
-            settings,
-            workers,
-            scheduling
-        )
-        isempty(blocked) && break
-        for rid in blocked
-            haskey(model_copy.reactions, rid) && delete!(model_copy.reactions, rid)
-        end
-        append!(total_blocked, blocked)
-        round > 1 && @warn "blocked-reaction pass $round still found reactions — an earlier pass must have misjudged them" n_found = length(blocked)
-        round == max_rounds && @warn "blocked-reaction removal did not converge" max_rounds n_removed_last_round = length(blocked)
+    # A loop "until nothing is blocked" was tried and removed. It never finds anything when
+    # every LP is solved, and when one is not it quietly repairs the result by luck — which
+    # is how an unsolved FVA LP stayed hidden as the cause of the giant kinetic module
+    # (audit C11). Unsolved LPs are now re-solved cold and reported (`on_undecided`);
+    # pipelines that want the invariant asserted re-run `find_blocked_reactions` on the
+    # result and fail if it is not empty.
+    blocked = find_blocked_reactions(
+        model_copy;
+        optimizer,
+        objective_bound,
+        flux_tolerance,
+        settings,
+        workers,
+        scheduling,
+        on_undecided
+    )
+    for rid in blocked
+        haskey(model_copy.reactions, rid) && delete!(model_copy.reactions, rid)
     end
 
-    @info "Removed $(length(total_blocked)) blocked reactions in $rounds round(s)."
+    @info "Removed $(length(blocked)) blocked reactions."
     return model_copy
 end

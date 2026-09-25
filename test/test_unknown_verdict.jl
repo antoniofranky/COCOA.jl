@@ -541,3 +541,60 @@ end
                               Tuple{Int,Int,Symbol,Float64}[])
     @test acc.counts.recovered_lps == 6
 end
+
+# Blocked-reaction detection must never turn a FAILED LP into a verdict (audit C11). The
+# warm-started FVA sweep left some LPs unsolved on the yeast panel; the affected reactions
+# were silently kept as "not blocked", and three of them glued a whole network into one
+# giant kinetic module. `classify_blocked` is where that decision is made, so it is pinned
+# directly; a failing LP cannot be provoked reliably on a small model.
+@testset "Undecided reactions are neither blocked nor silently unblocked" begin
+    variability = [
+        :active      => (0.0, 5.0),
+        :blocked     => (0.0, 0.0),
+        :tiny        => (-1e-9, 1e-9),
+        :no_max      => (0.0, nothing),
+        :no_min      => (nothing, 0.0),
+        :reversible  => (-3.0, 3.0),
+    ]
+    blocked, undecided = COCOA.classify_blocked(variability, 1e-6)
+    @test blocked == ["blocked", "tiny"]           # FVA order is kept (= deletion order)
+    @test undecided == ["no_max", "no_min"]
+    @test isempty(intersect(blocked, undecided))   # a failed LP is never evidence of blockedness
+
+    @test COCOA.report_undecided(String[], :error) === nothing
+    @test COCOA.report_undecided(undecided, :warn) === nothing
+    @test_throws ErrorException COCOA.report_undecided(undecided, :error)
+    @test_throws ArgumentError COCOA.report_undecided(undecided, :ignore)
+end
+
+@testset "One pass of blocked-reaction removal is final" begin
+    # A blocked reaction carries zero flux in every steady state, so deleting it cannot
+    # change what the others can do. A second pass must therefore find nothing — the
+    # invariant preprocess_models.jl now asserts instead of looping until it holds.
+    # `DEAD` consumes C, which nothing produces.
+    CMod = COCOA.A.CanonicalModel
+    m = CMod.Model()
+    for id in ("A", "B", "C")
+        m.metabolites[id] = CMod.Metabolite(name=id)
+    end
+    m.reactions["EX_A"] = CMod.Reaction(stoichiometry=Dict("A" => 1.0), lower_bound=-10.0, upper_bound=10.0)
+    m.reactions["R1"]   = CMod.Reaction(stoichiometry=Dict("A" => -1.0, "B" => 1.0), lower_bound=0.0, upper_bound=10.0)
+    m.reactions["EX_B"] = CMod.Reaction(stoichiometry=Dict("B" => -1.0), lower_bound=-10.0, upper_bound=10.0)
+    m.reactions["DEAD"] = CMod.Reaction(stoichiometry=Dict("C" => -1.0, "B" => 1.0), lower_bound=0.0, upper_bound=10.0)
+
+    @test COCOA.find_blocked_reactions(m; optimizer=HiGHS.Optimizer, flux_tolerance=1e-6) == ["DEAD"]
+    cleaned = COCOA.remove_blocked_reactions(m; optimizer=HiGHS.Optimizer, flux_tolerance=1e-6,
+                                             on_undecided=:error)
+    @test sort(collect(keys(cleaned.reactions))) == ["EX_A", "EX_B", "R1"]
+    @test isempty(COCOA.find_blocked_reactions(cleaned; optimizer=HiGHS.Optimizer, flux_tolerance=1e-6))
+    @test haskey(m.reactions, "DEAD")               # the input model is left untouched
+end
+
+@testset "Complexes shared by every coupling set are flagged" begin
+    glue = :M_glue
+    sets = [Set([Symbol("c$i"), glue]) for i in 1:12]
+    @test COCOA.complexes_in_every_coupling_set(sets) == [glue]
+    @test isempty(COCOA.complexes_in_every_coupling_set([Set([Symbol("c$i")]) for i in 1:12]))
+    # Few sets: sharing is common and says nothing (EnvZ-OmpR has four coupling sets).
+    @test isempty(COCOA.complexes_in_every_coupling_set(sets[1:4]))
+end
