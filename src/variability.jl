@@ -132,6 +132,11 @@ which physical worker executes it does not affect the result. Round-robin rather
 contiguous blocks keeps the load balanced when LP cost varies between targets.
 
 Reproducibility holds at a fixed worker count; the count is recorded in the run stats.
+
+`retry_unsolved=true` re-solves an LP that the warm-started sweep left without a solution
+from a cleared solver state ([`resolve_cold!`](@ref)) before giving it up as `nothing`.
+Blocked-reaction detection turns it on. The AVA of the analysis stage keeps it off for
+now, so that comparing preprocessing variants does not also change the analysis.
 """
 function constraints_variability_static(
     constraints::C.ConstraintTree,
@@ -141,6 +146,7 @@ function constraints_variability_static(
     optimizer,
     settings=[],
     workers=D.workers(),
+    retry_unsolved::Bool=false,
 ) where {T}
     target_array = [(dir, tgt) for tgt in targets, dir in (-1, 1)]
     n = length(target_array)
@@ -165,6 +171,7 @@ function constraints_variability_static(
                 dir, tgt = target_array[i]
                 J.@objective(om, COBREXA.Maximal, C.substitute(dir * tgt, om[:x]))
                 optimize_verified!(om)
+                retry_unsolved && !COBREXA.is_solved(om) && resolve_cold!(om)
                 COBREXA.is_solved(om) ? output(dir, om) : nothing
             end
         end,

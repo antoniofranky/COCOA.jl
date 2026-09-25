@@ -263,10 +263,12 @@ function find_blocked_reactions(
     # runs of S. cerevisiae produced networks differing by up to 35 reactions (no_split)
     # and 850 (random_0).
     variability = if scheduling === :static
+        # retry_unsolved: an LP left unsolved by the warm-started sweep is re-solved cold
+        # before its reaction is given up on — see `resolve_cold!` and the loop below.
         constraints_variability_tree_static(
             constraints,
             constraints.fluxes;
-            optimizer=optimizer, settings=settings, workers=workers
+            optimizer=optimizer, settings=settings, workers=workers, retry_unsolved=true
         )
     elseif scheduling === :dynamic
         COBREXA.constraints_variability(
@@ -291,16 +293,26 @@ function find_blocked_reactions(
 
     # Find reactions where both min and max are below tolerance
     blocked = String[]
+    undecided = String[]
     for (rid, (min_flux, max_flux)) in variability
-        # Skip reactions with missing flux values
+        # A reaction whose FVA LP could not be solved even cold is KEPT: removing it on the
+        # strength of a failed LP would delete a possibly active reaction, which is the
+        # error the reference implementation makes (`Sol.stat~=1 -> maxi=0`). But keeping it
+        # is not neutral either — a blocked reaction left in the network is exactly what
+        # produced the giant kinetic module (audit C11) — so the set is reported, not
+        # merely skipped with one warning per reaction as before.
         if isnothing(min_flux) || isnothing(max_flux)
-            @warn "Reaction $rid has missing flux values, skipping blocked check"
+            push!(undecided, String(rid))
             continue
         end
         if abs(min_flux) < flux_tolerance && abs(max_flux) < flux_tolerance
             push!(blocked, String(rid))
         end
     end
+
+    isempty(undecided) ||
+        @warn "Blockedness undecided for $(length(undecided)) reaction(s): their FVA LP failed " *
+              "even when re-solved cold. They are KEPT in the network." reactions = sort(undecided)
 
     return blocked
 end
@@ -437,27 +449,50 @@ function remove_blocked_reactions(
     flux_tolerance::Float64=1e-9,
     settings=[],
     workers=D.workers(),
-    scheduling::Symbol=:static
+    scheduling::Symbol=:static,
+    max_rounds::Int=10
 )
     # Deep copy to preserve original
     model_copy = deepcopy(model)
 
-    # Find blocked reactions (uses convenience wrapper with objective_bound)
-    blocked = find_blocked_reactions(
-        model_copy;
-        optimizer,
-        objective_bound,
-        flux_tolerance,
-        settings,
-        workers,
-        scheduling
-    )
-
-    # Remove from the copy
-    for rid in blocked
-        haskey(model_copy.reactions, rid) && delete!(model_copy.reactions, rid)
+    # Repeat until a pass finds nothing — as a CHECK, not because a cascade is expected.
+    #
+    # In exact arithmetic one pass is final: a blocked reaction carries zero flux in every
+    # steady state, so deleting it leaves the flux cone of the others unchanged. A later
+    # pass that still finds something therefore means an earlier LP result was wrong. That
+    # is what happened on the yeast panel before `retry_unsolved` existed: FVA LPs left
+    # unsolved by the warm-started sweep made their reactions count as "not blocked", and a
+    # second pass on the smaller network happened to solve them (audit A49, A55). In
+    # C. albicans three of those were the SLIME backbones of ceramide, cardiolipin and
+    # phosphatidylglycerol. Their complexes are consumed but never produced, so Phase I of
+    # the upstream algorithm cannot remove them; since every coupling set is seeded with
+    # 𝒞b ∪ 𝒞m, they land in EVERY coupling set and Lemma S3-1 merges the network into one
+    # "giant" kinetic module of ~20 % of all complexes (audit C11). The reference
+    # implementation (Upstream_Algorithm, `run_preprocessing.m`) also runs one pass only.
+    #
+    # With the cold retry a second pass should come back empty; a nonempty one is logged.
+    total_blocked = String[]
+    rounds = 0
+    for round in 1:max_rounds
+        rounds = round
+        blocked = find_blocked_reactions(
+            model_copy;
+            optimizer,
+            objective_bound,
+            flux_tolerance,
+            settings,
+            workers,
+            scheduling
+        )
+        isempty(blocked) && break
+        for rid in blocked
+            haskey(model_copy.reactions, rid) && delete!(model_copy.reactions, rid)
+        end
+        append!(total_blocked, blocked)
+        round > 1 && @warn "blocked-reaction pass $round still found reactions — an earlier pass must have misjudged them" n_found = length(blocked)
+        round == max_rounds && @warn "blocked-reaction removal did not converge" max_rounds n_removed_last_round = length(blocked)
     end
 
-    @info "Removed $(length(blocked)) blocked reactions."
+    @info "Removed $(length(total_blocked)) blocked reactions in $rounds round(s)."
     return model_copy
 end

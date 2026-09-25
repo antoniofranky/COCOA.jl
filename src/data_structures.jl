@@ -94,6 +94,41 @@ function optimize_verified!(om)
 end
 
 """
+    resolve_cold!(om) -> Int
+
+Re-solve an LP that ended without a solution, from a cleared solver state: first with
+presolve as configured, then with it flipped. Returns the number of re-solves (0 when the
+backend is not HiGHS or the LP ended in its time limit, which a retry would only repeat).
+
+Why: inside a variability sweep every worker reuses ONE model for thousands of LPs, each
+warm-started from the previous basis. In the yeast preprocessing that sequence left some
+LPs unsolved, and `find_blocked_reactions` then kept those reactions as "not blocked".
+Solved on a fresh model the same LPs are unproblematic (audit A55: all 36 OPTIMAL with a
+feasible point, in both presolve settings). Eight of the nine reactions skipped that way in
+*Candida albicans* are in fact blocked, and three of them are what glues the whole network
+into one "giant" kinetic module (audit C11).
+"""
+function resolve_cold!(om)
+    J.unsafe_backend(om) isa HiGHS.Optimizer || return 0
+    J.termination_status(om) == J.TIME_LIMIT && return 0
+    presolve0 = J.get_attribute(om, "presolve")
+    flipped = presolve0 == "off" ? "on" : "off"
+    attempts = 0
+    try
+        for presolve in (presolve0, flipped)
+            attempts += 1
+            HiGHS.Highs_clearSolver(J.unsafe_backend(om))
+            _set_highs_option!(om, "presolve", presolve)
+            optimize_verified!(om)
+            COBREXA.is_solved(om) && break
+        end
+    finally
+        _set_highs_option!(om, "presolve", presolve0)
+    end
+    return attempts
+end
+
+"""
 Data structures for COCOA - Core types, buffers, storage, and tracking functionality.
 
 This module contains:
