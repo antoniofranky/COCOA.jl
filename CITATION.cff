@@ -1,0 +1,40 @@
+cff-version: 1.2.0
+message: "If you use COCOA.jl in your research, please cite the article below."
+type: software
+title: "COCOA.jl: A Julia package for high-performance analysis of concordance and kinetic modules in biochemical networks"
+version: 1.2.0
+date-released: 2026-10-05
+license: MIT
+repository-code: "https://github.com/antoniofranky/COCOA.jl"
+doi: 10.5281/zenodo.22093938
+keywords:
+  - metabolic networks
+  - concordance analysis
+  - kinetic modules
+  - constraint-based modeling
+  - absolute concentration robustness
+  - Julia
+  - systems biology
+authors:
+  - family-names: Schaffranke
+    given-names: Anton
+    affiliation: "Bioinformatics Department, Institute of Biochemistry and Biology, University of Potsdam, Potsdam, Germany"
+  - family-names: Küken
+    given-names: Anika
+    affiliation: "Bioinformatics Department, Institute of Biochemistry and Biology, University of Potsdam, Potsdam, Germany"
+  - family-names: Nikoloski
+    given-names: Zoran
+    affiliation: "Bioinformatics Department, Institute of Biochemistry and Biology, University of Potsdam, Potsdam, Germany"
+preferred-citation:
+  type: article
+  title: "COCOA.jl: A Julia package for high-performance analysis of concordance and kinetic modules in biochemical networks"
+  journal: Bioinformatics
+  year: 2026
+  status: submitted
+  authors:
+    - family-names: Schaffranke
+      given-names: Anton
+    - family-names: Küken
+      given-names: Anika
+    - family-names: Nikoloski
+      given-names: Zoran
