@@ -1,6 +1,7 @@
 # COCOA.jl
 
-[![Build Status](https://github.com/antoniofranky/COCOA.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/antoniofranky/COCOA.jl/actions/workflows/CI.yml?query=branch%3Amain)
+[![Build Status](https://github.com/antoniofranky/COCOA.jl/actions/workflows/CI.yml/badge.svg?branch=main&event=push)](https://github.com/antoniofranky/COCOA.jl/actions/workflows/CI.yml?query=branch%3Amain+event%3Apush)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22093938.svg)](https://doi.org/10.5281/zenodo.22093938)
 
 **COnstraint-based COncordance Analysis** for biochemical networks.
 
@@ -411,8 +412,9 @@ If you use COCOA.jl in your research, please cite:
 }
 ```
 
-An archival snapshot of the code is available on Zenodo: <!-- DOI-PLACEHOLDER: replace after minting the Zenodo release (WP4) -->
-[DOI pending].
+Archival snapshots of every release are available on Zenodo:
+[10.5281/zenodo.22093938](https://doi.org/10.5281/zenodo.22093938) (this DOI always resolves to the
+latest version; each release also has its own DOI).
 
 ## License
 
