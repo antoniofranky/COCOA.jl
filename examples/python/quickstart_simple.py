@@ -48,7 +48,9 @@ jl.seval("using HiGHS, COCOA")
 jl.seval('model = COBREXA.load_model(joinpath(pkgdir(COCOA), "test", "e_coli_core.xml"))')
 jl.seval("model_canon = convert(A.CanonicalModel.Model, model)")
 
-# --- Preprocess and run concordance analysis (serial; add workers for speed) ---
+# --- Preprocess and run concordance analysis ---
+# Serial, which is fine for this small model. For genome-scale models use
+# run_genome_scale.py, which runs in parallel (see README.md).
 jl.seval("""
 model_processed = model_canon |>
     normalize_bounds |>
@@ -62,7 +64,7 @@ result = jl.seval("""
 activity_concordance_analysis(
     model_processed;
     optimizer=HiGHS.Optimizer,
-    objective_bound=COBREXA.relative_tolerance_bound(0.999),
+    objective_bound=nothing,     # full steady-state cone (paper setting)
     kinetic_analysis=true,
 )
 """)

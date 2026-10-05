@@ -405,8 +405,8 @@ function process_pair(filter::StreamingCandidateFilter, i::Int, j::Int)::Union{P
     end
 
     # The CV gate. NOTE this discards a pair WITHOUT ever testing it by LP, so a
-    # genuinely concordant pair whose sampled ratio is poorly resolved is lost for good
-    # (audit finding C2). Measured on Saccharomyces cerevisiae: raising sample_size from
+    # genuinely concordant pair whose sampled ratio is poorly resolved is lost for good.
+    # Measured on Saccharomyces cerevisiae: raising sample_size from
     # 1000 to 3000 cut the candidate set from 23,636 to 10,844 — more than half of the
     # candidates at 1000 were admitted on an underestimated CV — while the number of
     # concordant pairs FOUND went up.

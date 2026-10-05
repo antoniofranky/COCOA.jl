@@ -80,13 +80,18 @@ results = activity_concordance_analysis(
     balanced_threshold=1e-7,         # Threshold for balanced complexes
     cv_threshold=0.01,               # Coefficient of variation filtering
 
+    # Solver options, e.g. a time limit per LP so that one hard LP cannot stall a run
+    settings=[COBREXA.set_optimizer_attribute("time_limit", 3600.0)],
+
     # Performance settings
     batch_size=50_000,               # Candidates per optimization batch
     workers=workers(),               # Parallel workers
     use_transitivity=true,           # Exploit transitivity to reduce tests
 
     # Sampling configuration
-    sample_size=1000,                # Samples for CV estimation
+    sample_size=1000,                # Samples for CV estimation; use ≥ 5000 for genome-scale
+                                     # models (fewer samples let far more spurious candidates
+                                     # through to the LP stage)
     seed=UInt(1234),                 # Random seed (deterministic by default)
 
     # Additional analysis
@@ -236,21 +241,42 @@ model_cleaned = remove_orphans(
 Identify and remove reactions with zero flux via FVA:
 
 ```julia
-# Find blocked reactions
+# Usable in a growing cell: growth kept between 0.1 % and 100 % of its optimum while each
+# reaction's flux range is computed (the setting of the reference pipeline).
+growth_window(opt) = COBREXA.C.Between(0.001 * opt, opt)
+
+# Find blocked reactions (returns their IDs)
 blocked_ids = find_blocked_reactions(
     model;
     optimizer=HiGHS.Optimizer,
-    objective_bound=COBREXA.relative_tolerance_bound(0.999),
-    flux_tolerance=1e-9
+    objective_bound=growth_window,
+    flux_tolerance=1e-6
 )
 
-# Remove blocked reactions (returns tuple: model + removed IDs)
-model_unblocked, blocked_ids = remove_blocked_reactions(
+# Remove blocked reactions (returns the reduced model)
+model_unblocked = remove_blocked_reactions(
     model;
     optimizer=HiGHS.Optimizer,
-    objective_bound=COBREXA.relative_tolerance_bound(0.999)
+    objective_bound=growth_window,
+    flux_tolerance=1e-6,
+    on_undecided=:error      # stop if an FVA LP stays unsolved (default :warn)
 )
 ```
+
+**Choosing `flux_tolerance`.** A reaction counts as blocked when its largest possible flux is
+below this value. It must sit in the gap between solver noise and the smallest genuine flux
+of *your* model. On the yeast GEMs blocked reactions are below 1e-10 and active ones above
+1e-4, so 1e-6 is safe. Models whose biomass is built from nested pools can carry genuine
+fluxes below 1e-6 (potassium in BiGG iJB785: ~4e-7); there use ~1e-9. Values at or below the
+solver's accuracy (~1e-8 relative) make the result run-dependent, and COCOA warns about that.
+Two checks are cheap and catch a wrong choice: the growth optimum must be unchanged after
+removal, and `find_blocked_reactions` on the reduced model must return nothing.
+
+**Why `on_undecided` matters.** An FVA LP that stays unsolved used to leave its reaction in the
+model as "not blocked". A single leftover blocked reaction can sit in every coupling set and
+merge the whole network into one artificial giant kinetic module with spurious ACR. Unsolved
+LPs are now re-solved from scratch; whatever still fails is reported (`:warn`) or stops the
+run (`:error`), and `kinetic_analysis` warns when one complex belongs to every coupling set.
 
 ### `split_into_elementary`
 
@@ -344,6 +370,21 @@ A complete, runnable script (with preprocessing) is in
 [`examples/python/quickstart_simple.py`](examples/python/quickstart_simple.py).
 See [`examples/python/README.md`](examples/python/README.md) for both the simple
 and the HPC-robust offline setups.
+
+**Genome-scale models from Python: run in parallel.** The snippet above is serial, which is
+fine for `e_coli_core` but takes weeks on a genome-scale model. The embedded Julia can start
+worker processes like any Julia session:
+
+```python
+jl.seval("using Distributed")
+jl.seval('addprocs(31; exeflags="--project=$(dirname(Base.active_project()))")')
+jl.seval("@everywhere using COCOA, HiGHS")
+# ... then pass workers=workers() to remove_blocked_reactions and activity_concordance_analysis
+```
+
+[`examples/python/run_genome_scale.py`](examples/python/run_genome_scale.py) does the whole
+pipeline this way, with a time limit per LP, progress logging and results written to files.
+Run it with `python -u`, or the output only appears at the end.
 
 > **Clean shutdown.** Let the Python process return normally rather than calling `os._exit()` while
 > Julia objects are still alive — forcing an abrupt teardown can trigger a *bus error* as the Julia

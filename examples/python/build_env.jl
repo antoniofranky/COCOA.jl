@@ -27,8 +27,31 @@ if !isempty(dev)
 else
     Pkg.add("COCOA")
 end
-for p in ("COBREXA", "HiGHS", "SBMLFBCModels", "AbstractFBCModels", "PythonCall")
+for p in ("COBREXA", "HiGHS", "SBMLFBCModels", "AbstractFBCModels")
     haskey(Pkg.project().dependencies, p) || Pkg.add(p)
+end
+
+# PythonCall.jl must have EXACTLY the version of the Python package `juliacall`, or juliacall
+# stops at start-up with "PythonCall.jl did not start properly". Take the version from the
+# Python that will run the scripts ($COCOA_PYTHON, default `python3`), or from
+# $PYTHONCALL_VERSION if that Python is not available here.
+pyver = get(ENV, "PYTHONCALL_VERSION", "")
+if isempty(pyver)
+    py = get(ENV, "COCOA_PYTHON", "python3")
+    pyver = try
+        strip(read(`$py -c "import importlib.metadata as m; print(m.version('juliacall'))"`, String))
+    catch
+        ""
+    end
+end
+if isempty(pyver)
+    @warn "Could not determine the juliacall version; installing the latest PythonCall. " *
+          "If juliacall reports 'PythonCall.jl did not start properly', rerun with " *
+          "PYTHONCALL_VERSION=<output of `pip show juliacall`>."
+    Pkg.add("PythonCall")
+else
+    println("pinning PythonCall to juliacall's version ", pyver)
+    Pkg.add(name = "PythonCall", version = pyver)
 end
 Pkg.instantiate()
 Pkg.precompile()

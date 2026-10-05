@@ -1686,7 +1686,7 @@ function process_concordance_batch(
 
                 @debug "About to optimize"
                 # `optimize_verified!` re-solves an OPTIMAL-without-feasible-point LP
-                # instead of handing back NaN; see its docstring (audit A41).
+                # instead of handing back NaN; see its docstring.
                 n_recovery = optimize_verified!(om)
                 @debug "Optimization completed"
 

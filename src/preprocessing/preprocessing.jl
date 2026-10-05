@@ -327,7 +327,7 @@ end
 `on_undecided = :warn` (default) keeps the reactions and logs ONE warning that lists them;
 `:error` throws. Pipelines should use `:error`. Keeping an undecided reaction is not
 neutral: a blocked reaction left in the network is exactly what glued the whole network into
-one "giant" kinetic module on the yeast panel (audit C11), and a per-reaction warning in a
+one "giant" kinetic module on the yeast panel, and a per-reaction warning in a
 log is how that went unnoticed.
 """
 function report_undecided(undecided::Vector{String}, on_undecided::Symbol)
@@ -484,12 +484,12 @@ function remove_blocked_reactions(
     # ONE pass. A blocked reaction carries zero flux in every steady state, so deleting it
     # leaves the flux ranges of all other reactions unchanged: there is nothing a second
     # pass could find. (Strictly "blocked" means below `flux_tolerance`, not exactly zero,
-    # but the band between noise and genuine flux is empty on the yeast panel — audit A19.)
+    # but the band between noise and genuine flux is empty on the yeast panel.)
     #
     # A loop "until nothing is blocked" was tried and removed. It never finds anything when
     # every LP is solved, and when one is not it quietly repairs the result by luck — which
-    # is how an unsolved FVA LP stayed hidden as the cause of the giant kinetic module
-    # (audit C11). Unsolved LPs are now re-solved cold and reported (`on_undecided`);
+    # is how an unsolved FVA LP stayed hidden as the cause of the giant kinetic module.
+    # Unsolved LPs are now re-solved cold and reported (`on_undecided`);
     # pipelines that want the invariant asserted re-run `find_blocked_reactions` on the
     # result and fail if it is not empty.
     blocked = find_blocked_reactions(

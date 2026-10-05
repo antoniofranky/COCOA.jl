@@ -32,7 +32,7 @@ Set a HiGHS string option directly on the backend.
 Deliberately NOT `J.set_attribute`: JuMP marks the model dirty on any attribute change,
 after which `termination_status` reads OPTIMIZE_NOT_CALLED and the solution is gone.
 Restoring the options after a recovery solve that way discarded every recovered value
-(audit A42, first replay: 934 of 934).
+(found when a replay recovered 934 of 934 affected LPs).
 """
 function _set_highs_option!(om, name::String, value::String)
     rc = HiGHS.Highs_setStringOptionValue(J.unsafe_backend(om), name, value)
@@ -48,7 +48,7 @@ end
 HiGHS solves the scaled LP; if the unscaled solution then violates
 `primal_feasibility_tolerance`, it still reports termination OPTIMAL but primal status
 INFEASIBLE_POINT. On the split (random_0) yeast models this hit ~5 % of the pair LPs
-(audit A41: violations 1e-8 … 6e-7, i.e. just above the 1e-8 tolerance), and such a solve
+(measured violations 1e-8 … 6e-7, i.e. just above the 1e-8 tolerance), and such a solve
 yields no usable value, so the pair ended undecided.
 
 Recovery re-solves from a cleared solver state, i.e. without the warm basis that produced
@@ -103,10 +103,10 @@ backend is not HiGHS or the LP ended in its time limit, which a retry would only
 Why: inside a variability sweep every worker reuses ONE model for thousands of LPs, each
 warm-started from the previous basis. In the yeast preprocessing that sequence left some
 LPs unsolved, and `find_blocked_reactions` then kept those reactions as "not blocked".
-Solved on a fresh model the same LPs are unproblematic (audit A55: all 36 OPTIMAL with a
+Solved on a fresh model the same LPs are unproblematic (measured: all 36 OPTIMAL with a
 feasible point, in both presolve settings). Eight of the nine reactions skipped that way in
 *Candida albicans* are in fact blocked, and three of them are what glues the whole network
-into one "giant" kinetic module (audit C11).
+into one "giant" kinetic module.
 """
 function resolve_cold!(om)
     J.unsafe_backend(om) isa HiGHS.Optimizer || return 0

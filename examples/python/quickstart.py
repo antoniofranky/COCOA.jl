@@ -52,7 +52,9 @@ jl.seval(
 )
 jl.seval("model_canon = convert(A.CanonicalModel.Model, model)")
 
-# --- Preprocess and run concordance analysis (serial; add workers for speed) ---
+# --- Preprocess and run concordance analysis ---
+# Serial, which is fine for this small model. For genome-scale models use
+# run_genome_scale.py, which runs in parallel (see README.md).
 step("preprocess")
 jl.seval("""
 model_processed = model_canon |>

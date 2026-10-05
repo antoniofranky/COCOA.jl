@@ -34,6 +34,9 @@ read-only so it only does `using` — no `Pkg` operations at runtime.
 # 1. Build the project with a NATIVE julia (one time).
 #    COCOA_DEV_PATH develops your local checkout; omit it to use the
 #    registered COCOA package.
+#    PythonCall.jl is pinned to the version of your pip package juliacall
+#    (they must match exactly); set COCOA_PYTHON if `python3` is not the
+#    Python you will run the scripts with.
 COCOA_PYENV=$PWD/cocoa_pyenv COCOA_DEV_PATH=$PWD \
     julia examples/python/build_env.jl
 
@@ -65,6 +68,40 @@ PYCHECK RESULT: SUCCESS
 
 These match the native-Julia COCOA results exactly, confirming the Python
 bindings are faithful.
+
+## Genome-scale models (parallel)
+
+The two quick-starts run **serially**, which is fine for `e_coli_core` (about a minute) but
+not for a genome-scale model: after splitting into elementary steps a yeast GEM has
+10,000–35,000 complexes and well over 100,000 candidate pairs, which takes weeks on one core.
+Use [`run_genome_scale.py`](run_genome_scale.py) instead. It starts Julia worker processes
+from Python (`addprocs` in the embedded Julia; the LPs run in the workers), sets a time limit
+per LP, logs progress and writes all results to files:
+
+```bash
+# after the one-time Path B build above, with its environment variables set:
+python -u examples/python/run_genome_scale.py model.xml outdir --workers 31 > run.log 2>&1
+```
+
+- **`python -u`**, or Python holds back all output until the end, and a running job looks
+  exactly like a stuck one.
+- **Workers**: one per core, minus one for the main process. On a shared interactive machine
+  run inside `tmux`/`screen` so the job survives logging out; under SLURM request
+  `--cpus-per-task=<workers + 1>`.
+- **Resources** (measured, ordered binding, 64 workers): yeast GEMs 4 h – 1.5 days and
+  100–250 GB memory (roughly 2–4 GB per worker). Random binding roughly doubles the network
+  and takes about 3.5× as long.
+- **Outputs** in `outdir`: `complexes.csv` (concordance and kinetic module per complex),
+  `acr.csv`, `acrr.csv`, `stats.json` (all counts and the settings used) and
+  `model_preprocessed.xml`.
+- **Options**: `--binding ordered|random`, `--flux-tol` (blocked-reaction threshold; 1e-6 suits
+  the yeast GEMs; models whose biomass is built from nested pools can need 1e-9, and the script
+  stops if blocked-reaction removal changes the growth rate), `--sample-size` (default 5000),
+  `--cv-threshold`, `--concordance-tolerance`, `--lp-time-limit`, `--exhaustive`
+  (`kinetic_efficient=false`). `--help` lists them all.
+
+On `e_coli_core` (`--workers 7`) the script reproduces the serial result: 109 concordance
+modules, 0 ACR, 1 ACRR.
 
 ## Teardown note
 
