@@ -235,7 +235,7 @@ end
     # registered model type for eligible extensions, and `DCEToyModel` from
     # test_dce_acr.jl does not implement `filename_extensions`. Use an in-memory model.
     # The substantive determinism evidence is the genome-scale preprocessing probe
-    # (audit A17), not this contract test.
+    # on a yeast GEM, not this contract test.
     model = COCOA.create_envz_ompr_model()
 
     b_static = COCOA.find_blocked_reactions(model; optimizer=HiGHS.Optimizer, scheduling=:static)
@@ -264,8 +264,7 @@ end
     #
     # A race cannot be proven absent by testing; this pins the observable contract
     # instead: the result must not depend on how the work was split. The genome-scale
-    # evidence is audit A13, where 16 and 64 threads gave identical kinetic results
-    # (13004 modules, giant 3720, ACR 314, ACRR 2300074).
+    # evidence is a yeast GEM run, where 16 and 64 threads gave identical kinetic partitions.
     model = COCOA.create_envz_ompr_model()
     conc = COCOA.activity_concordance_analysis(
         model; optimizer=HiGHS.Optimizer, sample_size=50,
@@ -497,10 +496,10 @@ end
     end
 end
 
-# `optimize_verified!` (audit A41). The failure it repairs — HiGHS OPTIMAL with an
+# `optimize_verified!`. The failure it repairs — HiGHS OPTIMAL with an
 # INFEASIBLE_POINT after unscaling — only shows up on genome-scale LPs after a sequence
 # of warm starts and could not be provoked on small instances, so its effect is verified
-# end to end on a real model (audit A42). What is pinned here is that it is inert
+# end to end on a real model (a yeast GEM). What is pinned here is that it is inert
 # whenever nothing needs repairing: same value, same status, options untouched.
 const JM = COCOA.J   # macros need a global binding
 @testset "optimize_verified! is inert on well-posed and on infeasible LPs" begin
@@ -542,7 +541,7 @@ end
     @test acc.counts.recovered_lps == 6
 end
 
-# Blocked-reaction detection must never turn a FAILED LP into a verdict (audit C11). The
+# Blocked-reaction detection must never turn a FAILED LP into a verdict. The
 # warm-started FVA sweep left some LPs unsolved on the yeast panel; the affected reactions
 # were silently kept as "not blocked", and three of them glued a whole network into one
 # giant kinetic module. `classify_blocked` is where that decision is made, so it is pinned
