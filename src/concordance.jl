@@ -549,7 +549,12 @@ results = activity_concordance_analysis(
         is poorly resolved by the flux sample is therefore lost. Raising `sample_size`
         or `cv_threshold` widens the candidate set at the cost of runtime; the reported
         concordance is a subset of the true concordance, never a superset.
-- `cv_epsilon::Float64=1e-16`: Small value added to avoid division by zero in CV calculation
+- `cv_epsilon::Float64=1e-16`: a pair whose mean sampled ratio is below this in magnitude
+  gets CV = Inf (the ratio is undefined)
+- `sample_zero_tol::Union{Nothing,Float64}=nothing`: a sampled activity at or below this
+  counts as zero in the CV pre-filter; a sample where both complexes of a pair are zero is
+  skipped. `nothing` uses `balanced_threshold`, COCOA's notion of a zero activity. The
+  value used is recorded in `stats`.
 - `sample_size::Int=1000`: Number of samples for coefficient of variation estimation
 - `min_valid_samples::Int=10`: Minimum valid samples required for CV calculation
 - `seed::UInt=UInt(1234)`: Random seed for reproducible sampling. The analysis is deterministic by
@@ -604,6 +609,7 @@ function activity_concordance_analysis(
     concordance_tolerance::Float64=0.01,
     cv_threshold::Float64=0.01,
     cv_epsilon::Float64=1e-16,
+    sample_zero_tol::Union{Nothing,Float64}=nothing,
     sample_size::Int=1000,
     batch_size::Int=50_000,
     min_valid_samples::Int=10,
@@ -863,11 +869,11 @@ function activity_concordance_analysis(
     end
     @info "Generating candidate pairs via coefficient of variance..."
 
-    # Round sampled activities to one order below cv_threshold for robust CV calculation
-    # This removes numerical noise while providing safe margin for CV comparisons
-    decimals = max(0, -floor(Int, log10(cv_threshold)) + 1)
-    aggregate = rows -> round.(vec(hcat(rows...)), digits=decimals)
-    @info "Sampling schedule" cv_threshold decimals
+    # Sampled activities are kept at full precision. They used to be rounded to a fixed
+    # number of decimals, which destroyed exact ratios of small activities; see `_pair_cv`.
+    zero_tol = something(sample_zero_tol, balanced_threshold)
+    aggregate = rows -> vec(hcat(rows...))
+    @info "Sampling schedule" cv_threshold zero_tol
 
     # Sampling strategy for concordance analysis
     # Formula: n_samples_collected = n_chains × n_starting_points × n_iterations_collected
@@ -1007,6 +1013,7 @@ function activity_concordance_analysis(
             concordance_tracker;
             cv_threshold=cv_threshold,
             cv_epsilon=cv_epsilon,
+            zero_tol=zero_tol,
             min_valid_samples=min_valid_samples,
             use_transitivity=use_transitivity,
             inherit_non_concordance=inherit_non_concordance
@@ -1126,6 +1133,7 @@ function activity_concordance_analysis(
         "concordance_tolerance" => concordance_tolerance,
         "balanced_threshold" => balanced_threshold,
         "cv_threshold" => cv_threshold,
+        "sample_zero_tol" => zero_tol,
         "cv_epsilon" => cv_epsilon,
 
         # Sampling parameters
