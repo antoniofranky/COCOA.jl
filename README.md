@@ -344,52 +344,29 @@ results = activity_concordance_analysis(
 
 ## Calling COCOA.jl from Python
 
-COCOA.jl can be driven from Python through [JuliaCall](https://github.com/JuliaPy/PythonCall.jl).
+The Python package **cocoa-jl** (in [`python/`](python/)) runs the whole pipeline from
+Python or the command line: it installs the Julia side once, then preprocesses a model,
+finds concordance and kinetic modules in parallel, writes CSV files, and runs parameter
+sweeps.
 
 ```bash
-pip install juliacall
+pip install "git+https://github.com/antoniofranky/COCOA.jl#subdirectory=python"
+cocoa-jl setup                                   # once: builds the Julia environment
+cocoa-jl run model.xml out_model --workers 31    # → kinetic_modules.csv, complexes.csv, ...
 ```
 
 ```python
-from juliacall import Main as jl
-
-jl.seval("import Pkg")
-for pkg in ("COCOA", "COBREXA", "HiGHS", "SBMLFBCModels", "AbstractFBCModels"):
-    jl.seval(f'haskey(Pkg.project().dependencies, "{pkg}") || Pkg.add("{pkg}")')
-
-jl.seval("import COBREXA; import SBMLFBCModels; import AbstractFBCModels as A")
-jl.seval("using HiGHS, COCOA")
-
-jl.seval('model = COBREXA.load_model(joinpath(pkgdir(COCOA), "test", "e_coli_core.xml"))')
-jl.seval("model_canon = convert(A.CanonicalModel.Model, model)")
-result = jl.seval("activity_concordance_analysis(model_canon; optimizer=HiGHS.Optimizer, kinetic_analysis=true)")
-
-print("ACR metabolites:", list(result.acr.metabolite_id))
+import cocoajl as cj
+res = cj.run("model.xml", "out_model", workers=31)
+res.modules.to_pandas()
 ```
 
-A complete, runnable script (with preprocessing) is in
-[`examples/python/quickstart_simple.py`](examples/python/quickstart_simple.py).
-See [`examples/python/README.md`](examples/python/README.md) for both the simple
-and the HPC-robust offline setups.
+See [`python/README.md`](python/README.md) for installation on workstations and clusters,
+all parameters, output files, sweeps and the Python API.
 
-**Genome-scale models from Python: run in parallel.** The snippet above is serial, which is
-fine for `e_coli_core` but takes weeks on a genome-scale model. The embedded Julia can start
-worker processes like any Julia session:
-
-```python
-jl.seval("using Distributed")
-jl.seval('addprocs(31; exeflags="--project=$(dirname(Base.active_project()))")')
-jl.seval("@everywhere using COCOA, HiGHS")
-# ... then pass workers=workers() to remove_blocked_reactions and activity_concordance_analysis
-```
-
-[`examples/python/run_genome_scale.py`](examples/python/run_genome_scale.py) does the whole
-pipeline this way, with a time limit per LP, progress logging and results written to files.
-Run it with `python -u`, or the output only appears at the end.
-
-> **Clean shutdown.** Let the Python process return normally rather than calling `os._exit()` while
-> Julia objects are still alive — forcing an abrupt teardown can trigger a *bus error* as the Julia
-> GC finalizers run against an already–torn-down runtime.
+To call COCOA.jl functions directly instead, use
+[JuliaCall](https://github.com/JuliaPy/PythonCall.jl) (`from juliacall import Main as jl`);
+[`examples/python/`](examples/python/) has minimal scripts.
 
 ## Requirements
 

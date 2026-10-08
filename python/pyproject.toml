@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cocoa-jl"
+version = "0.1.0"
+description = "Concordance and kinetic modules of metabolic networks (Python interface to COCOA.jl)"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [
+    {name = "Anton Schaffranke"},
+    {name = "Anika Küken"},
+    {name = "Zoran Nikoloski"},
+]
+keywords = ["metabolic networks", "constraint-based modeling", "concordance", "kinetic modules",
+            "absolute concentration robustness", "systems biology"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Julia",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Intended Audience :: Science/Research",
+]
+dependencies = []
+
+[project.optional-dependencies]
+pandas = ["pandas"]
+test = ["pytest"]
+
+[project.scripts]
+cocoa-jl = "cocoajl.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/antoniofranky/COCOA.jl"
+Documentation = "https://github.com/antoniofranky/COCOA.jl/tree/main/python"
+Issues = "https://github.com/antoniofranky/COCOA.jl/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+cocoajl = ["julia/*.jl"]
+
+[tool.pytest.ini_options]
+markers = ["julia: needs a working Julia installation (cocoa-jl setup); slow"]

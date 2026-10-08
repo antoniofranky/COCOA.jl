@@ -1,0 +1,49 @@
+name: Python
+on:
+  push:
+    branches:
+      - main
+    paths: ['python/**', 'src/**', '.github/workflows/Python.yml']
+  pull_request:
+    paths: ['python/**', 'src/**', '.github/workflows/Python.yml']
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
+jobs:
+  unit:
+    name: unit tests - Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install "./python[test]"
+      - run: pytest -m "not julia" python/tests
+  julia:
+    name: end-to-end on e_coli_core
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.12'
+      - uses: julia-actions/cache@v2
+      - run: pip install "./python[test]"
+      # The Julia side from this checkout, so the tests cover the code of the commit.
+      - run: cocoa-jl setup --cocoa-path . --project "$RUNNER_TEMP/cocoajl_env"
+      - run: cocoa-jl info
+      - run: pytest -m julia -v python/tests

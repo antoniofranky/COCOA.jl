@@ -1,5 +1,13 @@
 # Calling COCOA.jl from Python
 
+> **For running the pipeline from Python, use the package [`cocoa-jl`](../../python/)**
+> (`pip install "git+https://github.com/antoniofranky/COCOA.jl#subdirectory=python"`): it
+> sets up Julia, runs preprocessing, concordance and kinetic modules in parallel, writes
+> CSV files and runs parameter sweeps. The scripts below are minimal examples of calling
+> COCOA.jl through juliacall directly; `run_genome_scale.py` is kept for existing users and
+> corresponds to `cocoa-jl run`.
+
+
 COCOA.jl runs from Python through
 [`juliacall`](https://juliapy.github.io/PythonCall.jl/). There are two supported
 paths.
