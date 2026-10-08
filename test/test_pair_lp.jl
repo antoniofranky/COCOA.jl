@@ -1,0 +1,113 @@
+# Guardrails for the pair LP and its verdict (v1.2):
+#   - the decision rule |hi - lo| <= atol + rtol * max(|hi|, |lo|); the default is the
+#     established absolute 0.01, the relative part is optional;
+#   - the Charnes–Cooper variable t has no upper bound (the old cap of 999 cut off steady
+#     states in which the reference activity is small relative to the fluxes);
+#   - a pair LP that is PROVEN unbounded refutes concordance instead of failing.
+
+using Test
+using COCOA
+using HiGHS
+using COBREXA
+import AbstractFBCModels.CanonicalModel as CM
+const J = COCOA.J
+const C = COBREXA.C
+
+# ∅ → A, A → B + 10^6 E, B → ∅, E → ∅, and a second source ∅ → 2 E. The drain of E carries
+# 10^6 · v_split + 2 · v_source, so it is at least 10^6 times the split, but "E" is NOT
+# concordant with anything (the source is free). The complexes "B + 1e6 E" (activity v) and
+# "B" (-v) are concordant. Fixing the activity of "B + 1e6 E" to 1 forces the drain to 10^6,
+# i.e. t >= 1000 with flux bounds of 1000: beyond the old cap. (The analysis as a whole
+# finds this pair without an LP, because B occurs in only these two complexes, so the pair
+# LP is tested directly.)
+function small_reference_model()
+    m = CM.Model()
+    m.metabolites = Dict(x => CM.Metabolite(name=x) for x in ("A", "B", "E"))
+    m.reactions["in"] = CM.Reaction(stoichiometry=Dict("A" => 1.0), lower_bound=0.0, upper_bound=1000.0)
+    m.reactions["split"] = CM.Reaction(stoichiometry=Dict("A" => -1.0, "B" => 1.0, "E" => 1e6),
+                                       lower_bound=0.0, upper_bound=1000.0)
+    m.reactions["outB"] = CM.Reaction(stoichiometry=Dict("B" => -1.0), lower_bound=0.0, upper_bound=1000.0)
+    m.reactions["outE"] = CM.Reaction(stoichiometry=Dict("E" => -1.0), lower_bound=0.0, upper_bound=1000.0)
+    m.reactions["srcE"] = CM.Reaction(stoichiometry=Dict("E" => 2.0), lower_bound=0.0, upper_bound=1000.0)
+    return m
+end
+
+@testset "Pair LP: relative tolerance, no cap, proven unbounded" begin
+    tol = COCOA.ConcordanceTolerance(0.01, 1e-7)
+
+    @testset "default rule is the absolute 0.01" begin
+        abs01 = COCOA.ConcordanceTolerance(0.0, 0.01)
+        @test COCOA.within_tolerance(1.0, 1.009, abs01)
+        @test !COCOA.within_tolerance(1.0, 1.011, abs01)
+        @test !COCOA.within_tolerance(500.0, 501.0, abs01)
+    end
+
+    @testset "optional relative decision rule" begin
+        # the inositol case of one yeast model: 0.23 % spread at λ ≈ 0.008
+        @test COCOA.within_tolerance(0.0079876, 0.0080062, tol)
+        @test !COCOA.within_tolerance(0.0079876, 0.0080062, COCOA.ConcordanceTolerance(1e-3, 1e-9))
+        # large ratios: 0.2 % spread; the old absolute 0.01 rejected this
+        @test COCOA.within_tolerance(500.0, 501.0, tol)
+        @test !COCOA.within_tolerance(500.0, 510.0, tol)
+        # the verdict does not depend on which complex is the reference (λ vs 1/λ)
+        for (lo, hi) in ((0.8, 0.805), (0.8, 0.82), (2.0, 2.01), (1e-3, 1.004e-3), (1e-3, 1.2e-3))
+            @test COCOA.within_tolerance(lo, hi, tol) == COCOA.within_tolerance(1 / hi, 1 / lo, tol)
+        end
+        # near zero the absolute part decides
+        @test COCOA.within_tolerance(0.0, 5e-8, tol)
+        @test !COCOA.within_tolerance(0.0, 1e-5, tol)
+    end
+
+    @testset "a proven unbounded LP refutes concordance" begin
+        for (mult, v) in ((1, Inf), (-1, -Inf))
+            s = COCOA.PairConcordanceState()
+            COCOA.update_pair_concordance!(s, :positive, mult, v, false, tol)
+            @test s.decisive_non_concordant
+            @test !s.is_concordant
+            # a later finite result cannot resurrect it
+            COCOA.update_pair_concordance!(s, :positive, -mult, 1.0, false, tol)
+            @test !s.is_concordant
+        end
+    end
+
+    @testset "no cap on t by default" begin
+        cons = COCOA.concordance_constraints(small_reference_model())
+        @test cons.charnes_cooper.positive.t.bound.upper == Inf
+        @test cons.charnes_cooper.negative.t.bound.lower == -Inf
+    end
+
+    # Pair LP as COCOA builds it: Charnes–Cooper template, activity of c2 fixed to 1,
+    # activity of c1 maximised.
+    function pair_lp(cap, c1, c2)
+        cons = COCOA.concordance_constraints(small_reference_model(); cc_scale_bound=cap)
+        lp = cons.charnes_cooper.positive * :fix^C.Constraint(cons.activities[c2].value, 1.0)
+        om = COBREXA.optimization_model(lp; objective=cons.activities[c1].value,
+                                        sense=COBREXA.Maximal, optimizer=HiGHS.Optimizer)
+        J.set_silent(om)
+        J.optimize!(om)
+        return om
+    end
+    split, b, src = Symbol("B+1000000_E"), :B, Symbol("2_E")
+
+    @testset "the old cap cuts off the only steady states" begin
+        om = pair_lp(999.0, b, split)
+        @test J.termination_status(om) == J.INFEASIBLE
+        om = pair_lp(Inf, b, split)
+        @test J.is_solved_and_feasible(om)
+        @test J.objective_value(om) ≈ -1.0
+    end
+
+    @testset "an unbounded ratio is proven, not failed" begin
+        om = pair_lp(Inf, src, split)          # the free source has no bound relative to v
+        @test COCOA.proven_unbounded(om)
+        @test !COCOA.proven_unbounded(pair_lp(Inf, b, split))
+    end
+
+    @testset "the analysis records undecided pairs and the tolerances used" begin
+        r = activity_concordance_analysis(small_reference_model(); optimizer=HiGHS.Optimizer,
+                                          sample_size=200)
+        @test r.stats["n_unknown_pairs"] == 0 && isempty(r.stats["undecided_pairs"])
+        @test r.stats["cc_scale_bound"] == Inf
+        @test r.stats["concordance_tolerance"] == 0.01 && r.stats["concordance_rtol"] == 0.0
+    end
+end

@@ -32,11 +32,29 @@ end
 MutableCounts() = MutableCounts(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 
 """
+Decision rule for one pair: the activity ratio's minimum `lo` and maximum `hi` over the
+steady states agree if `|hi - lo| <= rtol * max(|hi|, |lo|) + atol`.
+
+`activity_concordance_analysis` uses `atol = concordance_tolerance` (0.01, as in the
+reference implementation) and `rtol = concordance_rtol` (0 by default). With a relative
+part the verdict does not depend on the scale of the ratio or on which complex of the pair
+is the reference (λ and 1/λ have the same relative spread to first order); a purely
+absolute rule is lax for small ratios and strict for large ones.
+"""
+struct ConcordanceTolerance
+    rtol::Float64
+    atol::Float64
+end
+
+@inline within_tolerance(lo::Float64, hi::Float64, tol::ConcordanceTolerance) =
+    abs(hi - lo) <= tol.rtol * max(abs(hi), abs(lo)) + tol.atol
+
+"""
 Configuration for batch processing.
 """
 struct BatchProcessingConfig
     batch_size::Int
-    concordance_tolerance::Float64
+    concordance_tolerance::ConcordanceTolerance
     use_transitivity::Bool
     optimizer
     settings::Vector
@@ -540,7 +558,21 @@ results = activity_concordance_analysis(
 ```
 
 ## Analysis Parameters
-- `concordance_tolerance::Float64=0.01`: Tolerance for concordance detection
+- `concordance_tolerance::Float64=0.01`: absolute tolerance of the concordance decision, as
+  in the reference implementation. A pair is concordant if the minimum `lo` and maximum `hi`
+  of its activity ratio satisfy
+  `|hi - lo| <= concordance_tolerance + concordance_rtol * max(|hi|, |lo|)`.
+- `concordance_rtol::Float64=0.0`: optional relative part of that rule. With
+  `concordance_rtol > 0` (and a small `concordance_tolerance`) the decision no longer depends
+  on the scale of the ratio or on which complex is the reference; an absolute tolerance
+  merges small ratios more readily (a spread of 0.23 % at λ = 0.008 passes 0.01) and large
+  ones less. Off by default to keep the established definition.
+- `cc_scale_bound::Float64=Inf`: upper bound on the Charnes–Cooper scaling variable t of
+  the pair LPs. The textbook transformation has none (t ≥ 0 only), and none is needed: the
+  activity ratio does not depend on the scale of the steady state. A finite bound cuts off
+  steady states whose reference activity is small relative to the fluxes, so their pair
+  LPs become infeasible. Until v1.2 the bound was 999 (taken from the reference
+  implementation). A pair LP that is proven unbounded refutes concordance.
 - `balanced_threshold::Float64=1e-7`: Threshold for balanced complex detection
 - `cv_threshold::Float64=0.01`: Coefficient of variation threshold for candidate pre-filtering.
     !!! warning "This pre-filter is a heuristic with false negatives"
@@ -607,6 +639,7 @@ function activity_concordance_analysis(
     workers=D.workers(),
     balanced_threshold::Float64=1e-7,
     concordance_tolerance::Float64=0.01,
+    concordance_rtol::Float64=0.0,
     cv_threshold::Float64=0.01,
     cv_epsilon::Float64=1e-16,
     sample_zero_tol::Union{Nothing,Float64}=nothing,
@@ -623,7 +656,7 @@ function activity_concordance_analysis(
     kinetic_efficient::Bool=true,
     detailed_results::Bool=false,
     scheduling::Symbol=:static,
-    cc_scale_bound::Float64=999.0,
+    cc_scale_bound::Float64=Inf,
     inherit_non_concordance::Bool=true,
     count_candidates_only::Bool=false,
 )
@@ -1028,9 +1061,10 @@ function activity_concordance_analysis(
     @info "Processing concordance tests with direct streaming (deterministic batch processing)"
 
     # Create configuration object for type-stable processing
+    pair_tolerance = ConcordanceTolerance(concordance_rtol, concordance_tolerance)
     config = BatchProcessingConfig(
         batch_size,
-        concordance_tolerance,
+        pair_tolerance,
         use_transitivity,
         optimizer,
         settings,
@@ -1131,6 +1165,10 @@ function activity_concordance_analysis(
 
         # Algorithm parameters
         "concordance_tolerance" => concordance_tolerance,
+        "concordance_rtol" => concordance_rtol,
+        "undecided_pairs" => [[String(concordance_tracker.idx_to_id[i]), String(concordance_tracker.idx_to_id[j])]
+                              for ((i, j, dir), _) in batch_results.optimization_results
+                              if dir == :undecided],
         "balanced_threshold" => balanced_threshold,
         "cv_threshold" => cv_threshold,
         "sample_zero_tol" => zero_tol,
@@ -1212,6 +1250,7 @@ function activity_concordance_analysis(
     # Process lambda results into dict
     lambda_dict = Dict{Tuple{Int,Int},Float64}()
     for ((c1_idx, c2_idx, direction), lambda_val) in batch_results.optimization_results
+        direction == :undecided && continue
         if c1_idx <= length(complex_ids) && c2_idx <= length(complex_ids)
             canonical_pair = c1_idx < c2_idx ? (c1_idx, c2_idx) : (c2_idx, c1_idx)
             lambda_dict[canonical_pair] = lambda_val
@@ -1280,12 +1319,21 @@ Returns true if pair is still potentially concordant, false if non-concordant.
     dir_multiplier::Int,
     value::Float64,
     timeout::Bool,
-    concordance_tolerance::Float64
+    tol::ConcordanceTolerance
 )::Bool
     # Early exit if timeout
     if timeout
         state.has_timeout = true
         state.is_concordant = false
+        return false
+    end
+
+    # ±Inf is a PROVEN unbounded LP (dual infeasible with a ray): the ratio takes arbitrarily
+    # large values in this direction, so it is not constant. That is a decisive refutation,
+    # not a solver failure.
+    if isinf(value)
+        state.is_concordant = false
+        state.decisive_non_concordant = true
         return false
     end
 
@@ -1306,35 +1354,20 @@ Returns true if pair is still potentially concordant, false if non-concordant.
         state.has_negative = true
     end
 
-    # Check concordance when we have both min/max for a direction
-    if direction == :positive && !isnan(state.positive_min) && !isnan(state.positive_max)
-        # Check if min/max are concordant within tolerance
-        if abs(state.positive_min - state.positive_max) > concordance_tolerance
+    # Check concordance when we have both min/max for a direction: the ratio must be
+    # constant within the direction, and the same in both directions.
+    lo, hi = direction == :positive ? (state.positive_min, state.positive_max) :
+                                      (state.negative_min, state.negative_max)
+    if !isnan(lo) && !isnan(hi)
+        if !within_tolerance(lo, hi, tol)
             state.is_concordant = false
             state.decisive_non_concordant = true
             return false
         end
-        # Check lambda consistency
-        current_lambda = (state.positive_min + state.positive_max) / 2
+        current_lambda = (lo + hi) / 2
         if isnan(state.reference_lambda)
             state.reference_lambda = current_lambda
-        elseif abs(current_lambda - state.reference_lambda) > concordance_tolerance
-            state.is_concordant = false
-            state.decisive_non_concordant = true
-            return false
-        end
-    elseif direction == :negative && !isnan(state.negative_min) && !isnan(state.negative_max)
-        # Check if min/max are concordant within tolerance
-        if abs(state.negative_min - state.negative_max) > concordance_tolerance
-            state.is_concordant = false
-            state.decisive_non_concordant = true
-            return false
-        end
-        # Check lambda consistency
-        current_lambda = (state.negative_min + state.negative_max) / 2
-        if isnan(state.reference_lambda)
-            state.reference_lambda = current_lambda
-        elseif abs(current_lambda - state.reference_lambda) > concordance_tolerance
+        elseif !within_tolerance(current_lambda, state.reference_lambda, tol)
             state.is_concordant = false
             state.decisive_non_concordant = true
             return false
@@ -1363,7 +1396,7 @@ function process_solver_results_streaming!(
     solver_results,
     batch_pairs::Vector{PairCandidate},
     concordance_tracker,
-    concordance_tolerance::Float64;
+    concordance_tolerance::ConcordanceTolerance;
     track_direct_pairs::Bool=false
 )
     # Pre-allocate lookup for O(1) pair finding
@@ -1635,7 +1668,7 @@ function process_concordance_batch(
     optimizer,
     settings=[],
     workers=workers,
-    concordance_tolerance::Float64,
+    concordance_tolerance::ConcordanceTolerance,
     scheduling::Symbol=:static,
     track_direct_pairs::Bool=false
 )
@@ -1696,6 +1729,15 @@ function process_concordance_batch(
                 # `optimize_verified!` re-solves an OPTIMAL-without-feasible-point LP
                 # instead of handing back NaN; see its docstring.
                 n_recovery = optimize_verified!(om)
+                # A pair LP that ended without a usable value (INFEASIBLE, OTHER_ERROR, ...)
+                # leaves its direction incomplete and the pair undecided. Re-solve it once
+                # from a cleared solver state, as `resolve_cold!` does for the warm-started
+                # variability sweep; on Tortispora this rescued every OTHER_ERROR pair.
+                # TIME_LIMIT is not retried, and neither is a proven unbounded LP.
+                if !J.is_solved_and_feasible(om; allow_local=true, allow_almost=true) &&
+                   !proven_unbounded(om)
+                    n_recovery += resolve_cold!(om)
+                end
                 @debug "Optimization completed"
 
                 # Check termination status immediately after optimization
@@ -1718,6 +1760,8 @@ function process_concordance_batch(
                 # before it was removed.
                 raw_value = if J.is_solved_and_feasible(om; allow_local=true, allow_almost=true)
                     J.objective_value(om)
+                elseif proven_unbounded(om)
+                    Inf          # the maximised quantity is unbounded above
                 else
                     NaN
                 end
@@ -1795,6 +1839,8 @@ function process_concordance_batch(
         status_category = categorize_termination_status(termination_status)
         if status_category == :success && isnan(value)
             status_category = :success_no_value
+        elseif status_category == :unbounded && isinf(value)
+            status_category = :success      # proven unbounded: a verdict, not a failure
         end
         timeout = (status_category == :timeout)
 
@@ -1871,8 +1917,10 @@ function process_concordance_batch(
             # into a scientific claim, and `add_non_concordant!` would additionally lift
             # that claim to the whole module pair via `non_concordant_modules`, so that
             # under `use_transitivity=true` no pair between those two modules would ever
-            # be tested again. The pair is therefore left undecided and only counted.
+            # be tested again. The pair is therefore left undecided, counted, and listed
+            # in `stats["undecided_pairs"]`.
             unknown_count += 1
+            push!(optimization_results_vec, (c1_idx, c2_idx, :undecided, NaN))
         end
     end
 
