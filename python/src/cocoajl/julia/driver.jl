@@ -61,12 +61,13 @@ function write_json(path, x)
 end
 
 function write_kinetic(outdir, kin, write_acr)
-    CocoaPy.write_csv(joinpath(outdir, "complexes.csv"), kin.complexes)
-    mods = CocoaPy.module_table(kin.complexes)
+    complexes = CocoaPy.readable_ids(kin.complexes)
+    CocoaPy.write_csv(joinpath(outdir, "complexes.csv"), complexes)
+    mods = CocoaPy.module_table(complexes)
     CocoaPy.write_csv(joinpath(outdir, "kinetic_modules.csv"), mods)
     if write_acr
-        CocoaPy.write_csv(joinpath(outdir, "acr.csv"), kin.acr)
-        CocoaPy.write_csv(joinpath(outdir, "acrr.csv"), kin.acrr)
+        CocoaPy.write_csv(joinpath(outdir, "acr.csv"), CocoaPy.readable_ids(kin.acr))
+        CocoaPy.write_csv(joinpath(outdir, "acrr.csv"), CocoaPy.readable_ids(kin.acrr))
     end
     return Dict{String,Any}("n_kinetic_modules" => length(mods.kinetic_module),
         "largest_kinetic_module" => isempty(mods.n_complexes) ? 0 : first(mods.n_complexes),

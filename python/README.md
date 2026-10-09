@@ -127,7 +127,10 @@ the `julia` command that reruns exactly that job, which is the quickest way to d
 | `job.json` | the job as executed (rerun by hand: see [Troubleshooting](#troubleshooting)) |
 
 Complex ids are the metabolites of the complex joined by `+`, with the stoichiometric
-coefficient as prefix when it is not 1 (e.g. `2.0_M_atp_c+M_glc__D_e`).
+coefficient as prefix when it is not 1 (e.g. `2_M_atp_c+M_glc__D_e`). Metabolite ids carry
+the `M_` prefix of SBML, as in `model_preprocessed.xml`; characters SBML ids cannot hold are
+escaped there (`M_ala__L__91__c__93__`) but shown as they are in the CSV files
+(`M_ala__L[c]`).
 
 Check `n_unknown_pairs` in `run.json`: the number of complex pairs whose LPs failed and
 which are therefore neither concordant nor non-concordant. It should be a small fraction

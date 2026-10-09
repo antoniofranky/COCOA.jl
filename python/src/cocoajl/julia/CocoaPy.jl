@@ -148,6 +148,22 @@ end
 _sid_escape(id::AbstractString) =
     replace(id, r"[^A-Za-z0-9_]" => c -> "__$(Int(only(c)))__")   # "[c]" -> "__91__c__93__"
 
+# Results show the ids as the model wrote them: the escapes of `_sid_escape` are undone
+# ("__91__c__93__" -> "[c]"). Only characters SBML forbids are decoded, so an id's own
+# "__95__" (an allowed '_') stays as it is.
+function _sid_unescape(id::AbstractString)
+    return replace(id, r"__(\d{1,7})__" => function (s)
+        n = parse(Int, s[3:end-2])
+        (n <= 0x10ffff && isvalid(Char, n) && !occursin(r"^[A-Za-z0-9_]$", string(Char(n)))) ?
+            string(Char(n)) : s
+    end)
+end
+
+"""The columns of a result table with string ids decoded by `_sid_unescape`."""
+readable_ids(nt::NamedTuple) =
+    map(c -> eltype(c) <: AbstractString ? _sid_unescape.(c) :
+             eltype(c) <: Symbol ? Symbol.(_sid_unescape.(String.(c))) : c, nt)
+
 function _sbml_safe_ids!(model::A.CanonicalModel.Model)
     ren = Dict{String,String}()
     for id in keys(model.metabolites)
