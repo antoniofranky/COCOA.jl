@@ -20,8 +20,11 @@ HELP = {
     "sample_size": "flux samples for the CV pre-filter (default 5000)",
     "cv_threshold": "pairs whose sampled activity ratio has a larger coefficient of variation "
                     "are not tested by LP (default 0.01)",
-    "concordance_tolerance": "maximum spread of the activity ratio for two complexes to count "
-                             "as concordant (default 0.01)",
+    "concordance_rtol": "maximum relative spread of the activity ratio for two complexes to "
+                        "count as concordant (default 1e-5; concordance is exact, this absorbs "
+                        "solver error)",
+    "concordance_tolerance": "absolute part of the concordance rule, for ratios at zero "
+                             "(default 1e-9; 0.01 with concordance_rtol 0 is the pre-1.2 rule)",
     "balanced_threshold": "activity range below which a complex is balanced (default 1e-7)",
     "seed": "sampling seed (default 42)",
     "use_transitivity": "skip pairs whose verdict follows from earlier ones (default on)",
@@ -158,7 +161,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("model")
     p.add_argument("outdir")
     p.add_argument("--grid", action="append", required=True, metavar="NAME=V1,V2,...",
-                   help="parameter and values, e.g. concordance_tolerance=0.01,0.001 "
+                   help="parameter and values, e.g. cv_threshold=0.01,0.03 "
                         "(repeat for more parameters; all combinations are run)")
     _add_common(p)
     p.add_argument("--mat-key")

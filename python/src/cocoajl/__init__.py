@@ -12,7 +12,7 @@ Typical use::
 
 Parameter sweeps::
 
-    cj.sweep("model.xml", "sweep/", {"concordance_tolerance": [0.01, 0.001]}, workers=31)
+    cj.sweep("model.xml", "sweep/", {"cv_threshold": [0.01, 0.03]}, workers=31)
 
 See the README for installation and the command line interface (``cocoa-jl --help``).
 """

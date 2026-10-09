@@ -85,6 +85,7 @@ function analyse(model, outdir, p, info)
         settings=settings_for(p; presolve=false),   # presolve per pair LP costs ~20 %
         sample_size=Int(p["sample_size"]), cv_threshold=Float64(p["cv_threshold"]),
         concordance_tolerance=Float64(p["concordance_tolerance"]),
+        concordance_rtol=Float64(p["concordance_rtol"]),
         balanced_threshold=Float64(p["balanced_threshold"]), seed=UInt(p["seed"]),
         use_transitivity=Bool(p["use_transitivity"]), extra...)
     info["seconds_concordance"] = round(time() - t; digits=1)

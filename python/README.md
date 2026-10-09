@@ -137,7 +137,7 @@ of `n_candidate_pairs`.
 
 All parameters have defaults that suit genome-scale models; you only set what you want to
 change. On the command line they are flags (`--concordance-tolerance 0.001`), in Python
-keyword arguments (`concordance_tolerance=0.001`). `cocoa-jl run --help` lists them.
+keyword arguments (`cv_threshold=0.03`). `cocoa-jl run --help` lists them.
 
 **Preprocessing**
 
@@ -153,7 +153,8 @@ keyword arguments (`concordance_tolerance=0.001`). `cocoa-jl run --help` lists t
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `concordance_tolerance` | 0.01 | maximum spread of the activity ratio for two complexes to count as concordant |
+| `concordance_rtol` | 1e-5 | maximum relative spread of the activity ratio for two complexes to count as concordant: `\|hi − lo\| ≤ rtol·max(\|hi\|,\|lo\|) + atol`. Concordance is exact; this only absorbs solver error |
+| `concordance_tolerance` | 1e-9 | the absolute part `atol` of that rule, for ratios at zero. `concordance_tolerance=0.01, concordance_rtol=0` is the rule before COCOA 1.2 |
 | `cv_threshold` | 0.01 | pairs whose sampled ratio has a larger coefficient of variation are not tested by LP. Larger = more pairs tested (slower, finds more) |
 | `sample_size` | 5000 | flux samples for that pre-filter. Fewer samples underestimate the variation and send many hopeless pairs to the LP stage |
 | `balanced_threshold` | 1e-7 | activity range below which a complex counts as balanced |
@@ -176,7 +177,7 @@ To compare kinetic modules across settings, give each parameter a list of values
 
 ```bash
 cocoa-jl sweep iJR904.xml sweep_iJR904 --workers 31 \
-    --grid concordance_tolerance=0.01,0.001 --grid binding=ordered,random
+    --grid cv_threshold=0.01,0.03 --grid binding=ordered,random
 ```
 
 Every combination is a full run in its own subdirectory, and `summary.csv` has one row per
@@ -192,7 +193,7 @@ In Python:
 
 ```python
 summary = cj.sweep("iJR904.xml", "sweep_iJR904",
-                   {"concordance_tolerance": [0.01, 0.001], "binding": ["ordered", "random"]},
+                   {"cv_threshold": [0.01, 0.03], "binding": ["ordered", "random"]},
                    workers=31)
 summary.to_pandas()
 ```

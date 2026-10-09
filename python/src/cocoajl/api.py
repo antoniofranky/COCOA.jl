@@ -29,7 +29,8 @@ PREPROCESS_PARAMS: dict[str, Any] = dict(
 CONCORDANCE_PARAMS: dict[str, Any] = dict(
     sample_size=5000,            # flux samples for the CV pre-filter
     cv_threshold=0.01,           # pairs whose sampled ratio varies more are not LP-tested
-    concordance_tolerance=0.01,  # max spread of the activity ratio for "concordant"
+    concordance_rtol=1e-5,       # max relative spread of the activity ratio for "concordant"
+    concordance_tolerance=1e-9,  # absolute part of that rule, for ratios at zero
     balanced_threshold=1e-7,     # activity range below which a complex counts as balanced
     seed=42,                     # sampling seed
     use_transitivity=True,       # skip pairs whose verdict follows from earlier ones
@@ -262,7 +263,7 @@ def _fmt(v) -> str:
 
 
 def run_label(params: Mapping[str, Any]) -> str:
-    """Directory name of a sweep combination, e.g. ``concordance_tolerance=0.001__binding=random``."""
+    """Directory name of a sweep combination, e.g. ``cv_threshold=0.03__binding=random``."""
     return "__".join(f"{k}={_fmt(v)}" for k, v in params.items()) or "default"
 
 
