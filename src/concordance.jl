@@ -35,11 +35,12 @@ MutableCounts() = MutableCounts(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 Decision rule for one pair: the activity ratio's minimum `lo` and maximum `hi` over the
 steady states agree if `|hi - lo| <= rtol * max(|hi|, |lo|) + atol`.
 
-`activity_concordance_analysis` uses `atol = concordance_tolerance` (0.01, as in the
-reference implementation) and `rtol = concordance_rtol` (0 by default). With a relative
-part the verdict does not depend on the scale of the ratio or on which complex of the pair
-is the reference (λ and 1/λ have the same relative spread to first order); a purely
-absolute rule is lax for small ratios and strict for large ones.
+`activity_concordance_analysis` uses `rtol = concordance_rtol` (1e-5) and
+`atol = concordance_tolerance` (1e-9, only for ratios at zero). The relative part makes
+the verdict independent of the scale of the ratio and of which complex of the pair is the
+reference (λ and 1/λ have the same relative spread to first order). The purely absolute
+rule used until v1.2 (0.01, from the reference implementation) is lax for small ratios: a
+pair whose ratio ranges over [0.0080, 0.0086], or even [0, 0.0058], passes it.
 """
 struct ConcordanceTolerance
     rtol::Float64
@@ -558,15 +559,18 @@ results = activity_concordance_analysis(
 ```
 
 ## Analysis Parameters
-- `concordance_tolerance::Float64=0.01`: absolute tolerance of the concordance decision, as
-  in the reference implementation. A pair is concordant if the minimum `lo` and maximum `hi`
-  of its activity ratio satisfy
-  `|hi - lo| <= concordance_tolerance + concordance_rtol * max(|hi|, |lo|)`.
-- `concordance_rtol::Float64=0.0`: optional relative part of that rule. With
-  `concordance_rtol > 0` (and a small `concordance_tolerance`) the decision no longer depends
-  on the scale of the ratio or on which complex is the reference; an absolute tolerance
-  merges small ratios more readily (a spread of 0.23 % at λ = 0.008 passes 0.01) and large
-  ones less. Off by default to keep the established definition.
+- `concordance_rtol::Float64=1e-5`: relative tolerance of the concordance decision. A pair
+  is concordant if the minimum `lo` and maximum `hi` of its activity ratio satisfy
+  `|hi - lo| <= concordance_rtol * max(|hi|, |lo|) + concordance_tolerance`.
+  Concordance is an exact property (the ratio is constant over all steady states); the
+  tolerance only absorbs solver error. On yeast GEMs the relative spread of truly
+  concordant pairs is <= 1e-10 and that of non-concordant pairs >= 2e-3, so 1e-5 sits
+  orders of magnitude away from both.
+- `concordance_tolerance::Float64=1e-9`: absolute part of that rule, for ratios at zero.
+  Until v1.2 this was the whole rule, at 0.01 (the reference implementation's
+  `round(·, 2)`). Being absolute, it accepted small ratios that are not constant, e.g. a
+  ratio ranging over [0.0080, 0.0086]. `concordance_tolerance=0.01, concordance_rtol=0`
+  restores it.
 - `cc_scale_bound::Float64=Inf`: upper bound on the Charnes–Cooper scaling variable t of
   the pair LPs. The textbook transformation has none (t ≥ 0 only), and none is needed: the
   activity ratio does not depend on the scale of the steady state. A finite bound cuts off
@@ -638,8 +642,8 @@ function activity_concordance_analysis(
     objective_bound=nothing,
     workers=D.workers(),
     balanced_threshold::Float64=1e-7,
-    concordance_tolerance::Float64=0.01,
-    concordance_rtol::Float64=0.0,
+    concordance_tolerance::Float64=1e-9,
+    concordance_rtol::Float64=1e-5,
     cv_threshold::Float64=0.01,
     cv_epsilon::Float64=1e-16,
     sample_zero_tol::Union{Nothing,Float64}=nothing,
@@ -1750,8 +1754,8 @@ function process_concordance_batch(
                 # silently recorded as "not concordant" — 927 pairs on one yeast model.
                 #
                 # Using the value is sound: ALMOST_OPTIMAL means optimal up to relaxed
-                # tolerances (~1e-6 at worst) while the decision it feeds is
-                # |min - max| > concordance_tolerance = 1e-2, four orders coarser.
+                # tolerances (~1e-6 at worst) while the decision it feeds is a relative
+                # spread > concordance_rtol = 1e-5, an order coarser.
                 #
                 # What remains NaN here is diagnosed and counted, not logged: a solve
                 # that still reports success without a feasible point after recovery is

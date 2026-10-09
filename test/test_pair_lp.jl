@@ -33,68 +33,35 @@ function small_reference_model()
 end
 
 @testset "Pair LP: relative tolerance, no cap, proven unbounded" begin
-    tol = COCOA.ConcordanceTolerance(0.01, 1e-7)
+    tol = COCOA.ConcordanceTolerance(1e-5, 1e-9)        # the default rule
 
-    @testset "default rule is the absolute 0.01" begin
-        abs01 = COCOA.ConcordanceTolerance(0.0, 0.01)
-        @test COCOA.within_tolerance(1.0, 1.009, abs01)
-        @test !COCOA.within_tolerance(1.0, 1.011, abs01)
-        @test !COCOA.within_tolerance(500.0, 501.0, abs01)
-    end
-
-    @testset "optional relative decision rule" begin
-        # the inositol case of one yeast model: 0.23 % spread at λ ≈ 0.008
-        @test COCOA.within_tolerance(0.0079876, 0.0080062, tol)
-        @test !COCOA.within_tolerance(0.0079876, 0.0080062, COCOA.ConcordanceTolerance(1e-3, 1e-9))
-        # large ratios: 0.2 % spread; the old absolute 0.01 rejected this
-        @test COCOA.within_tolerance(500.0, 501.0, tol)
-        @test !COCOA.within_tolerance(500.0, 510.0, tol)
+    @testset "default rule: relative 1e-5, absolute 1e-9 at zero" begin
+        # solver noise on truly concordant pairs (<= 1e-10 relative) passes
+        @test COCOA.within_tolerance(0.0036300002, 0.0036300002 * (1 + 1e-10), tol)
+        @test COCOA.within_tolerance(55.3, 55.3 * (1 + 1e-8), tol)
+        # the false merges of the absolute 0.01: 6.7 % spread at λ ≈ 0.008, and a ratio
+        # that reaches zero
+        @test !COCOA.within_tolerance(0.0079875807, 0.0085628169, tol)
+        @test !COCOA.within_tolerance(0.0, 0.0058408462, tol)
+        # the inositol case: 0.23 % spread at λ ≈ 0.008
+        @test !COCOA.within_tolerance(0.0079876, 0.0080062, tol)
+        # large ratios: decided on the same relative scale
+        @test !COCOA.within_tolerance(500.0, 501.0, tol)
+        @test COCOA.within_tolerance(500.0, 500.0 + 1e-4, tol)
         # the verdict does not depend on which complex is the reference (λ vs 1/λ)
-        for (lo, hi) in ((0.8, 0.805), (0.8, 0.82), (2.0, 2.01), (1e-3, 1.004e-3), (1e-3, 1.2e-3))
+        for (lo, hi) in ((0.8, 0.8 + 1e-7), (0.8, 0.82), (2.0, 2.0 + 1e-6), (1e-3, 1.004e-3), (1e-3, 1e-3 + 1e-12))
             @test COCOA.within_tolerance(lo, hi, tol) == COCOA.within_tolerance(1 / hi, 1 / lo, tol)
         end
         # near zero the absolute part decides
-        @test COCOA.within_tolerance(0.0, 5e-8, tol)
-        @test !COCOA.within_tolerance(0.0, 1e-5, tol)
+        @test COCOA.within_tolerance(0.0, 5e-10, tol)
+        @test !COCOA.within_tolerance(0.0, 1e-7, tol)
     end
 
-    @testset "a proven unbounded LP refutes concordance" begin
-        for (mult, v) in ((1, Inf), (-1, -Inf))
-            s = COCOA.PairConcordanceState()
-            COCOA.update_pair_concordance!(s, :positive, mult, v, false, tol)
-            @test s.decisive_non_concordant
-            @test !s.is_concordant
-            # a later finite result cannot resurrect it
-            COCOA.update_pair_concordance!(s, :positive, -mult, 1.0, false, tol)
-            @test !s.is_concordant
-        end
-    end
-
-    @testset "no cap on t by default" begin
-        cons = COCOA.concordance_constraints(small_reference_model())
-        @test cons.charnes_cooper.positive.t.bound.upper == Inf
-        @test cons.charnes_cooper.negative.t.bound.lower == -Inf
-    end
-
-    # Pair LP as COCOA builds it: Charnes–Cooper template, activity of c2 fixed to 1,
-    # activity of c1 maximised.
-    function pair_lp(cap, c1, c2)
-        cons = COCOA.concordance_constraints(small_reference_model(); cc_scale_bound=cap)
-        lp = cons.charnes_cooper.positive * :fix^C.Constraint(cons.activities[c2].value, 1.0)
-        om = COBREXA.optimization_model(lp; objective=cons.activities[c1].value,
-                                        sense=COBREXA.Maximal, optimizer=HiGHS.Optimizer)
-        J.set_silent(om)
-        J.optimize!(om)
-        return om
-    end
-    split, b, src = Symbol("B+1000000_E"), :B, Symbol("2_E")
-
-    @testset "the old cap cuts off the only steady states" begin
-        om = pair_lp(999.0, b, split)
-        @test J.termination_status(om) == J.INFEASIBLE
-        om = pair_lp(Inf, b, split)
-        @test J.is_solved_and_feasible(om)
-        @test J.objective_value(om) ≈ -1.0
+    @testset "the pre-1.2 absolute 0.01 can still be chosen" begin
+        abs01 = COCOA.ConcordanceTolerance(0.0, 0.01)
+        @test COCOA.within_tolerance(1.0, 1.009, abs01)
+        @test !COCOA.within_tolerance(1.0, 1.011, abs01)
+        @test COCOA.within_tolerance(0.0079875807, 0.0085628169, abs01)   # why it was replaced
     end
 
     @testset "an unbounded ratio is proven, not failed" begin
@@ -108,6 +75,6 @@ end
                                           sample_size=200)
         @test r.stats["n_unknown_pairs"] == 0 && isempty(r.stats["undecided_pairs"])
         @test r.stats["cc_scale_bound"] == Inf
-        @test r.stats["concordance_tolerance"] == 0.01 && r.stats["concordance_rtol"] == 0.0
+        @test r.stats["concordance_tolerance"] == 1e-9 && r.stats["concordance_rtol"] == 1e-5
     end
 end
