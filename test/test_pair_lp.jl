@@ -64,6 +64,45 @@ end
         @test COCOA.within_tolerance(0.0079875807, 0.0085628169, abs01)   # why it was replaced
     end
 
+    @testset "a proven unbounded LP refutes concordance" begin
+        for (mult, v) in ((1, Inf), (-1, -Inf))
+            s = COCOA.PairConcordanceState()
+            COCOA.update_pair_concordance!(s, :positive, mult, v, false, tol)
+            @test s.decisive_non_concordant
+            @test !s.is_concordant
+            # a later finite result cannot resurrect it
+            COCOA.update_pair_concordance!(s, :positive, -mult, 1.0, false, tol)
+            @test !s.is_concordant
+        end
+    end
+
+    @testset "no cap on t by default" begin
+        cons = COCOA.concordance_constraints(small_reference_model())
+        @test cons.charnes_cooper.positive.t.bound.upper == Inf
+        @test cons.charnes_cooper.negative.t.bound.lower == -Inf
+    end
+
+    # Pair LP as COCOA builds it: Charnes–Cooper template, activity of c2 fixed to 1,
+    # activity of c1 maximised.
+    function pair_lp(cap, c1, c2)
+        cons = COCOA.concordance_constraints(small_reference_model(); cc_scale_bound=cap)
+        lp = cons.charnes_cooper.positive * :fix^C.Constraint(cons.activities[c2].value, 1.0)
+        om = COBREXA.optimization_model(lp; objective=cons.activities[c1].value,
+                                        sense=COBREXA.Maximal, optimizer=HiGHS.Optimizer)
+        J.set_silent(om)
+        J.optimize!(om)
+        return om
+    end
+    split, b, src = Symbol("B+1000000_E"), :B, Symbol("2_E")
+
+    @testset "the old cap cuts off the only steady states" begin
+        om = pair_lp(999.0, b, split)
+        @test J.termination_status(om) == J.INFEASIBLE
+        om = pair_lp(Inf, b, split)
+        @test J.is_solved_and_feasible(om)
+        @test J.objective_value(om) ≈ -1.0
+    end
+
     @testset "an unbounded ratio is proven, not failed" begin
         om = pair_lp(Inf, src, split)          # the free source has no bound relative to v
         @test COCOA.proven_unbounded(om)
