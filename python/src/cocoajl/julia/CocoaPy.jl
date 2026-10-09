@@ -60,6 +60,36 @@ function _dedup!(d::AbstractDict, field::String)
     return n
 end
 
+# COBRA's `rules` field writes gene rules by index ("x(3) & x(7)"); MATFBCModels reads it
+# only as a stringy rule. Translate it via `genes`, or drop it when there is no gene list
+# (as in the application note's elementary-step models). Concordance does not use genes.
+function _mat_rules!(d::AbstractDict)
+    haskey(d, "rules") && !haskey(d, "grRules") || return d
+    if !haskey(d, "genes")
+        delete!(d, "rules")
+        return d
+    end
+    genes = vec(d["genes"])
+    tr(r) = r isa AbstractString ?
+        replace(r, r"x\((\d+)\)" => m -> genes[parse(Int, m[3:end-1])], "&" => "and", "|" => "or") : r
+    d["grRules"] = map(tr, d["rules"])
+    delete!(d, "rules")
+    return d
+end
+
+# MATFBCModels requires some fields that minimal COBRA structs (e.g. the application note's
+# elementary-step models) do not have; fill them with "unknown".
+function _mat_optional_fields!(d::AbstractDict)
+    nm = length(d["mets"])
+    haskey(d, "genes") || (d["genes"] = Matrix{Any}(undef, 0, 1))
+    any(haskey(d, k) for k in ("metFormula", "metFormulas")) || (d["metFormulas"] = fill("", nm, 1))
+    any(haskey(d, k) for k in ("metCharge", "metCharges")) || (d["metCharges"] = fill(NaN, nm, 1))
+    haskey(d, "metNames") || (d["metNames"] = copy(d["mets"]))
+    haskey(d, "rxnNames") || (d["rxnNames"] = copy(d["rxns"]))
+    haskey(d, "b") || (d["b"] = zeros(nm, 1))
+    return d
+end
+
 """
 Load a model as an `AbstractFBCModels.CanonicalModel.Model`.
 
@@ -73,11 +103,31 @@ function load_model(path::String; mat_key::Union{Nothing,String}=nothing)
     ext = lowercase(splitext(path)[2])
     m = if ext == ".mat"
         f = MATFBCModels.MAT.matopen(path)
-        keys_ = collect(keys(f))
-        key = something(mat_key, length(keys_) == 1 ? only(keys_) :
-            error("$path holds several models ($(join(keys_, ", "))); choose one with mat_key"))
-        d = MATFBCModels.MAT.read(f, key)
+        d = if mat_key === nothing
+            # a .mat file is a MATLAB workspace: keep the variables that are COBRA models
+            models = Dict{String,Any}()
+            for k in keys(f)
+                v = MATFBCModels.MAT.read(f, k)
+                v isa AbstractDict && haskey(v, "S") && haskey(v, "rxns") && (models[k] = v)
+            end
+            isempty(models) && error("$path holds no COBRA model (a struct with S and rxns)")
+            if length(models) > 1
+                MATFBCModels.MAT.close(f)
+                list = join(("$k ($(length(models[k]["rxns"])) reactions)" for k in sort(collect(keys(models)))), ", ")
+                error("$path holds several models: $list. Choose one with mat_key " *
+                      "(CLI: --mat-key NAME)")
+            end
+            mat_key = only(keys(models))
+            only(values(models))
+        else
+            haskey(f, mat_key) || error("$path has no variable '$mat_key' " *
+                                        "(variables: $(join(sort(collect(keys(f))), ", ")))")
+            MATFBCModels.MAT.read(f, mat_key)
+        end
         MATFBCModels.MAT.close(f)
+        key = mat_key
+        _mat_rules!(d)
+        _mat_optional_fields!(d)
         _dedup!(d, "rxns")
         _dedup!(d, "rxnNames")
         MATFBCModels.MATFBCModel(key, d)
