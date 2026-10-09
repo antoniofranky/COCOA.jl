@@ -27,6 +27,14 @@ function reported_success_without_point(om)
 end
 
 """
+True if the last solve PROVED the LP unbounded: dual infeasible, with an unbounded ray as
+certificate. Only this counts; a bare DUAL_INFEASIBLE / INFEASIBLE_OR_UNBOUNDED without a
+ray is treated as a failure.
+"""
+proven_unbounded(om) = J.termination_status(om) == J.DUAL_INFEASIBLE &&
+                       J.primal_status(om) == J.INFEASIBILITY_CERTIFICATE
+
+"""
 Set a HiGHS string option directly on the backend.
 
 Deliberately NOT `J.set_attribute`: JuMP marks the model dirty on any attribute change,

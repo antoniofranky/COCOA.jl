@@ -472,3 +472,9 @@ include("test_reproducibility.jl")
 
 # Three-way pair verdict: a failed LP must not be recorded as "not concordant".
 include("test_unknown_verdict.jl")
+
+# Ratio-CV pre-filter on full-precision samples (no rounding, explicit zero tolerance).
+include("test_sample_cv.jl")
+
+# Pair LP: relative tolerance, no Charnes–Cooper cap, proven-unbounded verdict.
+include("test_pair_lp.jl")

@@ -120,6 +120,7 @@ mutable struct StreamingCandidateFilter
     # CV filtering parameters
     cv_threshold::Float64
     cv_epsilon::Float64
+    zero_tol::Float64      # sampled activities at or below this count as zero
     min_valid_samples::Int
 
     # Computation state (reused with reset support)
@@ -174,6 +175,7 @@ function StreamingCandidateFilter(
     concordance_tracker::ConcordanceTracker;
     cv_threshold::Float64=0.01,
     cv_epsilon::Float64=1e-16,
+    zero_tol::Float64=1e-7,
     min_valid_samples::Int=10,
     use_transitivity::Bool=true,
     inherit_non_concordance::Bool=true
@@ -194,7 +196,7 @@ function StreamingCandidateFilter(
         trivial_pairs,
         samples_tree,
         concordance_tracker,
-        cv_threshold, cv_epsilon, min_valid_samples,
+        cv_threshold, cv_epsilon, zero_tol, min_valid_samples,
         CVStat(),
         concordance_tracker.idx_to_id,
         # CV block cache: empty, sized so one block is a few MB regardless of model size
@@ -277,8 +279,26 @@ end
 Compute the coefficient of variation of the activity ratio of one pair directly from the
 samples. Pure: reads only the sample vectors, touches no filter state, so it is safe to
 call from several threads at once.
+
+The samples are used at full precision. A sample in which BOTH activities are below
+`zero_tol` (both complexes inactive) carries no information about the ratio and is
+skipped; a ratio that is not finite (denominator exactly 0) is skipped as well. Everything
+else enters as the plain ratio `a / b`.
+
+Two earlier devices are gone, both of which distorted exact ratios:
+- the samples used to be rounded to `-floor(log10(cv_threshold)) + 1` decimals (0.001 at
+  the default). For a complex whose activity is a few thousandths of the flux scale that is
+  an error of several percent per sample: exactly constant ratios showed CVs of 0.02-0.06
+  and the pairs were discarded without an LP (four growth-coupled uptake complexes of one
+  yeast model were left in no concordance module this way);
+- the ratio was `(a + ε) / (b + ε)` with ε = 1e-16, which turns a sample where both are
+  zero into a ratio of 1 instead of skipping it.
+
+Returns `(cv, k)` with `k` the number of samples used; `cv = Inf` if fewer than two remain
+or the mean ratio is below `mean_tol` in magnitude.
 """
-function _pair_cv(c1_samples, c2_samples, epsilon::Float64)::Tuple{Float64,Int}
+function _pair_cv(c1_samples, c2_samples, zero_tol::Float64;
+                  mean_tol::Float64=1e-16)::Tuple{Float64,Int}
     n_samples = min(length(c1_samples), length(c2_samples))
     n_samples < 2 && return (Inf, n_samples)
     mean = 0.0
@@ -288,7 +308,8 @@ function _pair_cv(c1_samples, c2_samples, epsilon::Float64)::Tuple{Float64,Int}
         a = c1_samples[t]
         b = c2_samples[t]
         (ismissing(a) || ismissing(b)) && continue
-        ratio = (a + epsilon) / (b + epsilon)
+        abs(a) <= zero_tol && abs(b) <= zero_tol && continue
+        ratio = Float64(a) / Float64(b)
         isfinite(ratio) || continue
         k += 1
         delta = ratio - mean
@@ -297,7 +318,7 @@ function _pair_cv(c1_samples, c2_samples, epsilon::Float64)::Tuple{Float64,Int}
     end
     k < 2 && return (Inf, k)
     sd = sqrt(m2 / (k - 1))
-    return (abs(mean) < epsilon ? Inf : sd / abs(mean), k)
+    return (abs(mean) < mean_tol ? Inf : sd / abs(mean), k)
 end
 
 """
@@ -331,6 +352,7 @@ function fill_cv_block!(filter::StreamingCandidateFilter, i0::Int, j0::Int)
     idx_to_id = filter.idx_to_id
     samples = filter.samples_tree
     eps = filter.cv_epsilon
+    ztol = filter.zero_tol
     cvs = filter.cv_block_cv
     ns = filter.cv_block_n
 
@@ -349,7 +371,7 @@ function fill_cv_block!(filter::StreamingCandidateFilter, i0::Int, j0::Int)
                     cvs[t] = Float32(Inf); ns[t] = UInt16(0)
                     continue
                 end
-                cv, k = _pair_cv(s1, s2, eps)
+                cv, k = _pair_cv(s1, s2, ztol; mean_tol=eps)
                 cvs[t] = Float32(cv)
                 ns[t] = UInt16(min(k, typemax(UInt16)))
             end

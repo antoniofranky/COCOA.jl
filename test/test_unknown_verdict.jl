@@ -21,7 +21,7 @@ using HiGHS
 using COBREXA
 import SparseArrays
 
-const _CT = 1e-2   # concordance tolerance used throughout these tests
+const _CT = COCOA.ConcordanceTolerance(0.0, 1e-2)   # the pre-1.2 rule: absolute 0.01
 
 # Feed the four solver results of one pair in the order the batch produces them:
 # (positive, MIN), (positive, MAX), (negative, MIN), (negative, MAX).

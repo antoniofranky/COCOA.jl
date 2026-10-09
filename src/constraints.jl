@@ -123,7 +123,7 @@ function concordance_constraints(
     return_complexes::Bool=false,
     interface=nothing,
     use_unidirectional_constraints::Bool=false,
-    cc_scale_bound::Float64=999.0,
+    cc_scale_bound::Float64=Inf,
 )
     # TODO: Apply modifications correctly COBREXA style (not implemented yet)
     if use_unidirectional_constraints
@@ -168,7 +168,7 @@ Create a Charnes-Cooper template for a specific direction with balance constrain
 function create_charnes_cooper_template(
     base_constraints::C.ConstraintTree,
     direction::Symbol;
-    scale_bound::Float64=999.0
+    scale_bound::Float64=Inf
 )
     # Start with a copy of base constraints (includes stoichiometry, etc.)
     template_constraints = deepcopy(base_constraints)
@@ -182,9 +182,10 @@ function create_charnes_cooper_template(
     #
     # A hard cap therefore CUTS OFF steady states instead of regularising anything — with
     # the historical cap of 999, any steady state whose reference activity is below about
-    # 1e-3 becomes unreachable and the LP reports infeasible although the state exists.
-    # `scale_bound` is exposed so the effect can be measured rather than assumed; the
-    # default reproduces the historical behaviour exactly.
+    # 1e-3 of the flux scale becomes unreachable and the LP reports infeasible although the
+    # state exists. The default is therefore no cap (t ≥ 0 only, the textbook form); an
+    # LP that is then unbounded proves the ratio unbounded, which refutes concordance.
+    # `scale_bound` stays as an override for comparisons with the reference.
     if direction == :positive
         template_constraints += :t^C.variable(bound=C.Between(0, scale_bound))
     else # direction == :negative
