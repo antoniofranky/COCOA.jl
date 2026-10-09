@@ -138,14 +138,23 @@ function load_model(path::String; mat_key::Union{Nothing,String}=nothing)
     else
         error("unknown model format '$ext' (expected .xml, .sbml, .json or .mat)")
     end
-    return convert(A.CanonicalModel.Model, m)
+    return _sbml_safe_ids!(convert(A.CanonicalModel.Model, m))
 end
 
-# SBMLFBCModels prefixes metabolite ids with M_ on writing. Doing it before the analysis
-# makes the in-memory model, the saved SBML and the complex ids in the results identical.
+# SBMLFBCModels prefixes metabolite ids with M_ (reactions with R_) on writing, and SBML ids
+# allow only [A-Za-z0-9_]. Doing both at load makes the in-memory model, the saved SBML and
+# the ids in the results identical; other characters are escaped as in the yeast GEMs
+# ("[c]" -> "__91__c__93__").
+_sid_escape(id::AbstractString) =
+    replace(id, r"[^A-Za-z0-9_]" => c -> "__$(Int(only(c)))__")   # "[c]" -> "__91__c__93__"
+
 function _sbml_safe_ids!(model::A.CanonicalModel.Model)
-    ren = Dict(id => "M_" * id for id in keys(model.metabolites) if !startswith(id, "M_"))
-    isempty(ren) && return model
+    ren = Dict{String,String}()
+    for id in keys(model.metabolites)
+        new = _sid_escape(id)
+        startswith(new, "M_") || (new = "M_" * new)
+        new == id || (ren[id] = new)
+    end
     for (old, new) in ren
         model.metabolites[new] = pop!(model.metabolites, old)
     end
@@ -153,6 +162,13 @@ function _sbml_safe_ids!(model::A.CanonicalModel.Model)
         for old in collect(keys(rxn.stoichiometry))
             haskey(ren, old) && (rxn.stoichiometry[ren[old]] = pop!(rxn.stoichiometry, old))
         end
+    end
+    # reactions get R_ for the same reason; the writer would add it to the reaction but not
+    # to the objective's reference, leaving a file that does not load
+    for id in collect(keys(model.reactions))
+        new = _sid_escape(id)
+        startswith(new, "R_") || (new = "R_" * new)
+        new == id || (model.reactions[new] = pop!(model.reactions, id))
     end
     return model
 end
