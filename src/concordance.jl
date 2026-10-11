@@ -685,19 +685,7 @@ function activity_concordance_analysis(
 
         if !isnothing(objective_flux)
             @info "Objective flux determined" objective_flux
-            # Add objective bound constraint to limit feasible space (COBREXA way with *)
-            constraints.balance *= :objective_bound^C.Constraint(
-                constraints.balance.objective.value,
-                objective_bound(objective_flux)
-            )
-            constraints.charnes_cooper.positive *= :objective_bound^C.Constraint(
-                constraints.charnes_cooper.positive.objective.value,
-                objective_bound(objective_flux)
-            )
-            constraints.charnes_cooper.negative *= :objective_bound^C.Constraint(
-                constraints.charnes_cooper.negative.objective.value,
-                objective_bound(objective_flux)
-            )
+            add_objective_bound!(constraints, objective_bound(objective_flux))
             @info "Added objective bound constraint" optimal_value = objective_flux bound_value = objective_bound(objective_flux)
         else
             @warn "Could not determine optimal objective value, skipping objective bound"
