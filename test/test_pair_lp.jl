@@ -1,6 +1,7 @@
 # Guardrails for the pair LP and its verdict (v1.2):
-#   - the decision rule |hi - lo| <= atol + rtol * max(|hi|, |lo|); the default is the
-#     established absolute 0.01, the relative part is optional;
+#   - the decision rule |hi - lo| <= atol + rtol * max(|hi|, |lo|), by default relative
+#     1e-5 with an absolute 1e-9 at zero (the old absolute 0.01 stays selectable);
+#   - a growth bound is scaled by t like the flux bounds;
 #   - the Charnes–Cooper variable t has no upper bound (the old cap of 999 cut off steady
 #     states in which the reference activity is small relative to the fluxes);
 #   - a pair LP that is PROVEN unbounded refutes concordance instead of failing.
@@ -115,5 +116,29 @@ end
         @test r.stats["n_unknown_pairs"] == 0 && isempty(r.stats["undecided_pairs"])
         @test r.stats["cc_scale_bound"] == Inf
         @test r.stats["concordance_tolerance"] == 1e-9 && r.stats["concordance_rtol"] == 1e-5
+    end
+end
+
+# The growth bound in the pair LPs. In w = t·v the bound has to be scaled by t like every
+# flux bound; before 1.2 it bounded obj(w) itself, i.e. obj(v) = obj(w)/t, which depends on
+# the normalisation. With outB as objective the optimum is 1e-3 (outE ≤ 1000 allows a split
+# of at most 1e-3); fixing the activity of "B + 1e6 E" to 1 gives t = 1000 and
+# obj(w) = 1 ≠ 1e-3, so the unscaled bound made the LP infeasible.
+@testset "Pair LP: growth bound scaled by t" begin
+    m = small_reference_model()
+    m.reactions["outB"].objective_coefficient = 1.0
+    split, b = Symbol("B+1000000_E"), :B
+    for (direction, fixed, act) in ((:positive, split, 1.0), (:negative, b, 1.0))
+        cons = COCOA.concordance_constraints(m)
+        opt = COBREXA.optimized_values(cons.balance; objective=cons.balance.objective.value,
+                                       output=cons.balance.objective, optimizer=HiGHS.Optimizer)
+        @test opt ≈ 1e-3
+        COCOA.add_objective_bound!(cons, C.Between(opt, opt))     # growth at the optimum
+        lp = getproperty(cons.charnes_cooper, direction) *
+             :fix^C.Constraint(cons.activities[fixed].value, act)
+        res = COBREXA.optimized_values(lp; objective=lp.objective.value, output=lp,
+                                       optimizer=HiGHS.Optimizer)
+        @test res !== nothing                                     # infeasible before 1.2
+        @test res.objective / res.t ≈ opt                          # obj(v) = obj(w)/t
     end
 end

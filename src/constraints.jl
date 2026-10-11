@@ -110,11 +110,8 @@ obj_flux = COBREXA.optimized_values(
     output=constraints.balance.objective,
     optimizer=HiGHS.Optimizer
 )
-constraints.balance *= :objective_bound^COBREXA.C.Constraint(
-    constraints.balance.objective.value,
-    COBREXA.relative_tolerance_bound(0.999)(obj_flux)
-)
-# Now pass modified constraints to analysis...
+# bound growth in the balance constraints and (scaled by t) in the Charnes-Cooper templates
+COCOA.add_objective_bound!(constraints, COBREXA.relative_tolerance_bound(0.999)(obj_flux))
 ```
 """
 function concordance_constraints(
@@ -209,6 +206,29 @@ function create_charnes_cooper_template(
     end
 
     return template_constraints
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Hold the objective within `bound` (e.g. `COBREXA.relative_tolerance_bound(0.999)(optimum)`)
+in the balance constraints and in both Charnes-Cooper templates of `constraints`.
+
+The templates work in w = t·v, where every flux bound is multiplied by t; the objective
+bound is too: lo·t ≤ obj(w) ≤ hi·t for t > 0 (reversed for t < 0). Bounding obj(w) itself,
+as before 1.2, holds obj(v) = obj(w)/t, which depends on the normalisation of the pair LP
+(t = 1 / reference activity) instead of on growth: the pair LPs then searched the wrong set
+of steady states and were mostly infeasible.
+"""
+function add_objective_bound!(constraints::C.ConstraintTree, bound)
+    constraints.balance *= :objective_bound^C.Constraint(constraints.balance.objective.value, bound)
+    for direction in (:positive, :negative)
+        cc = getproperty(constraints.charnes_cooper, direction)
+        scaled = apply_charnes_cooper_scaling_to_constraint(
+            C.Constraint(cc.objective.value, bound), cc.t.value, direction)
+        setproperty!(constraints.charnes_cooper, direction, cc * :objective_bound^scaled)
+    end
+    return constraints
 end
 
 """
