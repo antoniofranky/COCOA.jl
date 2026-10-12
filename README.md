@@ -71,13 +71,14 @@ results = activity_concordance_analysis(
     optimizer=HiGHS.Optimizer,
 
     # Objective constraint: `nothing` (the default) analyses the full steady-state
-    # cone. Restricting flux to a near-optimal face, e.g.
-    # `COBREXA.relative_tolerance_bound(0.999)`, yields a thin, ill-conditioned
-    # polytope on which the concordance partition becomes seed-dependent.
+    # cone. `COBREXA.relative_tolerance_bound(0.99)` restricts it to steady states with
+    # growth >= 99 % of the optimum. (Before v1.2 this bound was applied unscaled in the
+    # pair LPs, which made such runs unreliable; see the CHANGELOG.)
     objective_bound=nothing,
 
     # Analysis parameters (values shown are the defaults)
-    concordance_tolerance=0.01,      # Tolerance for concordance detection
+    concordance_rtol=1e-5,           # concordant if |max - min| <= rtol*max(|max|,|min|)
+    concordance_tolerance=1e-9,      #   + this absolute tolerance (for ratios near 0)
     balanced_threshold=1e-7,         # Threshold for balanced complexes
     cv_threshold=0.01,               # Coefficient of variation filtering
 
